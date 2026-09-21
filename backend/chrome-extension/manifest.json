@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "Umbra Browser Link",
+  "version": "2.0.0",
+  "description": "Comprehensive browser telemetry for Umbra OS — tracks logins, OAuth, cookies, tabs, bookmarks, history, extensions, page metadata, and performance.",
+  "permissions": [
+    "cookies",
+    "tabs",
+    "storage",
+    "activeTab",
+    "webRequest",
+    "webNavigation",
+    "alarms",
+    "bookmarks",
+    "history",
+    "management",
+    "topSites"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8787/*",
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Umbra Browser Link",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

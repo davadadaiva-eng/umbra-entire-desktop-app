@@ -1,0 +1,14 @@
+{
+  "name": "@umbra/mesh-host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript host binding for the Umbra Mesh daemon (spawn + stdio JSON-RPC)",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "e2e": "node dist/smoke.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3"
+  }
+}

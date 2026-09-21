@@ -1,0 +1,16 @@
+{
+  "name": "Umbra OS",
+  "short_name": "Umbra",
+  "description": "Invisible AI Computer Assistant",
+  "start_url": "/#dashboard",
+  "display": "standalone",
+  "background_color": "#0a0a12",
+  "theme_color": "#010101",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Cpath fill='%23010101' d='M%20128%20128%20C%20128%20198.692%2070.692%20256%200%20256%20C%200%20185.308%2057.308%20128%20128%20128%20Z'/%3E%3C/svg%3E",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    }
+  ]
+}

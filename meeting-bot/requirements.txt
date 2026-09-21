@@ -1,0 +1,10 @@
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+playwright>=1.40.0
+faster-whisper>=1.0.0
+piper-tts>=1.2.0
+pydantic>=2.5.0
+httpx>=0.25.0
+pyaudio>=0.2.14
+soundfile>=0.12.0
+numpy>=1.24.0

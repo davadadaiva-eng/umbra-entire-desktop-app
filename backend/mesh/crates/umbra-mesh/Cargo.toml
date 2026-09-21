@@ -1,0 +1,25 @@
+[package]
+name = "umbra-mesh"
+version.workspace = true
+edition.workspace = true
+description = "Umbra Mesh core library: crypto identity, zero-knowledge pairing, P2P networking, streaming and swarm delegation"
+
+[dependencies]
+base64 = "0.22"
+ed25519-dalek = "2"
+hkdf = "0.12"
+keyring = "3"
+local-ip-address = "0.6"
+qrcode = "0.14"
+rand_core = { version = "0.6", features = ["getrandom"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tracing = "0.1"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[dev-dependencies]
+tempfile = "3"

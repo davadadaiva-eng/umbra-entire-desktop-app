@@ -1,0 +1,21 @@
+# Caddy auto-TLS reverse proxy for Umbra OS (see docs/cloud-deploy.md).
+#
+# Terminates TLS for both endpoints and upgrades WebSockets automatically:
+#   - https://<domain>/api/*  → REST + WS + MCP API (umbra:8787)
+#   - wss://<domain>/device-ws → DeviceHub device mesh (umbra:8788)
+#
+# Set UMBRA_DOMAIN to your real domain (Caddy then issues a Let's Encrypt
+# certificate automatically). With the localhost default it uses Caddy's
+# local CA for on-box testing.
+
+{$UMBRA_DOMAIN:localhost} {
+	encode gzip
+
+	# DeviceHub WebSocket — phones/desktops stay connected forever.
+	handle /device-ws {
+		reverse_proxy umbra:8788
+	}
+
+	# Everything else: REST + WS + MCP API.
+	reverse_proxy umbra:8787
+}

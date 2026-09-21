@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Build + test + lint (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck / build
+        run: npm run build
+
+      - name: Run tests
+        run: npm test
+
+      - name: Check docs match test totals
+        run: npm run check:docs
+
+      - name: Lint
+        run: npm run lint
+
+  # Agent task-success regression gate: boots Umbra headless (cloud role,
+  # auto-consent) and drives scripts/benchmark.js over the default fixtures.
+  # Requires the UMBRA_LLM_API_KEY repo secret (OpenAI) — the job is skipped
+  # when the secret is absent so forks/PRs without keys stay green.
+  benchmark:
+    name: Agent benchmark (task success gate)
+    runs-on: ubuntu-latest
+    if: secrets.UMBRA_LLM_API_KEY != ''
+    timeout-minutes: 45
+    env:
+      UMBRA_DATA_DIR: ${{ runner.temp }}/umbra-bench
+      UMBRA_HWID: ci-bench-01
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck / build
+        run: npm run build
+
+      - name: Configure LLM provider
+        run: npm run setup -- --provider openai --api-key "${{ secrets.UMBRA_LLM_API_KEY }}" --tier pro
+
+      - name: Boot Umbra headless and run benchmark gate
+        env:
+          UMBRA_HEADLESS: '1'
+          UMBRA_ROLE: cloud
+          UMBRA_CONSENT_AUTOGRANT: '1'
+        run: |
+          set -e
+          npx ts-node scripts/serve-headless.ts > /tmp/umbra-serve.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8787/api/health >/dev/null 2>&1; then
+              echo "API ready after $i polls"
+              break
+            fi
+            if ! kill -0 $SERVER_PID 2>/dev/null; then
+              echo 'Umbra server exited early:'; cat /tmp/umbra-serve.log
+              exit 1
+            fi
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:8787/api/health >/dev/null 2>&1 || {
+            echo 'API did not become ready'; cat /tmp/umbra-serve.log; exit 1;
+          }
+          npm run benchmark
+          node scripts/redteam.js --api http://127.0.0.1:8787

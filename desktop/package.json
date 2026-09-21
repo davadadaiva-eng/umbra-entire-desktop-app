@@ -1,0 +1,80 @@
+{
+  "name": "umbra-ui-desktop-app",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:watch": "vitest watch",
+    "lint": "oxlint",
+    "preview": "vite preview",
+    "desktop": "concurrently -k -s first \"vite\" \"wait-on http://localhost:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
+    "desktop:full": "npm run build:backend && npm run desktop",
+    "desktop:pack": "npm run build && electron-builder",
+    "build:backend": "cd ../backend && npm run build",
+    "dev:backend": "cd ../backend && npm run dev"
+  },
+  "build": {
+    "appId": "com.umbra.os",
+    "productName": "UmbraOS",
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.112.3",
+    "@types/three": "^0.185.1",
+    "border-beam": "^1.3.0",
+    "clsx": "^2.1.1",
+    "framer-motion": "^12.43.0",
+    "gsap": "^3.15.0",
+    "lucide-react": "^1.28.0",
+    "ogl": "^1.0.11",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "tailwind-merge": "^3.6.0",
+    "three": "^0.185.1",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@oxlint/binding-win32-x64-msvc": "^1.76.0",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@types/testing-library__jest-dom": "^5.14.9",
+    "@types/testing-library__react": "^10.0.1",
+    "@vitejs/plugin-react": "^6.0.4",
+    "autoprefixer": "^10.5.4",
+    "concurrently": "^10.0.4",
+    "cross-env": "^10.1.0",
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3",
+    "jsdom": "^30.0.1",
+    "oxlint": "^1.75.0",
+    "postcss": "^8.5.25",
+    "tailwindcss": "^3.4.19",
+    "typescript": "~6.0.2",
+    "vite": "^8.2.0",
+    "vitest": "^5.0.0",
+    "wait-on": "^9.1.0"
+  }
+}

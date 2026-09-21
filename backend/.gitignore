@@ -1,0 +1,27 @@
+node_modules/
+dist/
+.umbra/
+.venv/
+*.log
+.env
+.env.*
+temp.env
+*.db
+external/
+downloaded_files/
+__pycache__/
+mesh/target/
+mesh/.cargo/
+.freebuff/
+# whisper.cpp test artifacts (binaries + models, ~150MB)
+.whisper-test/
+
+# local LLM (llama.cpp binary + GGUF model)
+.local-model/
+
+# generated pairing QR
+pair-qr.png
+
+# user API keys (keep umbra-keys.example.json, ignore the real one)
+umbra-keys.json
+umbra-keys.env

@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/umbra-mesh", "crates/umbra-meshd"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Umbra Mesh"]
+description = "Umbra Mesh — P2P multi-device engine for Umbra OS"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"

@@ -1,0 +1,28 @@
+{
+  "//": "Copy this file to umbra-keys.json (git-ignored), fill in your keys, then run:",
+  "//2": "  npm run setup -- --keys-file ./umbra-keys.json",
+  "//3": "Keys are matched case-/separator-insensitively, so openRouterKey, OPENROUTER_API_KEY",
+  "//4": "and openrouter.apiKey are all equivalent. Nested objects flatten the same way.",
+  "//5": "A .env file (OPENROUTER_API_KEY=...) also works as the argument. Flags and real",
+  "//6": "environment variables always take precedence over this file.",
+
+  "provider": "openai-compatible",
+  "openRouterKey": "sk-or-v1-REPLACE_ME",
+  "tier": "pro",
+
+  "telnyx": {
+    "key": "KEY_REPLACE_ME",
+    "fromNumber": "+1234567890",
+    "messagingProfileId": "REPLACE_ME"
+  },
+
+  "stripe": {
+    "secretKey": "sk_test_REPLACE_ME",
+    "webhookSecret": "whsec_REPLACE_ME",
+    "pricePro": "price_REPLACE_ME",
+    "priceUltimate": "price_REPLACE_ME",
+    "priceEnterprise": "price_REPLACE_ME"
+  },
+
+  "publicUrl": "https://umbra.example.com"
+}

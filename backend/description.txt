@@ -1,0 +1,369 @@
+UMBRA OS — PROJECT DESCRIPTION
+===============================
+
+WHAT THIS IS
+------------
+Umbra OS is an invisible AI computer assistant for Windows. It watches what you
+do on your screen, learns from it, and can take over your computer to do things
+for you: browse the web, control real Windows applications, manage your files,
+work in your code repositories, produce videos, send messages, and more — all
+while you keep using your own desktop.
+
+It is a monorepo of TypeScript (Node.js) for the main system, a Rust crate for
+the encrypted P2P mesh, a bundled PWA for phone control, and Python helper
+scripts for the browser-use integration.
+
+CORE IDEA
+---------
+- Everything you do is read (screen OCR), filtered (privacy guard), stored
+  (recall memory with embeddings), and structured into a knowledge graph.
+- A task planner breaks your request into atomic steps (browse → click → type →
+  read → repo commands → videos). Every step can heal itself on failure.
+- A 100-skill "skill stack" (20 domains × 5 skills) routes intents to skill
+  definitions; an MCP registry dispatches external tools; a metering layer
+  gates every LLM call behind a plan tier, a circuit breaker, and token
+  accounting.
+- A Graphify/Caveman compression pipeline densifies huge context before LLM
+  calls (10,000 tokens → ~300 tokens with expandable cliques).
+
+TECH STACK
+----------
+- Node.js + TypeScript (strict), tsconfig under `tsconfig.json`
+- Jest (ts-jest) for tests — 496 tests across 57 suites passing / all green
+- oxlint for linting — zero issues
+- better-sqlite3 / sql.js / sqlite-vec for memory (vector search)
+- node-fetch-free: uses Node 18+ global fetch
+- Rust (cargo) in `mesh/` for the encrypted P2P mesh
+- Tesseract (local `eng.traineddata` auto-downloaded and cached in `~/.umbra/lang/`,
+  resumable) for OCR
+- PWA in `src/mobile/pwa/` for phone pairing/control
+- WebRTC (ws signaling) for device streaming
+
+DIRECTORY LAYOUT
+----------------
+- src/index.ts         — composition root: the UmbraOS class wires every subsystem
+- src/types.ts         — canonical config/task/knowledge types (zod-validated config)
+- src/config/          — ConfigManager; config lives at ~/.umbra/config.json
+- src/core/agent/      — AgentRuntime (step executor), TaskPlanner, LLMConnector,
+                         MeteredLLMConnector (circuit breaker + token metering),
+                         WorkspaceFiles, ReposManager, ConsentGate, ProactiveAgent
+- src/core/skill/      — SkillStack (100 skills), SkillRouter (intent scoring),
+                         SkillRecorder (learns hot skills), SkillCompiler
+- src/core/graphify/   — Caveman, Chunker, Clustering, GraphSummarizer,
+                         GraphifyContextEngine (compression pipeline)
+- src/core/mcp/        — McpRegistry, McpRouter, McpHttpConnector (vault-backed auth)
+- src/core/metering/   — MeteringService (tiers free/byok/pro/ultimate + circuits)
+- src/core/vault/      — AuditVault (tamper-evident log), CredentialVault (AES-256-GCM)
+- src/core/desktop2/   — Desktop2Environment (sandbox browser),
+                         RealDesktop2 (ghost mode: real apps + real user Chrome)
+- src/core/workspace/  — VirtualDisplayManager, SwarmManager, AgentDesktop, InputGuard
+- src/core/browseruse/ — BrowserUseBridge (fast "browser-use" engine)
+- src/core/video/      — VideoProducer (Remotion + OpenMontage tool registry)
+- src/core/vision/     — ScreenReader (OCR), ContentAnalyzer
+- src/core/recall/     — ActivityWatcher, MacroSynthesizer
+- src/core/shadow/     — LiveShadowEngine (watch + consent-gated takeover)
+- src/core/meeting/    — MeetingAgent (summaries, action items)
+- src/core/telco/      — TelnyxClient (SMS/voice)
+- src/core/docker/     — DockerDaemon (workers)
+- src/core/selfheal/   — SelfHealingGuard, src/core/audio (noise cancellation)
+- src/core/privacy/    — PrivacyGuard (blocks apps/URLs from recall)
+- src/knowledge/       — KnowledgeGraph, DeepUnderstandingEngine,
+                         RecallToKnowledgeBridge, journal (Journal/TopicIndexer)
+- src/mobile/          — PwaServer (QR pairing UI), PreviewStreamer (ws frames)
+- src/p2p/             — PairingManager, P2PConnectionManager, EncryptedChannel
+- src/native/win32/    — native I/O: mouse/keyboard, screen capture, virtual displays
+- src/api/             — ApiServer (REST + WS, status/consent/tasks)
+- src/overlay/         — CommandHUD (Ctrl+Shift+Space)
+- mesh/                — Rust mesh (umbra-mesh, umbra-meshd) + TS bindings
+- scripts/             — dev/test/diagnose helper scripts
+- docs/ui-contract.md  — API contract for UI clients
+
+HOW TO BUILD / TEST / RUN
+-------------------------
+    npm install          # install deps
+    npm run build        # tsc → dist/
+    npm test             # jest (496 tests today)
+    npm run lint         # oxlint
+
+Run requires either a local Ollama (free, default:
+`http://localhost:11434`, models set in ~/.umbra/config.json) or cloud keys
+(OpenAI/Anthropic/OpenAI-compatible) in config.
+
+    npm run dev          # ts-node src/index.ts  (live dev)
+    npm start            # node dist/index.js    (built)
+
+Environment variables:
+    UMBRA_ENGINE   browseruse (default) | desktop2 | ghost
+                   — ghost mode drives the REAL Windows desktop + user Chrome
+                   — used by the phone/PWA control plane too
+    UMBRA_HWID     credential-vault binding (default: local-machine)
+    USERPROFILE    base dir for ~/.umbra (config, recall DB, logs, vault)
+
+CONFIG (~/.umbra/config.json)
+-----------------------------
+Generated with sane defaults by ConfigManager on first run. Key sections
+(see src/types.ts UmbraConfig):
+    provider / models            — ollama | openai | anthropic | openai-compatible
+    plan.tier                    — free | byok | pro | ultimate (budget metering)
+    plan.routing                 — tiered model routing + rate limits (optional)
+    p2p                          — webPort, signalingPort, stunServers, relayFps
+    mcp.connectors               — external tool endpoints (vault-backed creds)
+    graphify                     — chunkTokens, summaryTokens, maxContextTokens
+    compiler                     — skill native backend (none | node | tcc | clang)
+    shadow, meeting, telco, docker — feature toggles + provider settings
+
+WHAT IS DONE (state: build+tests+lint green, 496 tests / 57 suites)
+-------------------------------------------------------------------
+1. Agent loop: planning (with clarification), step execution (browse, desktop,
+   ghost real-desktop, files, repos, video tools, web search), self-healing,
+   consent gate, emergency stop, audit log, learning from executions.
+2. Skills: 100-skill catalog, router (word-boundary trigger scoring), recorder,
+   compiler (native backends), MCP registry + router + HTTP connector with
+   vault-encrypted credentials. New step actions: `skill`, `skill_learn`.
+3. Metering: plan tiers, session caps, circuit breakers per service, token
+   accounting; every LLM call goes through the MeteredLLMConnector.
+   Graphify context compression is applied to think-steps.
+4. Recall/privacy/journal: OCR screen reader, privacy masking, vector memory,
+   hourly journal, topic index, proactive suggestions, macro synthesis.
+5. Devices: QR pairing (ECDH + encrypted QR payload), WebRTC signaling,
+   PWA control plane, live frame preview, shadow takeover.
+6. Video: producer with script/narration via OpenMontage tools; meeting agent;
+   Telnyx SMS/calls; Docker worker daemon; encryption vault.
+7. Model routing (ModelRouter + RoutedLLMConnector): task-appropriate model
+   slots — free (OpenRouter cloud free), fast (DeepSeek V4 Flash), reasoning
+   (DeepSeek-R1), frontend (Muse Spark 1.2), difficult (Claude Sonnet 5) —
+   with per-token pricing and hard cost budgets auto-assigned from the tier:
+   Free (€0, cloud free models or BYOK), BYOK (€0, your own key, uncapped),
+   Pro (€19 → $5/mo: Sonnet $2, DeepSeek Flash $1, DeepSeek-R1 $1, Muse Spark
+   1.2 $1), Ultimate (€38 → $10/mo: double every slot). The cost model bakes
+   in prompt caching (85% cache-hit), Graphify input compression, and Caveman
+   output capping (800 tokens/request), all active with the plan. When a paid
+   slot's budget or provider fails, the router spills over to the cloud free
+   model so work never runs out. Monthly spend counters persist across
+   restarts.
+8. BYOK + live validation: POST /api/config/provider sets the user's own
+   provider/keys/models (masked on read), POST /api/llm/test runs a live
+   1-token validation call, GET /api/llm/models reports routing + usage.
+   OpenMontage tools are auto-discovered and exposed as native MCP tools
+   (GET /api/openmontage/tools).
+9. Image generation (Flux Schnell): ImageGenerator + POST /api/image/generate
+   via Hugging Face Inference API or Replicate; PNGs land in ~/.umbra/generated.
+10. Persistent memory: every completed task is saved (plan + result) and
+    vector-indexed; the planner recalls similar + recent tasks AND permanent
+    user facts ("about the user") into each new plan. POST /api/memory/remember
+    stores a fact; GET /api/memory/recall returns facts + similar tasks. Runs
+    on the native sqlite-vec store — no external service needed (Mem0 / Letta
+    / Zep are heavier drop-in options).
+11. Cloud deployment: Dockerfile + docker-compose.yml + scripts/deploy.sh +
+    docs/cloud-deploy.md (Hetzner CX22 ~$4 for Pro, CX32/CPX21 ~$8-9 for
+    Ultimate). UMBRA_HEADLESS=1 / UMBRA_ROLE=cloud boots the core without the
+    Windows-native subsystems (screen watcher, real-desktop control, Chrome,
+    preview streamer, HUD, P2P/PWA), so the Linux box stays small.
+12. Durable task queue + resume: TaskStore persists every task to
+    <dataDir>/task-queue/ and checkpoints after each step; on boot the node
+    resumes unfinished tasks from the exact step where they stopped.
+    Cloud continuation is a paid feature: the desktop always resumes its own
+    queue, but the cloud only resumes for pro/ultimate/byok (free leaves the
+    queue on disk). POST /api/plan/activate flips plan.cloudContinuation.
+    Sharing the task-queue dir (volume/NFS/sync) lets the PC and cloud hand
+    in-flight work to each other — PC-first while it's on, cloud when it's off.
+13. Device mesh (always-connected): DeviceRegistry (invites + long-lived
+    device tokens, persisted), DeviceHub (WebSocket hub: token auth, presence,
+    heartbeat/sweep, device→device relay), and DeviceClient (auto-reconnect
+    with backoff). A phone scans a QR (or a PC opens a link) to redeem an
+    invite once, then the device reconnects forever to the cloud hub — no
+    re-pairing. The phone can submit tasks (POST /api/task) or relay a
+    `cmd` through the hub to the desktop (executeGhost) and get the result
+    back.    API: GET /api/devices, POST /api/devices/invite|join|revoke|send.
+    Desktop joins the cloud with joinRemoteHub(code) + UMBRA_API_URL.
+    Plan device limit: free/byok/pro allow 1 registered device (the phone OR
+    the desktop), ultimate is unlimited — enforced at join time
+    (src/p2p/DevicePolicy), existing devices keep reconnecting, and the
+    allowance is reported as `deviceLimit` by GET /api/devices + the join
+    response. The phone PWA shows a "Plan & devices" card (PwaServer serves
+    /api/devices same-origin) with the limit, the registered count, and each
+    device's online status.
+14. Unified dispatch + voice: POST /api/chat {message, target?} is the "talk
+    to Umbra" entry point. target 'auto' routes a task to an online desktop
+    (via DeviceHub.request/reply) or runs it on this node (cloud agents); the
+    PWA gained an "Ask Umbra" box + a 🎤 speech button (browser SpeechRecognition
+    → text → /api/chat). One request can spin cloud agents, call MCP connectors,
+    drive the PC if it's on, or hit any connected device.
+15. Voice-to-text: SpeechToText (src/core/voice/) transcribes audio with
+    pluggable backends — 'openai' (Whisper API) or 'whisper-local' (a self-hosted
+    whisper.cpp server). POST /api/voice/transcribe {audio(base64), format,
+    language} → text; GET /api/voice/status. The PWA's free on-device
+    SpeechRecognition remains the zero-cost phone path. whisper.cpp is wired
+    into docker-compose (scripts/download-whisper-model.sh downloads the model;
+    medium.en ≈ 2.1 GB RAM for strong accuracy, small.en ≈ 852 MB for 4 GB).
+    Greedy decoding + language/prompt biasing keeps it from missing words.
+16. Always-on screen awareness + in-meeting agent: ScreenAwareness now has a
+    continuous watch loop (live frame + cursor trail, `screen:update` /
+    `screen:cursor` WS events) so Umbra always sees the screen and follows the
+    cursor; asking mid-task (`? question`, `help ...`, `finish ...` via the HUD
+    or POST /api/screen/ask) is answered from the already-live view. The
+    MeetingCompanion takes orders heard in the transcript ("Hey Umbra, share
+    your screen / take a note / look up ..."), executes them while the meeting
+    runs like a normal user, and can share/stop sharing the screen in Google
+    Meet / Zoom / Teams via best-effort DOM automation in the real Chrome.
+    API: GET /api/screen/live, POST /api/screen/watch, POST /api/meeting/share,
+    POST /api/meeting/stop-share, GET /api/meeting/orders.
+17. Global hotkey + ask overlay + speaking + setup CLI + CI: a poll-based
+    GlobalHotkey (GetAsyncKeyState via NativeCore) fires Ctrl+Shift+Space to
+    open an always-on-top WinForms ask box (CommandHUD) whose questions route
+    to screen awareness / the agent and whose answers are shown in-place.
+    Umbra can now SPEAK in meetings via Windows SAPI TTS (WindowsTts + the
+    "say" order intent + POST /api/meeting/speak) when meeting.tts = local.
+    `npm run setup` (scripts/setup.ts) interactively collects provider/key/
+    models/tier and live-validates the key — including a one-OpenRouter-key
+    convenience mode (`--openrouter-key` or `OPENROUTER_API_KEY`) that maps all
+    four paid routing slots + the free spillover to real OpenRouter model ids
+    with real per-1M pricing and reports the key's credit limit/remaining
+    balance; and all keys can be loaded from a single file with
+    `npm run setup -- --keys-file umbra-keys.json` (JSON or .env). GitHub Actions CI runs
+    build+test+lint on Windows and Linux (.github/workflows/ci.yml).
+18. Microsoft VibeVoice voice AI: cloned into external/VibeVoice (git-ignored,
+    sparse/blobless) and driven by src/core/voice/VibeVoiceTts.ts, which runs
+    the Realtime-0.5B streaming TTS model (speaker prompts en/de/fr/it/jp/kr/
+    nl/pl/pt/sp). `npm run vibevoice:install` builds the Python venv. Set
+    meeting.tts = "vibevoice" to make Umbra speak with those voices in
+    meetings; POST /api/voice/speak {text, voice, language} speaks anywhere;
+    GET /api/voice/tts/voices lists the voices. NOTE: Microsoft removed the
+    voice-CLONING (VibeVoice-TTS) code from the repo in Sept 2025, so only
+    the pre-embedded speakers are available — not arbitrary voice cloning.
+    (VibeVoice-ASR with speaker diarization is the natural next wiring.)
+19. Voicebox voice studio (jamiepine/voicebox, cloned into external/voicebox,
+    git-ignored): src/core/voice/VoiceboxClient.ts talks to its REST API
+    (http://127.0.0.1:17493) — /profiles (cloned voices), /speak (play out
+    loud), /generate/stream (WAV bytes), /transcribe (Whisper). Set
+    meeting.tts = "voicebox" or POST /api/voice/speak {provider:"voicebox",
+    voice:"<profile>", language, engine} to speak in a cloned voice; voice
+    cloning + 23 languages + 7 engines come from the Voicebox app itself.
+    GET /api/voice/tts/voices now also lists running Voicebox profiles.
+20. Virtual-cable meeting audio routing: src/core/audio/AudioRouter.ts
+    enumerates Windows endpoints (MMDevices registry + IPolicyConfig COM) and
+    plays a synthesized WAV on a chosen device by temporarily switching the
+    default render endpoint, then restoring it. Set meeting.audioCable =
+    "auto" (or a device name) so meeting replies (voicebox/vibevoice/SAPI)
+    are synthesized to WAV and played into the cable's "CABLE Input", and set
+    the call's mic to "CABLE Output" (or meeting.routeMic = true to auto-set
+    the default mic on join) so participants actually HEAR Umbra instead of
+    just the local speakers. The pre-meeting default mic is remembered and
+    restored automatically when the meeting ends (POST /api/meeting/leave or
+    app shutdown), so routeMic never leaves the cable selected. GET
+    /api/audio/devices lists endpoints;
+    POST /api/audio/set-default {flow, deviceId} switches the default device.
+21. Meeting speaker diarization via VibeVoice-ASR: scripts/vibevoice-asr-server.py
+    runs a local FastAPI server (`npm run vibevoice:asr-server`) that loads
+    microsoft/VibeVoice-ASR (who/when/what) once and serves POST /transcribe.
+    src/core/voice/VibeVoiceAsr.ts talks to it; set voice.asrProvider =
+    "vibevoice" (+ optional voice.vibevoiceAsrContext hotwords like speaker
+    names/jargon) and the MeetingCompanion transcribes each audio chunk into
+    speaker-labeled, timestamped TranscriptSegments instead of a generic
+    "meeting" speaker — so summaries/orders say who said what. Voice status
+    (GET /api/voice/status) now reports the ASR server state.
+22. Rust mesh daemon (P2P transport): p2p.MeshBridge embeds the umbra-meshd
+    binary (mesh/, M1: zero-knowledge identity + QR pairing + paired-device
+    store) as an optional transport next to the WS signaling hub. Starts
+    automatically when p2p.meshEnabled (default true) and the binary is built;
+    otherwise reports running:false and the app boots normally. API: GET
+    /api/mesh/status, POST /api/mesh/pair (ttl), POST /api/mesh/pair-demo,
+    POST /api/mesh/revoke.
+23. Agentic tasks work without the hermes CLI: src/core/agent/InProcessAgent
+    is a bounded ReAct loop (think → tool call → observe) that runs entirely
+    in-process with the app's own LLM provider + the same tool surface (MCP
+    connectors, knowledge search, web search, files, repos). delegate steps,
+    POST /api/agent/delegate, and autoDelegate now fall back to it whenever
+    the hermes CLI is missing (ghost/desktop2 modes keep the visible step
+    loop for real-app control).
+24. MCP connector management + voice commands + meeting controls + plan
+    dashboard: GET /api/mcp/catalog supports q/category/enabled/limit/offset
+    filtering over the full 1,000+ connector catalog; GET /api/mcp/connectors
+    lists enabled ones; POST /api/mcp/disconnect disables + unregisters.
+    POST /api/voice/command {audio} transcribes and submits the spoken text
+    as a task (voice → task in one call). Meeting orders + API now cover
+    mic mute/unmute, raise/lower hand, and meeting-chat messages (best-effort
+    DOM automation like screen share), and GET /api/meeting/status reports
+    attendees (unique transcript speakers). GET /api/plan/usage returns the
+    spend dashboard (budget by slot, remaining, metering). Anthropic calls
+    mark the system prompt with cache_control: ephemeral so prompt caching
+    actually engages and the assumed cache-hit pricing holds.
+25. Stripe billing: src/core/billing/StripeBilling is a zero-dependency
+    Stripe client (global fetch + crypto HMAC). GET /api/billing/checkout
+    ?tier=pro|ultimate creates a hosted Checkout Session (subscription mode,
+    price id from config billing.priceIds, tier in metadata); POST
+    /api/billing/webhook verifies the `stripe-signature` header over the raw
+    body (HMAC-SHA256, 5-min replay window) and on checkout.session.completed
+    calls the same activatePlan hook as POST /api/plan/activate — so a paid
+    checkout automatically enables routing + the pre-split $5/$10 token
+    budget + cloud continuation. Keys/price ids live in config.json or
+    UMBRA_STRIPE_* env vars (never in code); setup.ts collects them.
+26. Per-user budgets on one node (multi-tenant): src/core/billing/TenantLedger
+    gives every paying customer their own ModelRouter — own tier, own $5/$10
+    monthly ceiling, own persisted spend ledger (dataDir/tenants.json +
+    per-tenant ledger files). The active tenant rides the request via
+    AsyncLocalStorage: the API + PWA bind the `X-Umbra-Tenant` header to the
+    whole async chain, and RoutedLLMConnector meters every completion against
+    that tenant's router — an exhausted tenant spills to free models while
+    every other user's budget is untouched, and spend on user A never leaks
+    into user B's ledger. Operator API: POST /api/tenants/register,
+    GET /api/tenants, POST /api/tenants/activate, POST /api/tenants/disable;
+    GET /api/plan/usage?tenant=X and POST /api/plan/activate {tier, tenant}
+    are tenant-aware; Stripe checkouts carry `metadata.tenant` so a paid
+    checkout auto-activates the right user's plan (pass ?tenant= on
+    /api/billing/checkout). Installations with no tenants behave exactly as
+    before (single-node default budget). Device caps are per tenant too
+    (Pro/BYOK/free = 1, Ultimate = unlimited, reported in tenant status).
+27. 1000+ connectors, bulk-loadable: the built-in catalog plus
+    POST /api/mcp/import-registry {maxPerSource} pulls every server from the
+    bundled registries — Smithery (api.smithery.ai/servers) and the official
+    MCP registry (registry.modelcontextprotocol.io, thousands of
+    streamable-HTTP servers; entries map 1:1 to remote connectors with
+    streamable-http remotes preferred, ids slugged mcp-<name>, deduped). One
+    call registers them all through the same MCP router; missing auth is
+    resolved lazily from the vault at call time.
+
+HOW TO CONTINUE (remaining work — mostly user keys/hardware, not code)
+----------------------------------------------------------------------
+1. Setup CLI: DONE — scripts/setup.ts collects provider + API keys (plus an
+   optional Telnyx key/from-number) → CredentialVault → config.json → live
+   validation call.
+2. Cloud Docker deployment: DONE — Dockerfile, docker-compose.yml, deploy
+   script, headless boot, durable resume, HTTPS via Caddy (edge profile) +
+   coturn TURN relay, and a built-in desktop→cloud task-queue sync helper
+   (npm run sync:queue -- push|pull; see docs/cloud-deploy.md).
+3. Telco (Telnyx SMS/calls) + Docker workers: DONE — REST endpoints wired to
+   the live clients (POST /api/telco/sms, /api/telco/call,
+   /api/telco/configure, GET /api/telco/status, POST /api/docker/run|stop|
+   remove, GET /api/docker/list).
+4. Live LLM testing on real providers: code path DONE (POST /api/llm/test);
+   a real-key end-to-end run against OpenAI/Anthropic still needs the user's
+   provider API keys.
+5. MCP connectors: DONE — catalog + vault-backed connect flow + POST
+   /api/mcp/connect; each connector still needs a real endpoint/key entered
+   by the user (no bundled endpoints).
+6. Mesh (Rust): umbra-meshd daemon + pairing embedded and exposed
+   (GET /api/mesh/status, /api/mesh/pair, /api/mesh/pair-demo,
+   /api/mesh/revoke). Remaining: use the encrypted mesh channel as a full
+   transport alternative to the ws relay in P2PConnectionManager.
+7. NativeCore smoke tests (src/native/win32) on a real Windows machine —
+   needs real hardware, not code. CI (build + test + lint, Windows + Ubuntu
+   runners) is DONE via .github/workflows/ci.yml.
+8. Video production: DONE — OpenMontage tools auto-discovered from
+   external/OpenMontage and exposed as native MCP tools + an API listing.
+9. Payments: DONE — Stripe checkout + webhook wired to plan activation (see
+   item 25 above); shipping the hosted plans still needs the operator's real
+   Stripe keys + price ids (and the provider keys for the model slots).
+
+CONVENTIONS
+-----------
+- Every new module ships with a test (src/**/*.test.ts), lint-clean, and wired
+  through src/index.ts (composition root) + exposed on subsystems getter.
+- No secrets in code or config ever: secrets live in CredentialVault or
+  ~/.umbra/config.json (both git-ignored paths).
+- .gitignore excludes: node_modules, dist, .venv, external/, mesh/target,
+  downloaded_files, *.env*, temp.env, *.db, logs.
+- Keep the full suite green: `npm run build && npm test && npm run lint`.
+
+This repository is PRIVATE — invite collaborators from GitHub → Settings →
+Collaborators. Only invited accounts can see it.

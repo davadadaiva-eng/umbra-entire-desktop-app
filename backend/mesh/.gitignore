@@ -1,0 +1,13 @@
+# Rust targets
+/target
+Cargo.lock.orig
+
+# Node
+node_modules/
+ts/dist/
+*.tsbuildinfo
+
+# Local mesh runtime data
+umbra-mesh.data/
+*.db
+*.db-journal

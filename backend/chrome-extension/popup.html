@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      width: 280px;
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif;
+      background: #0a0a12;
+      color: #e0e0e8;
+      padding: 16px;
+      overflow: hidden;
+    }
+
+    /* ── Glow background ──────────────────────────── */
+    body::before {
+      content: '';
+      position: fixed;
+      top: -60px;
+      left: -60px;
+      width: 180px;
+      height: 180px;
+      background: radial-gradient(circle, rgba(108, 92, 231, 0.12) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+    body::after {
+      content: '';
+      position: fixed;
+      bottom: -40px;
+      right: -40px;
+      width: 140px;
+      height: 140px;
+      background: radial-gradient(circle, rgba(0, 184, 148, 0.08) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Header ────────────────────────────────────── */
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+      position: relative;
+      z-index: 1;
+    }
+    .logo {
+      width: 36px;
+      height: 36px;
+      min-width: 36px;
+      background: linear-gradient(135deg, #6c5ce7 0%, #a29bfe 100%);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 17px;
+      box-shadow: 0 4px 20px rgba(108, 92, 231, 0.35), 0 0 40px rgba(108, 92, 231, 0.1);
+      transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+      position: relative;
+    }
+    .logo.disabled {
+      opacity: 0.25;
+      filter: grayscale(1) brightness(0.6);
+      box-shadow: none;
+    }
+    .logo::after {
+      content: '';
+      position: absolute;
+      inset: -2px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, rgba(108, 92, 231, 0.3), transparent);
+      z-index: -1;
+      opacity: 0;
+      transition: opacity 0.4s;
+    }
+    .logo:not(.disabled)::after { opacity: 1; }
+    .header-text { flex: 1; }
+    .title {
+      font-size: 13px;
+      font-weight: 600;
+      color: #fff;
+      letter-spacing: -0.2px;
+    }
+    .subtitle {
+      font-size: 10px;
+      color: #555;
+      margin-top: 1px;
+      transition: color 0.3s;
+    }
+
+    /* ── Status pill ───────────────────────────────── */
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 500;
+      margin-bottom: 12px;
+      position: relative;
+      z-index: 1;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      transition: all 0.3s;
+    }
+    .status-pill.online {
+      background: rgba(0, 184, 148, 0.1);
+      color: #00d2a0;
+      border: 1px solid rgba(0, 184, 148, 0.18);
+      box-shadow: 0 0 12px rgba(0, 184, 148, 0.08);
+    }
+    .status-pill.offline {
+      background: rgba(255, 159, 67, 0.1);
+      color: #ff9f43;
+      border: 1px solid rgba(255, 159, 67, 0.18);
+    }
+    .status-pill.paused {
+      background: rgba(100, 100, 130, 0.08);
+      color: #555;
+      border: 1px solid rgba(100, 100, 130, 0.12);
+    }
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      flex-shrink: 0;
+    }
+    .status-pill.online .status-dot {
+      animation: pulse 2s ease-in-out infinite;
+      box-shadow: 0 0 6px currentColor;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.85); }
+    }
+
+    /* ── Toggle card ───────────────────────────────── */
+    .card {
+      background: rgba(18, 18, 30, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      border-radius: 14px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      position: relative;
+      z-index: 1;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      transition: all 0.3s;
+    }
+    .card:hover {
+      border-color: rgba(255, 255, 255, 0.06);
+    }
+    .card.disabled {
+      opacity: 0.3;
+    }
+
+    .toggle-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .toggle-label {
+      font-size: 12px;
+      color: #ccc;
+      font-weight: 500;
+      transition: color 0.3s;
+    }
+    .card.disabled .toggle-label { color: #444; }
+    .toggle {
+      position: relative;
+      width: 40px;
+      height: 22px;
+      background: #252538;
+      border-radius: 11px;
+      cursor: pointer;
+      transition: background 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      flex-shrink: 0;
+    }
+    .toggle.on {
+      background: linear-gradient(135deg, #6c5ce7, #a29bfe);
+      box-shadow: 0 2px 10px rgba(108, 92, 231, 0.3);
+    }
+    .toggle::after {
+      content: '';
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 18px;
+      height: 18px;
+      background: #fff;
+      border-radius: 50%;
+      transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+    }
+    .toggle.on::after { transform: translateX(18px); }
+
+    /* ── Stats grid ────────────────────────────────── */
+    .stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 8px;
+      position: relative;
+      z-index: 1;
+    }
+    .stat-card {
+      background: rgba(18, 18, 30, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      border-radius: 14px;
+      padding: 12px 8px 10px;
+      text-align: center;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      transition: all 0.3s;
+    }
+    .stat-card:hover {
+      border-color: rgba(255, 255, 255, 0.06);
+      transform: translateY(-1px);
+    }
+    .stats.disabled .stat-card { opacity: 0.3; pointer-events: none; }
+    .stat-number {
+      font-size: 20px;
+      font-weight: 700;
+      line-height: 1;
+      transition: color 0.3s;
+    }
+    .stat-number.purple { color: #a29bfe; }
+    .stat-number.green { color: #00d2a0; }
+    .stat-label {
+      font-size: 9px;
+      color: #444;
+      margin-top: 5px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      font-weight: 500;
+    }
+
+    /* ── Session card ──────────────────────────────── */
+    .session-card {
+      background: rgba(18, 18, 30, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      border-radius: 14px;
+      padding: 8px 12px;
+      text-align: center;
+      margin-bottom: 8px;
+      position: relative;
+      z-index: 1;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      transition: opacity 0.3s;
+    }
+    .session-card.disabled { opacity: 0.3; }
+    .session-id {
+      font-size: 9px;
+      color: #3a3a4e;
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      word-break: break-all;
+      letter-spacing: 0.2px;
+    }
+
+    /* ── Clear button ──────────────────────────────── */
+    .clear-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      width: 100%;
+      padding: 8px;
+      background: rgba(18, 18, 30, 0.5);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      border-radius: 12px;
+      color: #444;
+      font-size: 10px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.25s;
+      font-family: inherit;
+      position: relative;
+      z-index: 1;
+    }
+    .clear-btn:hover {
+      border-color: rgba(255, 107, 107, 0.3);
+      color: #ff6b6b;
+      background: rgba(255, 107, 107, 0.05);
+    }
+    .clear-btn:active {
+      transform: scale(0.98);
+    }
+    .clear-icon {
+      font-size: 11px;
+      opacity: 0.6;
+    }
+
+    /* ── Footer ─────────────────────────────────────── */
+    .footer {
+      text-align: center;
+      margin-top: 10px;
+      font-size: 9px;
+      color: #252535;
+      position: relative;
+      z-index: 1;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo" id="logo">🌘</div>
+    <div class="header-text">
+      <div class="title">Umbra Browser Link</div>
+      <div class="subtitle" id="subtitle">Always-on telemetry</div>
+    </div>
+  </div>
+
+  <div class="status-pill offline" id="statusPill">
+    <span class="status-dot"></span>
+    <span id="statusText">Checking…</span>
+  </div>
+
+  <div class="card" id="toggleCard">
+    <div class="toggle-row">
+      <span class="toggle-label">Tracking</span>
+      <div id="toggle" class="toggle on"></div>
+    </div>
+  </div>
+
+  <div class="stats" id="stats">
+    <div class="stat-card">
+      <div id="statEvents" class="stat-number purple">0</div>
+      <div class="stat-label">Queued</div>
+    </div>
+    <div class="stat-card">
+      <div id="statTabs" class="stat-number green">0</div>
+      <div class="stat-label">Tabs</div>
+    </div>
+  </div>
+
+  <div class="session-card" id="sessionCard">
+    <div class="session-id" id="sessionId">—</div>
+  </div>
+
+  <button class="clear-btn" id="clearBtn">
+    <span class="clear-icon">✕</span>
+    Clear queue
+  </button>
+
+  <div class="footer">v2.0.0 · Local-first</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

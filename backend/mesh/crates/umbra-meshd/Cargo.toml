@@ -1,0 +1,15 @@
+[package]
+name = "umbra-meshd"
+version.workspace = true
+edition.workspace = true
+description = "Umbra Mesh daemon — stdio JSON-RPC host for the P2P engine"
+
+[dependencies]
+base64 = "0.22"
+local-ip-address = "0.6"
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+umbra-mesh = { path = "../umbra-mesh" }

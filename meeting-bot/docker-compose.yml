@@ -1,0 +1,34 @@
+version: "3.9"
+
+services:
+  meeting-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meeting-bot
+    ports:
+      - "8000:8000"
+    volumes:
+      - whisper-models:/home/appuser/.cache/huggingface
+      - piper-models:/home/appuser/.piper/models
+      - ./session_data:/app/session_data
+      - ./output:/app/output
+    environment:
+      - PLAN=${PLAN:-FREE}
+      - LLM_WEBHOOK_URL=${LLM_WEBHOOK_URL:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_API_URL=${LLM_API_URL:-https://openrouter.ai/api/v1/chat/completions}
+      - LLM_MODEL=${LLM_MODEL:-deepseek/deepseek-chat}
+      - PULSE_SERVER=unix:/run/pulse/native
+      - DISPLAY=:99
+    # Resource limits are advisory; tune per plan in production
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2.0"
+    restart: unless-stopped
+
+volumes:
+  whisper-models:
+  piper-models:
