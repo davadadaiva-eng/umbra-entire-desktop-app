@@ -990,3 +990,26 @@ export const authRemoveDevice = (apiKey: string, deviceId: string) =>
 
 export const authPlan = (apiKey: string) =>
   backendFetch<{ plan: unknown }>(`/api/auth/plan?key=${encodeURIComponent(apiKey)}`);
+
+// ── Smart Home ──────────────────────────────────────────────────
+export interface SmartHomeStatus {
+  configured: boolean;
+  tokenMasked: string;
+  deviceCount?: number;
+}
+export const getSmartHomeStatus = () =>
+  backendFetch<SmartHomeStatus>('/api/smart/status');
+export const saveSmartHomeToken = (token: string) =>
+  backendFetch<{ ok: boolean; tokenMasked: string; deviceCount: number }>('/api/smart/token', {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+  });
+export const clearSmartHomeToken = () =>
+  backendFetch<{ ok: boolean }>('/api/smart/token', { method: 'DELETE' });
+export const fetchSmartHomeDevicesViaBackend = () =>
+  backendFetch<{ devices: unknown[] }>('/api/smart/devices');
+export const smartHomeSwitch = (deviceId: string, command: 'on' | 'off') =>
+  backendFetch<{ result: unknown }>('/api/smart/command', {
+    method: 'POST',
+    body: JSON.stringify({ deviceId, command }),
+  });

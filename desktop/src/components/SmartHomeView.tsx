@@ -4,14 +4,18 @@ import { useAppStore } from '../stores/appStore';
 import {
   fetchSmartHomeDevices,
   sendSwitchCommand,
-  isSmartThingsConfigured,
   type SmartHomeDevice,
   type SwitchCommand,
   SmartThingsError,
 } from '../lib/smartthings';
 import {
+  getSmartHomeStatus,
+  saveSmartHomeToken,
+  clearSmartHomeToken,
+} from '../lib/backend';
+import {
   Lightbulb, Plug, ToggleLeft, Thermometer, Lock, Radio, HelpCircle, RefreshCw,
-  Loader2, House, Wifi, WifiOff, AlertCircle, X,
+  Loader2, House, Wifi, WifiOff, X, Eye, EyeOff, Trash2, CheckCircle2,
 } from 'lucide-react';
 
 const KIND_ICONS: Record<SmartHomeDevice['kind'], typeof Lightbulb> = {
@@ -43,6 +47,11 @@ export function SmartHomeView() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [configured, setConfigured] = useState(true);
+  const [tokenMasked, setTokenMasked] = useState('');
+  const [pat, setPat] = useState('');
+  const [showPat, setShowPat] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
   const [filter, setFilter] = useState<FilterId>('all');
   const [pending, setPending] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -57,21 +66,78 @@ export function SmartHomeView() {
     toastTimer.current = setTimeout(() => setToast(null), 3200);
   }, []);
 
+  const refreshStatus = useCallback(async () => {
+    try {
+      const s = await getSmartHomeStatus();
+      setConfigured(Boolean(s.configured));
+      setTokenMasked(s.tokenMasked || '');
+      return Boolean(s.configured);
+    } catch {
+      setConfigured(false);
+      setTokenMasked('');
+      return false;
+    }
+  }, []);
+
   const load = useCallback(async (showSpinner: boolean) => {
     if (showSpinner) setRefreshing(true);
     setError(null);
     try {
-      setConfigured(isSmartThingsConfigured());
+      const ok = await refreshStatus();
+      if (!ok) {
+        setDevices([]);
+        setLoading(false);
+        setRefreshing(false);
+        return;
+      }
       const data = await fetchSmartHomeDevices();
       setDevices(data);
     } catch (e) {
-      const msg = e instanceof SmartThingsError ? e.message : 'Failed to reach SmartThings';
+      const msg = e instanceof SmartThingsError ? e.message : (e as Error).message || 'Failed to reach SmartThings';
       setError(msg);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [refreshStatus]);
+
+  const handleConnect = useCallback(async () => {
+    const t = pat.trim();
+    if (!t) { setError('Paste your PAT from account.smartthings.com/tokens'); return; }
+    setConnecting(true);
+    setError(null);
+    try {
+      const res = await saveSmartHomeToken(t);
+      setPat('');
+      setTokenMasked(res.tokenMasked || '');
+      setConfigured(true);
+      showToast('success', `Connected — ${res.deviceCount} device${res.deviceCount===1?'':'s'} found`);
+      addJournal('action', `SmartThings connected — ${res.deviceCount} device${res.deviceCount===1?'':'s'}`);
+      await load(false);
+    } catch (e) {
+      const msg = (e as Error).message || 'Connection failed';
+      setError(msg);
+    } finally {
+      setConnecting(false);
+    }
+  }, [pat, load, showToast, addJournal]);
+
+  const handleDisconnect = useCallback(async () => {
+    setDisconnecting(true);
+    try {
+      await clearSmartHomeToken();
+      setConfigured(false);
+      setTokenMasked('');
+      setDevices([]);
+      setError(null);
+      showToast('success', 'SmartThings disconnected');
+      addJournal('action', 'SmartThings disconnected');
+    } catch (e) {
+      setError((e as Error).message || 'Disconnect failed');
+    } finally {
+      setDisconnecting(false);
+    }
+  }, [showToast, addJournal]);
 
   useEffect(() => {
     void load(false);
@@ -160,18 +226,68 @@ export function SmartHomeView() {
       </div>
 
       <div className="flex-1 overflow-y-auto px-6 py-5" style={{ maxWidth: 1080, width: '100%', margin: '0 auto' }}>
-        {/* ═══ NOT CONFIGURED ═══ */}
+        {/* ═══ CONNECT CARD ═══ */}
         {!loading && !configured && (
-          <div className="card p-6 flex items-start gap-3" style={{ background: 'var(--surface-1)' }}>
-            <AlertCircle size={18} style={{ color: '#fbbf24', marginTop: 2, flexShrink: 0 }} />
-            <div>
-              <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>SmartThings token missing</p>
-              <p className="text-xs mt-1 font-light leading-relaxed" style={{ color: 'var(--text-dim)' }}>
-                Create a personal access token at <span style={{ color: avatar.accent }}>account.smartthings.com/tokens</span> (scopes: <b>devices</b> and <b>rooms</b>),
-                then set <code className="px-1.5 py-0.5 rounded" style={{ background: 'var(--surface-3)', color: 'var(--text-primary)' }}>SMARTTHINGS_TOKEN</code> in the app environment
-                (or <code className="px-1.5 py-0.5 rounded" style={{ background: 'var(--surface-3)', color: 'var(--text-primary)' }}>VITE_SMARTTHINGS_TOKEN</code> for browser dev) and restart.
-              </p>
+          <div className="card p-6" style={{ background: 'var(--surface-1)', border: `1px solid ${avatar.accent}33` }}>
+            <div className="flex items-start gap-3 mb-4">
+              <span className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: `${avatar.accent}1a`, border: `1px solid ${avatar.accent}33`, color: avatar.accent }}>
+                <House size={18} />
+              </span>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>Connect your SmartThings</p>
+                <p className="text-xs mt-1 font-light leading-relaxed" style={{ color: 'var(--text-dim)' }}>
+                  Umbra reads your existing SmartThings home — no new hub needed. Create a token at <a href="https://account.smartthings.com/tokens" target="_blank" rel="noreferrer" style={{ color: avatar.accent }}>account.smartthings.com/tokens</a> with scopes <b>Devices</b> (Read + Control) and <b>Rooms</b> (Read), then paste it below. Stored encrypted in the vault on this machine — never sent elsewhere.
+                </p>
+              </div>
             </div>
+            <div className="flex gap-2">
+              <div className="flex-1 flex items-center gap-2 rounded-xl px-3" style={{ height: 40, background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)' }}>
+                <input
+                  type={showPat ? 'text' : 'password'}
+                  value={pat}
+                  onChange={(e) => setPat(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && void handleConnect()}
+                  placeholder="Paste PAT (st-... or xxxxx-xxxx...)"
+                  className="bg-transparent outline-none text-sm flex-1 min-w-0"
+                  style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }}
+                  autoComplete="off"
+                />
+                <button onClick={() => setShowPat(!showPat)} style={{ color: 'var(--text-faint)' }} title={showPat ? 'Hide' : 'Show'}>
+                  {showPat ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+              <button
+                onClick={handleConnect}
+                disabled={connecting || !pat.trim()}
+                className="flex items-center gap-1.5 px-5 rounded-xl text-sm font-medium disabled:opacity-50"
+                style={{ height: 40, background: avatar.accent, color: '#fff', border: 'none', fontFamily: 'var(--font)', cursor: connecting ? 'wait' : 'pointer' }}
+              >
+                {connecting ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+                Connect
+              </button>
+            </div>
+            <p className="text-[11px] mt-3 font-light" style={{ color: 'var(--text-faint)' }}>
+              Tip: use “UmbraOS” as token name. Tokens can expire — if you see “expired/revoked” later, generate a new one and reconnect.
+            </p>
+          </div>
+        )}
+
+        {/* ═══ CONNECTED BADGE + DISCONNECT ═══ */}
+        {!loading && configured && tokenMasked && (
+          <div className="card p-4 mb-4 flex items-center justify-between gap-3" style={{ background: 'var(--surface-1)', border: `1px solid rgba(34,197,94,0.35)` }}>
+            <div className="flex items-center gap-2.5 min-w-0">
+              <CheckCircle2 size={16} style={{ color: '#22c55e' }} />
+              <p className="text-xs font-medium truncate" style={{ color: 'var(--text-primary)' }}>Connected · token {tokenMasked} · {devices.length} device{devices.length===1?'':'s'}</p>
+            </div>
+            <button
+              onClick={handleDisconnect}
+              disabled={disconnecting}
+              className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg disabled:opacity-50"
+              style={{ background: 'rgba(239,68,68,0.08)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.3)', fontFamily: 'var(--font)', cursor: disconnecting ? 'wait' : 'pointer' }}
+            >
+              {disconnecting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+              Disconnect
+            </button>
           </div>
         )}
 

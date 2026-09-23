@@ -694,6 +694,9 @@ export class UmbraOS {
       smartSchedules: () => this.smartSchedules(),
       smartScheduleAdd: rule => this.smartScheduleAdd(rule),
       smartScheduleCancel: id => this.smartScheduleCancel(id),
+      smartStatus: () => this.smartStatus(),
+      smartSetToken: token => this.smartSetToken(token),
+      smartClearToken: () => this.smartClearToken(),
       // Carrusel
       carruselStart: () => this.carruselStart(),
       carruselStop: () => this.carruselStop(),
@@ -1072,7 +1075,7 @@ export class UmbraOS {
       enabled: config.smartthings?.enabled ?? false,
       token: config.smartthings?.token || '',
       baseUrl: config.smartthings?.baseUrl || 'https://api.smartthings.com',
-    });
+    }, this.credVault as any);
     this.smartScheduler = new SmartHomeScheduler(this.smartThings, config.paths.dataDir || undefined);
 
     // ── Open Carrusel (AI-powered Instagram carousel designer) ──
@@ -3339,7 +3342,7 @@ export class UmbraOS {
   // ── Smart Home (Samsung SmartThings) ─────────────────────
 
   async smartDevices(): Promise<any> {
-    if (!this.smartThings.isConfigured()) throw new Error('SmartThings is not configured (set UMBRA_SMARTTHINGS_TOKEN)');
+    if (!this.smartThings.isConfigured()) throw new Error('SmartThings is not configured — connect your PAT in Smart Home → Connect');
     const timeout = <T>(p: Promise<T>, ms: number): Promise<T> => Promise.race([
       p,
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error('SmartThings request timed out (api.smartthings.com unreachable — check token/network)')), ms)),
@@ -3348,12 +3351,12 @@ export class UmbraOS {
   }
 
   async smartCommand(deviceId: string, command: 'on' | 'off'): Promise<any> {
-    if (!this.smartThings.isConfigured()) throw new Error('SmartThings is not configured (set UMBRA_SMARTTHINGS_TOKEN)');
+    if (!this.smartThings.isConfigured()) throw new Error('SmartThings is not configured — connect your PAT in Smart Home → Connect');
     return this.smartThings.sendCommand(deviceId, command);
   }
 
   async smartControlByName(name: string, command: 'on' | 'off'): Promise<any> {
-    if (!this.smartThings.isConfigured()) throw new Error('SmartThings is not configured (set UMBRA_SMARTTHINGS_TOKEN)');
+    if (!this.smartThings.isConfigured()) throw new Error('SmartThings is not configured — connect your PAT in Smart Home → Connect');
     return this.smartThings.controlByName(name, command);
   }
 
@@ -3362,12 +3365,40 @@ export class UmbraOS {
   }
 
   async smartScheduleAdd(rule: { deviceId: string; deviceName: string; command: 'on' | 'off'; kind: 'everyMinutes' | 'at'; everyMinutes?: number; at?: string }): Promise<any> {
-    if (!this.smartThings.isConfigured()) throw new Error('SmartThings is not configured (set UMBRA_SMARTTHINGS_TOKEN)');
+    if (!this.smartThings.isConfigured()) throw new Error('SmartThings is not configured — connect your PAT in Smart Home → Connect');
     return this.smartScheduler.add(rule);
   }
 
   async smartScheduleCancel(id: string): Promise<any> {
     return this.smartScheduler.cancel(id);
+  }
+
+  async smartStatus(): Promise<{ configured: boolean; tokenMasked: string; deviceCount?: number }> {
+    const configured = this.smartThings.isConfigured();
+    const masked = this.smartThings.getMaskedToken();
+    if (!configured) return { configured, tokenMasked: '' };
+    try {
+      const devices = await this.smartThings.listDevices();
+      return { configured, tokenMasked: masked, deviceCount: devices.length };
+    } catch {
+      return { configured, tokenMasked: masked };
+    }
+  }
+
+  async smartSetToken(token: string): Promise<{ ok: boolean; tokenMasked: string; deviceCount: number }> {
+    const t = token?.trim() || '';
+    if (!t) throw new Error('Token is required — paste your PAT from account.smartthings.com/tokens');
+    // Validate before persisting (401/403 bubble as human errors)
+    await this.smartThings.validateToken(t);
+    this.smartThings.setToken(t);
+    const masked = this.smartThings.getMaskedToken();
+    const devices = await this.smartThings.listDevices().catch(() => [] as any[]);
+    return { ok: true, tokenMasked: masked, deviceCount: Array.isArray(devices) ? devices.length : 0 };
+  }
+
+  async smartClearToken(): Promise<{ ok: boolean }> {
+    this.smartThings.clearToken();
+    return { ok: true };
   }
 
   // ── Carrusel (AI-powered Instagram carousel designer) ──────

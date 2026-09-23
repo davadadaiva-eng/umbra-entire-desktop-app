@@ -80,9 +80,16 @@ export class SmartThingsService {
   private nameCache: Map<string, string> = new Map();
   private cacheAt = 0;
   private static CACHE_TTL_MS = 60_000;
+  private vault?: { find(s: string): { secret: string } | undefined; set(e: { service: string; username: string; secret: string }, id?: string): unknown; remove(s: string): boolean; isUnlocked: boolean };
 
-  constructor(cfg?: Partial<SmartThingsConfig>) {
+  constructor(cfg?: Partial<SmartThingsConfig>, vault?: { find(s: string): { secret: string } | undefined; set(e: { service: string; username: string; secret: string }, id?: string): unknown; remove(s: string): boolean; isUnlocked: boolean }) {
     this.cfg = { ...smartThingsConfigFromEnv(), ...cfg };
+    if (vault) this.vault = vault;
+    // Vault token overrides env — per-user encrypted storage, survives restart
+    try {
+      const v = this.vault?.find('smartthings')?.secret?.trim();
+      if (v) { this.cfg.token = v; this.cfg.enabled = true; }
+    } catch {}
   }
 
   get enabled(): boolean {
@@ -91,6 +98,60 @@ export class SmartThingsService {
 
   isConfigured(): boolean {
     return this.enabled;
+  }
+
+  /** Attach vault after construction (composition-root wiring). */
+  setVault(vault: { find(s: string): { secret: string } | undefined; set(e: { service: string; username: string; secret: string }, id?: string): unknown; remove(s: string): boolean; isUnlocked: boolean }): void {
+    this.vault = vault;
+    try {
+      const v = vault.find('smartthings')?.secret?.trim();
+      if (v) { this.cfg.token = v; this.cfg.enabled = true; }
+    } catch {}
+  }
+
+  getMaskedToken(): string {
+    const t = this.cfg.token || '';
+    if (!t) return '';
+    if (t.length <= 8) return '••••';
+    return t.slice(0, 4) + '••••' + t.slice(-4);
+  }
+
+  /** Persist PAT to vault (encrypted) and activate immediately. Validate before calling. */
+  setToken(token: string): void {
+    const t = token.trim();
+    if (!t) throw new Error('Token is required');
+    if (!this.vault || !this.vault.isUnlocked) throw new Error('Credential vault is locked — restart Umbra');
+    this.vault.set({ service: 'smartthings', username: 'pat', secret: t } as any);
+    this.cfg.token = t;
+    this.cfg.enabled = true;
+    this.nameCache.clear();
+    this.cacheAt = 0;
+  }
+
+  clearToken(): void {
+    if (this.vault?.isUnlocked) {
+      try { this.vault.remove('smartthings'); } catch {}
+    }
+    // Fall back to env
+    const env = smartThingsConfigFromEnv();
+    this.cfg.token = env.token;
+    this.cfg.enabled = env.enabled;
+    this.nameCache.clear();
+    this.cacheAt = 0;
+  }
+
+  /** Validate token by fetching one page of devices — throws 401/403 with human message. */
+  async validateToken(token?: string): Promise<{ ok: boolean; deviceCount: number }> {
+    const prev = this.cfg.token;
+    const prevEnabled = this.cfg.enabled;
+    if (token) { this.cfg.token = token.trim(); this.cfg.enabled = !!token.trim(); }
+    try {
+      const devices = await this.request<{ items?: unknown[] }>('GET', '/v1/devices?max=2');
+      const count = Array.isArray((devices as any).items) ? (devices as any).items.length : 0;
+      return { ok: true, deviceCount: count };
+    } finally {
+      if (token) { this.cfg.token = prev; this.cfg.enabled = prevEnabled; }
+    }
   }
 
   // ── Transport ─────────────────────────────────────────────────

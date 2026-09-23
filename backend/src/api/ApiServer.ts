@@ -225,6 +225,12 @@ export interface ApiServerDeps {
   smartScheduleAdd(rule: { deviceId: string; deviceName: string; command: 'on' | 'off'; kind: 'everyMinutes' | 'at'; everyMinutes?: number; at?: string }): Promise<unknown>;
   /** Smart Home — cancel a device schedule. */
   smartScheduleCancel(id: string): Promise<unknown>;
+  /** Smart Home — connection status (token masked). */
+  smartStatus(): Promise<unknown>;
+  /** Smart Home — save PAT (validate before persist). */
+  smartSetToken(token: string): Promise<unknown>;
+  /** Smart Home — disconnect (clear PAT). */
+  smartClearToken(): Promise<unknown>;
   /** Carrusel — start/stop the Open Carrusel server. */
   carruselStart(): Promise<unknown>;
   /** Carrusel — stop the Open Carrusel server. */
@@ -965,6 +971,13 @@ export class ApiServer {
       }],
       [/^GET \/api\/social\/status$/, async () => ({ social: await this.deps.socialStatus() })],
       // ── Smart Home (Samsung SmartThings) ─────────────────────
+      [/^GET \/api\/smart\/status$/, async () => this.deps.smartStatus()],
+      [/^POST \/api\/smart\/token$/, async (_url, body) => {
+        const token = String(body.token || '').trim();
+        if (!token) throw new Error('token is required — paste your PAT from account.smartthings.com/tokens');
+        return this.deps.smartSetToken(token);
+      }],
+      [/^DELETE \/api\/smart\/token$/, async () => this.deps.smartClearToken()],
       [/^GET \/api\/smart\/devices$/, async () => ({ devices: await this.deps.smartDevices() })],
       [/^POST \/api\/smart\/command$/, async (_url, body) => {
         const deviceId = String(body.deviceId || '');
