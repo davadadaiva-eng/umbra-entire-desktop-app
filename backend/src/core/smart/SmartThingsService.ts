@@ -11,9 +11,7 @@
  * (sm_devices / sm_on / sm_off / sm_schedule) and the /api/smart/* routes.
  */
 
-import * as https from 'https';
-import * as http from 'http';
-import { URL } from 'url';
+import { HttpBridge } from '../agent/HttpBridge';
 import { getLogger } from '../Logger';
 
 export interface SmartThingsDevice {
@@ -155,51 +153,24 @@ export class SmartThingsService {
   }
 
   // ── Transport ─────────────────────────────────────────────────
-
-  private request<T>(method: 'GET' | 'POST', path: string, body?: unknown, timeoutMs = 15000): Promise<T> {
-    const base = new URL(this.cfg.baseUrl);
-    return new Promise<T>((resolve, reject) => {
-      const url = new URL(base.origin + path);
-      const payload = body === undefined ? null : JSON.stringify(body);
-      const mod = url.protocol === 'http:' ? http : https;
-      const req = mod.request(
-        {
-          method,
-          hostname: url.hostname,
-          port: url.port || (url.protocol === 'http:' ? 80 : 443),
-          path: url.pathname + url.search,
-          headers: {
-            Authorization: `Bearer ${this.cfg.token}`,
-            Accept: 'application/json',
-            ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}),
-          },
-          timeout: timeoutMs,
-        },
-        (res) => {
-          let data = '';
-          res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
-          res.on('end', () => {
-            let parsed: unknown = null;
-            try { parsed = data ? JSON.parse(data) : null; } catch { parsed = data; }
-            const status = res.statusCode || 0;
-            if (status < 200 || status >= 300) {
-              let msg = typeof parsed === 'object' && parsed !== null && 'message' in parsed
-                ? String((parsed as { message: unknown }).message)
-                : `SmartThings HTTP ${status}`;
-              if (status === 401) msg = 'SmartThings PAT expired/revoked — regenerate at account.smartthings.com/tokens';
-              if (status === 403) msg = 'SmartThings PAT missing devices/rooms scope — recreate token with required scopes';
-              reject(new Error(msg));
-              return;
-            }
-            resolve(parsed as T);
-          });
-        },
-      );
-      req.on('timeout', () => req.destroy(new Error('SmartThings request timed out')));
-      req.on('error', (err) => reject(err));
-      if (payload) req.write(payload);
-      req.end();
-    });
+  // Use curl via HttpBridge to bypass Node v24 TLS stack (same as LLMConnector).
+  private async request<T>(method: 'GET' | 'POST', path: string, body?: unknown, timeoutMs = 15000): Promise<T> {
+    const url = this.cfg.baseUrl.replace(/\/+$/, '') + path;
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.cfg.token}`,
+      Accept: 'application/json',
+    };
+    const res = await HttpBridge.request({ url, method, headers, body, timeoutMs });
+    if (res.status < 200 || res.status >= 300) {
+      const parsed = res.data;
+      let msg = typeof parsed === 'object' && parsed !== null && 'message' in parsed
+        ? String((parsed as { message: unknown }).message)
+        : `SmartThings HTTP ${res.status}`;
+      if (res.status === 401) msg = 'SmartThings PAT expired/revoked — regenerate at account.smartthings.com/tokens';
+      if (res.status === 403) msg = 'SmartThings PAT missing devices/rooms scope — recreate token with required scopes';
+      throw new Error(msg);
+    }
+    return (res.data ?? {}) as T;
   }
 
   // ── API operations ────────────────────────────────────────────
@@ -310,11 +281,31 @@ export class SmartThingsService {
   async getSmartHomeDevices(opts?: { withStates?: boolean }): Promise<SmartHomeDevice[]> {
     const withStates = opts?.withStates !== false;
     const devices = await this.listDevices();
+    if (devices.length === 0) return [];
     const rooms = new Map<string, string>();
-    try {
-      const roomsRes = await this.request<{ items?: Array<{ roomId: string; name?: string }> }>('GET', '/v1/rooms');
-      for (const r of roomsRes.items || []) if (r.roomId) rooms.set(r.roomId, r.name || r.roomId);
-    } catch { /* rooms are optional */ }
+    // Rooms are per-location (/v1/locations/{id}/rooms). Global /v1/rooms 404s — try locations.
+    const roomsWithTimeout = async (path: string, ms: number): Promise<void> => {
+      try {
+        const roomsRes = await Promise.race([
+          this.request<{ items?: Array<{ roomId: string; name?: string }> }>('GET', path),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('rooms timeout')), ms)),
+        ]);
+        for (const r of (roomsRes as any).items || []) if (r.roomId) rooms.set(r.roomId, r.name || r.roomId);
+      } catch { /* rooms are optional — ignore */ }
+    };
+    // First try global (old accounts still support it, 2s budget), then per-location
+    await roomsWithTimeout('/v1/rooms', 2500);
+    if (rooms.size === 0) {
+      try {
+        const locRes = await Promise.race([
+          this.request<{ items?: Array<{ locationId: string }> }>('GET', '/v1/locations'),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('locations timeout')), 2500)),
+        ]);
+        for (const loc of (locRes as any).items || []) {
+          await roomsWithTimeout(`/v1/locations/${encodeURIComponent(loc.locationId)}/rooms`, 2000);
+        }
+      } catch {}
+    }
 
     const normalized: SmartHomeDevice[] = devices.map((d) => ({
       id: d.deviceId,

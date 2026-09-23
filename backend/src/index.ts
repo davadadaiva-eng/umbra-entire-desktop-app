@@ -3347,7 +3347,8 @@ export class UmbraOS {
       p,
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error('SmartThings request timed out (api.smartthings.com unreachable — check token/network)')), ms)),
     ]);
-    return timeout(this.smartThings.getSmartHomeDevices(), 8000);
+    // 12s total — rooms per-location can add a couple seconds beyond listDevices
+    return timeout(this.smartThings.getSmartHomeDevices(), 12000);
   }
 
   async smartCommand(deviceId: string, command: 'on' | 'off'): Promise<any> {
