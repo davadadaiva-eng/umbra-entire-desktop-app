@@ -991,6 +991,25 @@ export const authRemoveDevice = (apiKey: string, deviceId: string) =>
 export const authPlan = (apiKey: string) =>
   backendFetch<{ plan: unknown }>(`/api/auth/plan?key=${encodeURIComponent(apiKey)}`);
 
+// ── Vault ───────────────────────────────────────────────────────
+export interface VaultEntry {
+  id: string;
+  service: string;
+  username: string;
+  secret: string;
+  createdAt: number;
+  updatedAt: number;
+}
+export const getVaultEntries = () =>
+  backendFetch<{ entries: VaultEntry[] }>('/api/vault/entries');
+export const setVaultEntry = (entry: { service: string; username?: string; secret: string; id?: string }) =>
+  backendFetch<{ entry: VaultEntry }>('/api/vault/entry', {
+    method: 'POST',
+    body: JSON.stringify(entry),
+  });
+export const deleteVaultEntry = (id: string) =>
+  backendFetch<{ deleted: unknown }>(`/api/vault/entry/${id}`, { method: 'DELETE' });
+
 // ── Smart Home ──────────────────────────────────────────────────
 export interface SmartHomeStatus {
   configured: boolean;

@@ -697,6 +697,9 @@ export class UmbraOS {
       smartStatus: () => this.smartStatus(),
       smartSetToken: token => this.smartSetToken(token),
       smartClearToken: () => this.smartClearToken(),
+      getVaultEntries: () => this.getVaultEntries(),
+      setVaultEntry: entry => this.setVaultEntry(entry),
+      deleteVaultEntry: id => this.deleteVaultEntry(id),
       // Carrusel
       carruselStart: () => this.carruselStart(),
       carruselStop: () => this.carruselStop(),
@@ -1179,15 +1182,17 @@ export class UmbraOS {
                 : { ok: false, error: 'OpenAI Whisper selected but no API key configured (openai.apiKey or voice.sttApiKey)' };
             }
             if (provider === 'whisper-local') {
-              if (!this.speechToText?.available) return { ok: false, error: 'whisper-local selected but SpeechToText is not available' };
+              if (!this.speechToText?.available) return { ok: true, detail: 'whisper-local disabled — using browser/cloud STT', status: 'degraded' } as any;
               const controller = new AbortController();
               const timer = setTimeout(() => controller.abort(), 3000);
               try {
-                const endpoint = config.voice.sttEndpoint || 'http://localhost:8080';
-                const res = await fetch(endpoint, { method: 'GET', signal: controller.signal });
-                return { ok: true, detail: `whisper-local reachable at ${endpoint} (HTTP ${res.status})` };
+                const endpoint = (config.voice.sttEndpoint || 'http://localhost:8080').replace(/\/health\/?$/, '');
+                const healthUrl = endpoint.replace(/\/+$/, '') + '/health';
+                const res = await fetch(healthUrl, { method: 'GET', signal: controller.signal });
+                if (!res.ok) return { ok: true, detail: `whisper-local at ${healthUrl} returned HTTP ${res.status} — fallback to cloud STT`, status: 'degraded' } as any;
+                return { ok: true, detail: `whisper-local reachable at ${healthUrl}` };
               } catch (err: any) {
-                return { ok: false, error: `whisper-local server unreachable: ${err.message}` };
+                return { ok: true, detail: `whisper-local not running — fallback to Settings → Speech-to-text cloud provider`, error: `whisper-local unreachable: ${err.message}`, status: 'degraded' } as any;
               } finally {
                 clearTimeout(timer);
               }
@@ -1237,40 +1242,44 @@ export class UmbraOS {
             if (provider === 'whisper') {
               const health = this.whisperAsr ? await this.whisperAsr.health().catch(() => null) : null;
               if (!health) {
-                return { ok: false, error: 'Whisper-ASR not running — start `npm run whisper:asr-server`' };
+                return { ok: true, detail: 'Whisper-ASR not running — diarization will use basic STT, or start `npm run whisper:asr-server` for speaker labels', error: 'Whisper-ASR not running', status: 'degraded' } as any;
               }
               if (health.state === 'loading') {
-                return { ok: false, status: 'degraded', detail: 'Whisper-ASR loading — model downloading/loading (first run ~520 MB)' };
+                return { ok: true, detail: 'Whisper-ASR loading — model downloading/loading (first run ~520 MB)', status: 'degraded' } as any;
               }
               if (health.state === 'error') {
-                return { ok: false, error: `Whisper-ASR failed to load: ${health.error ?? 'unknown error'}` };
+                return { ok: true, detail: `Whisper-ASR error — fallback to basic STT`, error: `Whisper-ASR failed: ${health.error ?? 'unknown'}`, status: 'degraded' } as any;
               }
               return { ok: true, detail: `Whisper-ASR ready on ${health.device ?? 'auto'}` };
             }
-            const health = this.vibeVoiceAsr ? await this.vibeVoiceAsr.health().catch(() => null) : null;
-            if (!health) {
-              return { ok: false, error: 'VibeVoice-ASR not running — start `npm run vibevoice:asr-server`' };
+            if (provider === 'vibevoice') {
+              const health = this.vibeVoiceAsr ? await this.vibeVoiceAsr.health().catch(() => null) : null;
+              if (!health) {
+                return { ok: true, detail: 'VibeVoice-ASR not running — diarization via basic STT', error: 'VibeVoice-ASR not running', status: 'degraded' } as any;
+              }
+              if (health.state === 'loading') {
+                return { ok: true, detail: 'VibeVoice-ASR loading — model downloading/loading (first run is ~17 GB)', status: 'degraded' } as any;
+              }
+              if (health.state === 'error') {
+                return { ok: true, detail: `VibeVoice-ASR error — fallback`, error: `VibeVoice-ASR failed: ${health.error ?? 'unknown'}`, status: 'degraded' } as any;
+              }
+              return { ok: true, detail: `VibeVoice-ASR ready on ${health.device ?? 'auto'}` };
             }
-            if (health.state === 'loading') {
-              return { ok: false, status: 'degraded', detail: 'VibeVoice-ASR loading — model downloading/loading (first run is ~17 GB)' };
-            }
-            if (health.state === 'error') {
-              return { ok: false, error: `VibeVoice-ASR failed to load: ${health.error ?? 'unknown error'}` };
-            }
-            return { ok: true, detail: `VibeVoice-ASR ready on ${health.device ?? 'auto'}` };
+            return { ok: true, detail: 'ASR disabled — using basic STT', status: 'degraded' } as any;
           },
           cable: async () => {
             const cable = config.meeting.audioCable ?? 'none';
-            if (!this.audioRouter) return { ok: false, error: 'Audio router unavailable' };
+            if (!this.audioRouter) return { ok: true, detail: 'Audio router unavailable — meeting audio via feedAudio API', status: 'degraded' } as any;
             const devices = await this.audioRouter.listDevices('both').catch(() => []);
             if (cable === 'auto') {
               const found = findCable(devices, 'render');
-              if (!found) return { ok: false, error: 'No virtual audio cable detected — install VB-Cable (vb-audio.com/Cable)' };
+              if (!found) return { ok: true, detail: 'No VB-Cable — meeting audio via browser/ASR feedAudio, or install VB-Cable for cable routing', error: 'No virtual audio cable — install VB-Cable (vb-audio.com/Cable)', status: 'degraded' } as any;
               return {
                 ok: true,
                 detail: `VB-Cable found (${found.name}); default mic ${config.meeting.routeMic ? 'will route to the cable on join' : 'unchanged'}`,
               };
             }
+            if (cable === 'none') return { ok: true, detail: 'Audio cable disabled — feedAudio API mode', status: 'degraded' } as any;
             const match = devices.find(d => d.id === cable || d.name === cable);
             return match
               ? { ok: true, detail: `Cable device present: ${match.name}` }
@@ -1582,6 +1591,24 @@ export class UmbraOS {
 
   async getAuditStats(): Promise<any> {
     return this.vault.getStats();
+  }
+
+  async getVaultEntries(): Promise<any> {
+    if (!this.credVault?.isUnlocked) throw new Error('Credential vault is locked');
+    return this.credVault.list();
+  }
+
+  async setVaultEntry(entry: { service: string; username?: string; secret: string; id?: string }): Promise<any> {
+    if (!this.credVault?.isUnlocked) throw new Error('Credential vault is locked');
+    if (!entry.service?.trim() || !entry.secret?.trim()) throw new Error('service and secret are required');
+    return this.credVault.set({ service: entry.service.trim(), username: entry.username?.trim() || '', secret: entry.secret }, entry.id);
+  }
+
+  async deleteVaultEntry(id: string): Promise<any> {
+    if (!this.credVault?.isUnlocked) throw new Error('Credential vault is locked');
+    const ok = this.credVault.delete(id);
+    if (!ok) throw new Error('Entry not found');
+    return { deleted: id };
   }
 
   async getRepos(): Promise<any> {

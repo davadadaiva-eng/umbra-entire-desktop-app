@@ -1,11 +1,11 @@
 import { useRef, useEffect, useState } from 'react';
 import gsap from 'gsap';
 import { useAppStore } from '../stores/appStore';
-import { isBackendAvailable, getAuditStats, type BackendError } from '../lib/backend';
+import { isBackendAvailable, getAuditStats, getVaultEntries, setVaultEntry, deleteVaultEntry, type VaultEntry as BackendVaultEntry, type BackendError } from '../lib/backend';
 import { Search, Plus, Copy, Trash2, Lock, Globe, CreditCard, Wifi, KeyRound, Mail, Eye, EyeOff, Check, Shield } from 'lucide-react';
 
 interface VaultItem {
-  id: number;
+  id: string;
   kind: 'password' | 'email' | 'card' | 'note' | 'wifi';
   name: string;
   username?: string;
@@ -14,36 +14,6 @@ interface VaultItem {
 }
 
 type VaultKind = VaultItem['kind'];
-
-export const VAULT_HASH_KEY = 'umbra-vault-key-v1';
-
-async function hashKey(key: string): Promise<string> {
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('umbra-vault::' + key));
-  return Array.from(new Uint8Array(buf))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
-function loadVaultHash(): string | null {
-  try {
-    return localStorage.getItem(VAULT_HASH_KEY);
-  } catch {
-    return null;
-  }
-}
-
-const SEED: VaultItem[] = [
-  { id: 1, kind: 'password', name: 'Gmail — mazin@umbra.ai', username: 'mazin@umbra.ai', secret: 'pYx9!qLz2#mN7@', url: 'mail.google.com' },
-  { id: 2, kind: 'password', name: 'Supabase production', username: 'root', secret: 'sb-9f2-kD31#qa', url: 'supabase.com' },
-  { id: 3, kind: 'card', name: 'Umbra Corporate · Visa', username: '•••• 4821', secret: '4521 8890 3312 4821', url: '12/29' },
-  { id: 4, kind: 'wifi', name: 'UmbraLab 5GHz', username: 'umbralab-5g', secret: 'Gr33nfield*24', url: 'WPA2-Personal' },
-  { id: 5, kind: 'note', name: 'Recovery phrases', username: 'Solana mainnet', secret: 'mnemonic · 24 words', url: '—' },
-  { id: 6, kind: 'password', name: 'AWS root console', username: 'mazin+aws', secret: 'aws#Rr11!dRf4', url: 'console.aws.amazon.com' },
-  { id: 7, kind: 'card', name: 'Amex · Business Gold', username: '•••• 0031', secret: '3782 8224 6310 0031', url: '05/28' },
-  { id: 8, kind: 'password', name: 'Notion workspace', username: 'mazin@umbra.ai', secret: 'n0t1on#Rb9&', url: 'notion.so' },
-  { id: 9, kind: 'note', name: 'Recovery codes · GitHub', username: 'mazin-o', secret: 'backup · 8 codes', url: 'github.com' },
-  { id: 10, kind: 'wifi', name: 'Umbra HQ · Guest', username: 'umbra-guest', secret: 'Umbra#Guest1', url: 'WPA2-Personal' },
-];
 
 const KIND_META: Record<VaultKind, { icon: typeof Globe; label: string }> = {
   password: { icon: KeyRound, label: 'Password' },
@@ -55,26 +25,59 @@ const KIND_META: Record<VaultKind, { icon: typeof Globe; label: string }> = {
 
 const KIND_OPTIONS: VaultKind[] = ['password', 'email', 'card', 'wifi', 'note'];
 
+function toVaultItem(e: BackendVaultEntry): VaultItem {
+  // Map backend service -> kind heuristic; store kind in username prefix if needed, else default password
+  const service = e.service || '';
+  const lower = service.toLowerCase();
+  let kind: VaultKind = 'password';
+  if (lower.includes('wifi') || lower.includes('wpa')) kind = 'wifi';
+  else if (lower.includes('card') || lower.includes('visa') || lower.includes('amex')) kind = 'card';
+  else if (lower.includes('note') || lower.includes('recovery')) kind = 'note';
+  else if (lower.includes('mail') || lower.includes('email')) kind = 'email';
+  return { id: e.id, kind, name: service, username: e.username, secret: e.secret, url: '' };
+}
+
 export function VaultView() {
   const { avatar } = useAppStore();
   const headerRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const [stage, setStage] = useState<'setup' | 'unlock' | 'open'>('setup');
-  const [masterKey, setMasterKey] = useState('');
-  const [confirmKey, setConfirmKey] = useState('');
-  const [lockError, setLockError] = useState('');
-  const [items, setItems] = useState<VaultItem[]>(SEED);
+  const [items, setItems] = useState<VaultItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
   const [query, setQuery] = useState('');
-  const [revealed, setRevealed] = useState<Set<number>>(new Set());
-  const [copied, setCopied] = useState<number | null>(null);
+  const [revealed, setRevealed] = useState<Set<string>>(new Set());
+  const [copied, setCopied] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [draftKind, setDraftKind] = useState<VaultKind>('password');
-  const [draft, setDraft] = useState<{ name: string; secret: string }>({ name: '', secret: '' });
+  const [draft, setDraft] = useState<{ name: string; secret: string; username: string }>({ name: '', secret: '', username: '' });
   const [auditStats, setAuditStats] = useState<Record<string, unknown> | null>(null);
   const [auditError, setAuditError] = useState('');
+  const [vaultError, setVaultError] = useState('');
+
+  const loadVault = async () => {
+    setLoading(true);
+    setVaultError('');
+    try {
+      const online = await isBackendAvailable();
+      setBackendOnline(online);
+      if (!online) {
+        setVaultError('Backend offline — vault requires Umbra backend (AES-256-GCM, HWID+DPAPI). Start backend to manage credentials securely.');
+        setItems([]);
+        return;
+      }
+      const res = await getVaultEntries();
+      const mapped = (res.entries || []).map(toVaultItem);
+      // Hide internal smartthings PAT from the Vault UI (managed via Smart Home)
+      setItems(mapped.filter(i => i.name !== 'smartthings'));
+    } catch (e) {
+      setVaultError((e as BackendError).message || 'Failed to load vault');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    setStage(loadVaultHash() ? 'unlock' : 'setup');
+    void loadVault();
   }, []);
 
   useEffect(() => {
@@ -101,134 +104,56 @@ export function VaultView() {
       }
     }, [headerRef, listRef]);
     return () => ctx.revert();
-  }, [stage]);
-
-  const setupKey = async () => {
-    if (masterKey.length < 8) {
-      setLockError('Use at least 8 characters.');
-      return;
-    }
-    if (masterKey !== confirmKey) {
-      setLockError('The two passwords do not match.');
-      return;
-    }
-    const hash = await hashKey(masterKey);
-    try {
-      localStorage.setItem(VAULT_HASH_KEY, hash);
-    } catch {
-      // ignore
-    }
-    setStage('open');
-    setMasterKey('');
-    setConfirmKey('');
-    setLockError('');
-  };
-
-  const unlock = async () => {
-    const stored = loadVaultHash();
-    if (!stored) {
-      setStage('setup');
-      return;
-    }
-    const hash = await hashKey(masterKey);
-    if (hash !== stored) {
-      setLockError('Wrong master key — try again.');
-      return;
-    }
-    setStage('open');
-    setMasterKey('');
-    setLockError('');
-  };
-
-  const resetVault = () => {
-    if (!window.confirm('Reset the vault? Your master key will be removed and the vault reseeded.')) return;
-    try {
-      localStorage.removeItem(VAULT_HASH_KEY);
-    } catch {
-      // ignore
-    }
-    setItems(SEED);
-    setStage('setup');
-    setMasterKey('');
-    setConfirmKey('');
-    setLockError('');
-  };
+  }, [items.length]);
 
   const filtered = items.filter((i) => `${i.name} ${i.username} ${i.url}`.toLowerCase().includes(query.toLowerCase()));
 
-  const copy = (id: number) => {
+  const copy = async (id: string) => {
     const item = items.find((i) => i.id === id);
-    if (!item) return;
+    if (!item?.secret) return;
+    try {
+      await navigator.clipboard.writeText(item.secret);
+    } catch {
+      // fallback: create temp textarea
+      const ta = document.createElement('textarea');
+      ta.value = item.secret;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
     setCopied(id);
     setTimeout(() => setCopied(null), 1400);
   };
 
-  const remove = (id: number) => setItems((cur) => cur.filter((i) => i.id !== id));
+  const remove = async (id: string) => {
+    try {
+      await deleteVaultEntry(id);
+      setItems((cur) => cur.filter((i) => i.id !== id));
+    } catch (e) {
+      setVaultError((e as BackendError).message || 'Delete failed');
+    }
+  };
 
-  const addItem = () => {
-    if (!draft.name.trim()) return;
-    setItems((cur) => [...cur, { id: Date.now(), kind: draftKind, name: draft.name, secret: draft.secret || '••••', url: '—' }]);
-    setDraft({ name: '', secret: '' });
-    setAdding(false);
+  const addItem = async () => {
+    if (!draft.name.trim() || !draft.secret.trim()) return;
+    try {
+      const res = await setVaultEntry({ service: draft.name.trim(), username: draft.username.trim(), secret: draft.secret });
+      const item = toVaultItem(res.entry as BackendVaultEntry);
+      // Preserve chosen kind for display (store kind hint in service? we already map)
+      (item as VaultItem).kind = draftKind;
+      setItems((cur) => [...cur, item]);
+      setDraft({ name: '', secret: '', username: '' });
+      setAdding(false);
+      setVaultError('');
+    } catch (e) {
+      setVaultError((e as BackendError).message || 'Save failed');
+    }
   };
 
   const auditEntries = auditStats ? (auditStats.entries ?? auditStats.totalEntries ?? 0) : 0;
   const auditLastTime = auditStats?.lastEntryTime ? new Date(String(auditStats.lastEntryTime)) : null;
-  const auditIntegrity = auditStats?.integrity === true || auditStats?.integrityOk === true;
-
-  if (stage !== 'open') {
-    return (
-      <div className="flex flex-col h-full items-center justify-center px-6">
-        <div className="card w-full max-w-sm p-8 text-center" style={{ background: 'var(--surface-1)' }}>
-          <div className="w-14 h-14 rounded-2xl mx-auto flex items-center justify-center mb-4" style={{ background: `${avatar.accent}1c`, color: avatar.accent, border: `1px solid ${avatar.accent}44` }}>
-            <Lock size={22} />
-          </div>
-          <h1 className="hero-heading font-black uppercase tracking-tight text-xl">{stage === 'setup' ? 'Create your master key' : 'Vault Locked'}</h1>
-          <p className="text-xs font-light mt-1 mb-5" style={{ color: 'var(--text-dim)' }}>
-            {stage === 'setup'
-              ? 'Your emails, passwords and credentials live here. Choose a master password only you know — it unlocks the vault on this machine.'
-              : 'Everything is encrypted with your master key. This screen never leaves your machine.'}
-          </p>
-          <div className="space-y-2 mb-3">
-            <input
-              type="password"
-              value={masterKey}
-              onChange={(e) => setMasterKey(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && (stage === 'setup' ? void setupKey() : void unlock())}
-              placeholder="Master password · 8+ characters"
-              className="w-full px-3 py-2.5 rounded-xl outline-none text-center text-sm"
-              style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-primary)', fontFamily: 'var(--font)' }}
-            />
-            {stage === 'setup' && (
-              <input
-                type="password"
-                value={confirmKey}
-                onChange={(e) => setConfirmKey(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && void setupKey()}
-                placeholder="Confirm master password"
-                className="w-full px-3 py-2.5 rounded-xl outline-none text-center text-sm"
-                style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-primary)', fontFamily: 'var(--font)' }}
-              />
-            )}
-            {lockError && (
-              <p className="text-[11px] text-center" style={{ color: '#FF6B6B' }}>{lockError}</p>
-            )}
-          </div>
-          <button
-            onClick={() => void (stage === 'setup' ? setupKey() : unlock())}
-            disabled={masterKey.length < 8}
-            className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium disabled:opacity-40 transition-opacity"
-            style={{ background: avatar.accent, color: '#fff', border: 'none', fontFamily: 'var(--font)' }}
-          >
-            {stage === 'setup' ? 'Create & unlock' : 'Unlock Vault'}
-          </button>
-          <button className="text-[11px] mt-4" style={{ color: 'var(--text-faint)', cursor: 'pointer' }} onClick={stage === 'setup' ? undefined : resetVault}>
-            {stage === 'setup' ? 'Vault stays on this device' : 'Forgot master key?'}
-          </button>
-        </div>
-      </div>
-    );
-  }
+  const auditIntegrity = auditStats?.integrity === true || auditStats?.integrityOk === true || (auditStats as any)?.chainValid === true;
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -236,7 +161,7 @@ export function VaultView() {
         <div>
           <h1 className="hero-heading font-black uppercase tracking-tight leading-none" style={{ fontSize: 'clamp(1.6rem, 3.5vw, 2.4rem)' }}>Vault</h1>
           <p className="text-sm mt-1 font-light" style={{ color: 'var(--text-dim)' }}>
-            {items.length} items · AES-256 · offline-first
+            {loading ? 'Loading...' : `${items.length} items · AES-256-GCM · HWID+DPAPI · ${backendOnline ? 'backend' : 'offline'}`}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -257,6 +182,13 @@ export function VaultView() {
       </div>
 
       <div ref={listRef} className="flex-1 overflow-y-auto px-6 py-5" style={{ maxWidth: 880, width: '100%', margin: '0 auto' }}>
+        {vaultError && (
+          <div className="card p-3 mb-4 flex items-center gap-2" style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)' }}>
+            <Lock size={14} style={{ color: '#ef4444' }} />
+            <p className="text-xs" style={{ color: '#ef4444' }}>{vaultError}</p>
+            <button onClick={() => void loadVault()} className="ml-auto text-[11px] px-2 py-1 rounded-md" style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline)' }}>Retry</button>
+          </div>
+        )}
         {auditStats && (
           <div className="card p-4 mb-4" style={{ background: 'var(--surface-1)' }}>
             <div className="flex items-center gap-2.5 mb-3">
@@ -320,76 +252,84 @@ export function VaultView() {
               <input
                 value={draft.name}
                 onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
-                placeholder="Name — e.g. Twitter admin"
+                placeholder="Service — e.g. GitHub"
+                className="flex-1 px-3 py-2 rounded-xl outline-none text-sm"
+                style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-primary)', fontFamily: 'var(--font)' }}
+              />
+              <input
+                value={draft.username}
+                onChange={(e) => setDraft((d) => ({ ...d, username: e.target.value }))}
+                placeholder="Username"
                 className="flex-1 px-3 py-2 rounded-xl outline-none text-sm"
                 style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-primary)', fontFamily: 'var(--font)' }}
               />
               <input
                 value={draft.secret}
                 onChange={(e) => setDraft((d) => ({ ...d, secret: e.target.value }))}
-                placeholder="Credential"
+                placeholder="Secret"
                 className="flex-1 px-3 py-2 rounded-xl outline-none text-sm"
                 style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-primary)', fontFamily: 'var(--font)' }}
               />
-              <button onClick={addItem} className="px-4 rounded-xl text-sm" style={{ background: avatar.accent, color: '#fff', border: 'none', fontFamily: 'var(--font)' }}>
+              <button onClick={() => void addItem()} className="px-4 rounded-xl text-sm" style={{ background: avatar.accent, color: '#fff', border: 'none', fontFamily: 'var(--font)' }}>
                 Save
               </button>
             </div>
+            <p className="text-[11px] mt-2" style={{ color: 'var(--text-faint)' }}>Encrypted at rest (AES-256-GCM, HWID+DPAPI). Stored in <code>C:\Users\...\.umbra\vault.bin</code>.</p>
           </div>
         )}
 
-        {filtered.map((i) => {
-          const Icon = KIND_META[i.kind].icon;
-          const isRevealed = revealed.has(i.id);
-          const isCopied = copied === i.id;
-          return (
-            <div key={i.id} className="vault-row card flex items-center gap-4 px-4 py-3 mb-2 group" style={{ background: 'var(--surface-1)' }}>
-              <span className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: 'var(--surface-2)', color: avatar.accent, border: '1px solid var(--hairline-strong)' }}>
-                <Icon size={15} />
-              </span>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium truncate" style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }}>{i.name}</span>
-                  {i.url && i.url !== '—' && (
-                    <span className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md flex-shrink-0" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid var(--hairline)', color: 'var(--text-faint)' }}>
-                      <Globe size={9} /> {i.url}
-                    </span>
-                  )}
+        {loading ? (
+          <p className="text-sm text-center py-12" style={{ color: 'var(--text-faint)' }}>Loading vault…</p>
+        ) : filtered.length === 0 ? (
+          <p className="text-sm font-light text-center py-16" style={{ color: 'var(--text-faint)' }}>{items.length === 0 ? 'Vault is empty — add your first credential.' : `Nothing matches "${query}".`}</p>
+        ) : (
+          filtered.map((i) => {
+            const Icon = KIND_META[i.kind].icon;
+            const isRevealed = revealed.has(i.id);
+            const isCopied = copied === i.id;
+            return (
+              <div key={i.id} className="vault-row card flex items-center gap-4 px-4 py-3 mb-2 group" style={{ background: 'var(--surface-1)' }}>
+                <span className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: 'var(--surface-2)', color: avatar.accent, border: '1px solid var(--hairline-strong)' }}>
+                  <Icon size={15} />
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium truncate" style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }}>{i.name}</span>
+                    {i.username && (
+                      <span className="text-[11px] px-1.5 py-0.5 rounded-md" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid var(--hairline)', color: 'var(--text-faint)' }}>{i.username}</span>
+                    )}
+                  </div>
+                  <p className="text-[11px] font-mono mt-0.5 truncate" style={{ color: isRevealed ? 'var(--text-primary)' : 'var(--text-faint)' }}>
+                    {isRevealed ? i.secret : '••••••••••••'}
+                  </p>
                 </div>
-                <p className="text-[11px] font-mono mt-0.5 truncate" style={{ color: isRevealed ? 'var(--text-primary)' : 'var(--text-faint)' }}>
-                  {isRevealed ? i.secret : '••••••••••••'}
-                </p>
+                <button
+                  onClick={() => { setRevealed((r) => { const n = new Set(r); if (n.has(i.id)) n.delete(i.id); else n.add(i.id); return n; }); }}
+                  className="w-7 h-7 rounded-md flex items-center justify-center transition-colors opacity-60 group-hover:opacity-100"
+                  style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-dim)' }}
+                  title="Reveal / hide"
+                >
+                  {isRevealed ? <EyeOff size={12} /> : <Eye size={12} />}
+                </button>
+                <button
+                  onClick={() => void copy(i.id)}
+                  className="w-7 h-7 rounded-md flex items-center justify-center transition-colors opacity-60 group-hover:opacity-100"
+                  style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: isCopied ? '#22c55e' : 'var(--text-dim)' }}
+                  title="Copy to clipboard"
+                >
+                  {isCopied ? <Check size={12} /> : <Copy size={12} />}
+                </button>
+                <button
+                  onClick={() => void remove(i.id)}
+                  className="w-7 h-7 rounded-md flex items-center justify-center transition-colors opacity-0 group-hover:opacity-100"
+                  style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: '#ef4444' }}
+                  title="Delete"
+                >
+                  <Trash2 size={12} />
+                </button>
               </div>
-              <button
-                onClick={() => { setRevealed((r) => { const n = new Set(r); if (n.has(i.id)) n.delete(i.id); else n.add(i.id); return n; }); }}
-                className="w-7 h-7 rounded-md flex items-center justify-center transition-colors opacity-60 group-hover:opacity-100"
-                style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-dim)' }}
-                title="Reveal / hide"
-              >
-                {isRevealed ? <EyeOff size={12} /> : <Eye size={12} />}
-              </button>
-              <button
-                onClick={() => copy(i.id)}
-                className="w-7 h-7 rounded-md flex items-center justify-center transition-colors opacity-60 group-hover:opacity-100"
-                style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: isCopied ? '#22c55e' : 'var(--text-dim)' }}
-                title="Copy to clipboard"
-              >
-                {isCopied ? <Check size={12} /> : <Copy size={12} />}
-              </button>
-              <button
-                onClick={() => remove(i.id)}
-                className="w-7 h-7 rounded-md flex items-center justify-center transition-colors opacity-0 group-hover:opacity-100"
-                style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: '#ef4444' }}
-                title="Delete"
-              >
-                <Trash2 size={12} />
-              </button>
-            </div>
-          );
-        })}
-
-        {filtered.length === 0 && (
-          <p className="text-sm font-light text-center py-16" style={{ color: 'var(--text-faint)' }}>Nothing in the vault matches "{query}".</p>
+            );
+          })
         )}
       </div>
     </div>

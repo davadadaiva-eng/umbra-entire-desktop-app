@@ -152,17 +152,15 @@ export class MeetingCompanion {
   /** Begin capturing meeting audio → transcript chunks (and execute orders). */
   startListening(): void {
     if (!this.session) throw new Error('Join a meeting first');
-    if (!this.options.recorder) {
-      throw new Error('Listening needs a loopback recorder (set meeting.loopbackEnabled)');
-    }
     if (!this.options.stt && !this.options.diarize) {
       throw new Error('Listening needs an STT engine or diarizer (set voice.enabled + sttProvider, or voice.asrProvider=vibevoice)');
     }
     if (this.listening) return;
     this.listening = true;
     this.session.status = 'listening';
-    getLogger().info({ session: this.session.id }, 'Meeting listening started');
-    void this.loopOnce();
+    getLogger().info({ session: this.session.id, recorder: !!this.options.recorder, feedAudioOnly: !this.options.recorder }, 'Meeting listening started');
+    if (this.options.recorder) void this.loopOnce();
+    else getLogger().info('Meeting listening in feedAudio-only mode — push audio via POST /api/meeting/audio');
   }
 
   stopListening(): void {
@@ -372,6 +370,7 @@ export class MeetingCompanion {
 
   private async loopOnce(): Promise<void> {
     if (!this.listening || !this.session) return;
+    if (!this.options.recorder) return;
     const chunkSec = this.options.chunkSec ?? 12;
     const chunkStartedAt = Date.now();
     try {

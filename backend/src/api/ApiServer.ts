@@ -231,6 +231,10 @@ export interface ApiServerDeps {
   smartSetToken(token: string): Promise<unknown>;
   /** Smart Home — disconnect (clear PAT). */
   smartClearToken(): Promise<unknown>;
+  /** Vault — credential store (AES-256-GCM, HWID+DPAPI). */
+  getVaultEntries(): Promise<unknown>;
+  setVaultEntry(entry: { service: string; username?: string; secret: string; id?: string }): Promise<unknown>;
+  deleteVaultEntry(id: string): Promise<unknown>;
   /** Carrusel — start/stop the Open Carrusel server. */
   carruselStart(): Promise<unknown>;
   /** Carrusel — stop the Open Carrusel server. */
@@ -1012,6 +1016,16 @@ export class ApiServer {
         if (!id) throw new Error('id is required');
         return { cancelled: await this.deps.smartScheduleCancel(id) };
       }],
+      // ── Vault (credential store) ──────────────────────────────
+      [/^GET \/api\/vault\/entries$/, async () => ({ entries: await this.deps.getVaultEntries() })],
+      [/^POST \/api\/vault\/entry$/, async (_url, body) => {
+        const service = String(body.service || '').trim();
+        const username = body.username !== undefined ? String(body.username) : '';
+        const secret = String(body.secret || '');
+        const id = body.id !== undefined ? String(body.id) : undefined;
+        return { entry: await this.deps.setVaultEntry({ service, username, secret, id }) };
+      }],
+      [/^DELETE \/api\/vault\/entry\/([\w-]+)$/, async (_url, _body, match) => ({ deleted: await this.deps.deleteVaultEntry(match![1]) })],
       // ── Carousel (Open Carrusel) ──────────────────────────────
       [/^POST \/api\/carrusel\/start$/, async () => ({ status: await this.deps.carruselStart() })],
       [/^POST \/api\/carrusel\/stop$/, async () => ({ status: await this.deps.carruselStop() })],
