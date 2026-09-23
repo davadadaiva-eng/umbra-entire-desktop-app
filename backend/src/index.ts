@@ -1204,10 +1204,15 @@ export class UmbraOS {
                 : { ok: false, error: 'Voicebox not running — start it (docs/voicebox-setup.md)' };
             }
             if (provider === 'faster-whisper') {
-              const running = this.fasterWhisperStt ? await this.fasterWhisperStt.isRunning().catch(() => false) : false;
-              return running
-                ? { ok: true, detail: 'Faster-Whisper STT ready at ' + (config.voice.fasterWhisperUrl || 'http://127.0.0.1:17510') }
-                : { ok: false, error: 'Faster-Whisper not running — start `npm run whisper:stt-server`' };
+              try {
+                const url = (config.voice.fasterWhisperUrl || 'http://127.0.0.1:17510').replace(/\/+$/, '') + '/health';
+                const res = await HttpBridge.request({ url, method: 'GET', timeoutMs: 5000 });
+                const data: any = res.data || {};
+                if (data?.state === 'ready' || data?.ok) return { ok: true, detail: `Faster-Whisper STT ready at ${url} (${data.model || 'base'})` };
+                return { ok: false, error: `Faster-Whisper at ${url} not ready: ${data?.state || res.status} — start npm run whisper:stt-server` };
+              } catch (e: any) {
+                return { ok: false, error: `Faster-Whisper at ${config.voice.fasterWhisperUrl} unreachable: ${e.message} — ensure server on 17510 is running` };
+              }
             }
             return { ok: false, error: `Unknown STT provider: ${provider}` };
           },
@@ -1230,10 +1235,15 @@ export class UmbraOS {
                 : { ok: false, error: 'Voicebox not running — start it (docs/voicebox-setup.md)' };
             }
             if (tts === 'piper') {
-              const running = this.piperTts ? await this.piperTts.isRunning().catch(() => false) : false;
-              return running
-                ? { ok: true, detail: 'Piper TTS running at ' + (config.voice.piperUrl || 'http://127.0.0.1:17520') }
-                : { ok: false, error: 'Piper TTS not running — start `npm run piper:tts-server`' };
+              try {
+                const url = (config.voice.piperUrl || 'http://127.0.0.1:17520').replace(/\/+$/, '') + '/health';
+                const res = await HttpBridge.request({ url, method: 'GET', timeoutMs: 5000 });
+                const data: any = res.data || {};
+                if (data?.ok || data?.state === 'ready') return { ok: true, detail: `Piper TTS ready at ${url} voice ${data.voice || config.voice.piperVoice}` };
+                return { ok: false, error: `Piper at ${url} not ready: ${data?.state || res.status}` };
+              } catch (e: any) {
+                return { ok: false, error: `Piper at ${config.voice.piperUrl} unreachable: ${e.message}` };
+              }
             }
             return { ok: false, error: `Unknown TTS provider: ${tts}` };
           },
