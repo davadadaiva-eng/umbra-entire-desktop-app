@@ -53,14 +53,17 @@ export interface CursorPos {
   y: number;
 }
 
-const PS_CURSOR_SCRIPT = `$sig = @'
+const CURSOR_SCRIPT_VERSION = '2';
+
+const PS_CURSOR_SCRIPT = `#umbra-cursor-v${CURSOR_SCRIPT_VERSION}
+$sig = @'
 [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
 public struct POINT { public int X; public int Y; }
 '@
 $null = Add-Type -MemberDefinition $sig -Name "CursorAPI" -Namespace Win32 -PassThru
 $p = New-Object Win32.CursorAPI+POINT
 if ([Win32.CursorAPI]::GetCursorPos([ref]$p)) {
-  Write-Output ($p.X + "|" + $p.Y)
+  Write-Output ("{0}|{1}" -f $p.X, $p.Y)
 } else {
   Write-Output "-1|-1"
 }`;
@@ -69,6 +72,24 @@ if ([Win32.CursorAPI]::GetCursorPos([ref]$p)) {
  * Current mouse cursor position in screen coordinates (used by screen
  * awareness so Umbra knows exactly what you're pointing at).
  */
+function ensureCursorScript(tmpDir: string): string {
+  const psFile = path.join(tmpDir, 'get-cursor.ps1');
+  try {
+    const existing = fs.existsSync(psFile) ? fs.readFileSync(psFile, 'utf-8') : '';
+    if (existing.includes(`#umbra-cursor-v${CURSOR_SCRIPT_VERSION}`)) return psFile;
+  } catch {}
+  const tmp = psFile + '.tmp';
+  try {
+    fs.writeFileSync(tmp, PS_CURSOR_SCRIPT, 'utf-8');
+    fs.renameSync(tmp, psFile);
+  } catch {
+    try { fs.writeFileSync(psFile, PS_CURSOR_SCRIPT, 'utf-8'); } catch {}
+  }
+  return psFile;
+}
+
+const FOREGROUND_SCRIPT_VERSION = '2';
+
 export function getCursorPos(): CursorPos {
   try {
     const tmpDir = (() => {
@@ -76,8 +97,7 @@ export function getCursorPos(): CursorPos {
       if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
       return d;
     })();
-    const psFile = path.join(tmpDir, 'get-cursor.ps1');
-    fs.writeFileSync(psFile, PS_CURSOR_SCRIPT, 'utf-8');
+    const psFile = ensureCursorScript(tmpDir);
 
     const output = execSync(
       `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${psFile}"`,
@@ -114,6 +134,23 @@ function extractFilePath(appName: string, windowTitle: string): string | undefin
   return undefined;
 }
 
+function ensureForegroundScript(tmpDir: string): string {
+  const psFile = path.join(tmpDir, 'get-foreground.ps1');
+  const versioned = `#umbra-foreground-v${FOREGROUND_SCRIPT_VERSION}\n` + PS_SCRIPT;
+  try {
+    const existing = fs.existsSync(psFile) ? fs.readFileSync(psFile, 'utf-8') : '';
+    if (existing.includes(`#umbra-foreground-v${FOREGROUND_SCRIPT_VERSION}`)) return psFile;
+  } catch {}
+  const tmp = psFile + '.tmp';
+  try {
+    fs.writeFileSync(tmp, versioned, 'utf-8');
+    fs.renameSync(tmp, psFile);
+  } catch {
+    try { fs.writeFileSync(psFile, versioned, 'utf-8'); } catch {}
+  }
+  return psFile;
+}
+
 export function getForegroundWindowInfo(): WindowInfo {
   try {
     const tmpDir = (() => {
@@ -121,8 +158,7 @@ export function getForegroundWindowInfo(): WindowInfo {
       if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
       return d;
     })();
-    const psFile = path.join(tmpDir, 'get-foreground.ps1');
-    fs.writeFileSync(psFile, PS_SCRIPT, 'utf-8');
+    const psFile = ensureForegroundScript(tmpDir);
 
     const output = execSync(
       `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${psFile}"`,
@@ -132,11 +168,13 @@ export function getForegroundWindowInfo(): WindowInfo {
     if (output) {
       const parts = output.split('|');
       if (parts.length >= 2) {
-        const rawName = parts[0] || 'unknown';
-        const appName = rawName + '.exe';
+        const rawName = (parts[0] || 'unknown').trim();
+        const lower = rawName.toLowerCase();
+        const appName = lower.endsWith('.exe') ? rawName : rawName + '.exe';
         const windowTitle = parts.slice(1, parts.length - 1).join('|');
-        const url = (parts[parts.length - 1] || '').trim() || undefined;
-        const filePath = extractFilePath(rawName.toLowerCase(), windowTitle);
+        const urlRaw = (parts[parts.length - 1] || '').trim();
+        const url = urlRaw || undefined;
+        const filePath = extractFilePath(lower, windowTitle);
         cachedInfo = { appName, windowTitle, url, filePath };
       }
     }

@@ -3340,7 +3340,11 @@ export class UmbraOS {
 
   async smartDevices(): Promise<any> {
     if (!this.smartThings.isConfigured()) throw new Error('SmartThings is not configured (set UMBRA_SMARTTHINGS_TOKEN)');
-    return this.smartThings.getSmartHomeDevices();
+    const timeout = <T>(p: Promise<T>, ms: number): Promise<T> => Promise.race([
+      p,
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('SmartThings request timed out (api.smartthings.com unreachable — check token/network)')), ms)),
+    ]);
+    return timeout(this.smartThings.getSmartHomeDevices(), 8000);
   }
 
   async smartCommand(deviceId: string, command: 'on' | 'off'): Promise<any> {
@@ -3555,6 +3559,13 @@ async function main(): Promise<void> {
   process.on('SIGTERM', async () => {
     await os.shutdown();
     process.exit(0);
+  });
+
+  process.on('uncaughtException', (err) => {
+    try { getLogger().error({ err: (err as Error).message, stack: (err as Error).stack }, 'uncaughtException — keeping process alive'); } catch { console.error('uncaughtException', err); }
+  });
+  process.on('unhandledRejection', (reason) => {
+    try { getLogger().error({ reason: String(reason) }, 'unhandledRejection — keeping process alive'); } catch { console.error('unhandledRejection', reason); }
   });
 }
 

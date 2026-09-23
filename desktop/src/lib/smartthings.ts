@@ -77,7 +77,7 @@ export function getSmartThingsToken(): string {
 }
 
 export function isSmartThingsConfigured(): boolean {
-  return Boolean(getSmartThingsToken()) || Boolean(bridge()?.smartthingsFetch) || import.meta.env.DEV;
+  return Boolean(getSmartThingsToken()) || Boolean(bridge()?.smartthingsFetch);
 }
 
 function authHeaders(): Record<string, string> {
@@ -91,9 +91,11 @@ async function stRequest<T>(method: 'GET' | 'POST', path: string, body?: unknown
   if (ipc) {
     const res = await ipc(method, path, body);
     if (res.status < 200 || res.status >= 300) {
-      const msg = typeof res.body === 'object' && res.body !== null && 'message' in res.body
+      let msg = typeof res.body === 'object' && res.body !== null && 'message' in res.body
         ? String((res.body as { message: unknown }).message)
         : `SmartThings HTTP ${res.status}`;
+      if (res.status === 401) msg = 'SmartThings PAT expired/revoked — regenerate at account.smartthings.com/tokens';
+      if (res.status === 403) msg = 'SmartThings PAT missing devices/rooms scope — recreate token with required scopes';
       throw new SmartThingsError(msg, res.status);
     }
     return res.body as T;
@@ -119,9 +121,11 @@ async function stRequest<T>(method: 'GET' | 'POST', path: string, body?: unknown
     let parsed: unknown = null;
     try { parsed = text ? JSON.parse(text) : null; } catch { parsed = text; }
     if (!res.ok) {
-      const msg = typeof parsed === 'object' && parsed !== null && 'message' in parsed
+      let msg = typeof parsed === 'object' && parsed !== null && 'message' in parsed
         ? String((parsed as { message: unknown }).message)
         : `SmartThings HTTP ${res.status}`;
+      if (res.status === 401) msg = 'SmartThings PAT expired/revoked — regenerate at account.smartthings.com/tokens';
+      if (res.status === 403) msg = 'SmartThings PAT missing devices/rooms scope — recreate token with required scopes';
       throw new SmartThingsError(msg, res.status);
     }
     return parsed as T;
@@ -243,7 +247,7 @@ export async function fetchSmartHomeDevices(opts?: { withStates?: boolean }): Pr
     room: roomNameFrom(d, rooms),
     switchCapable: isSwitchCapable(d),
     switchState: null,
-    online: !hasCapability(d, 'healthCheck'),
+    online: true,
   }));
 
   if (withStates) await hydrateStates(normalized);

@@ -5,7 +5,7 @@ import type { AuthResult } from '../lib/auth';
 import { isBackendAvailable, getStatus, getConsent, type BackendStatus, type Task } from '../lib/backend';
 import { connect, disconnect, onEvent, onSnapshot, onAnyEvent, onDisconnect } from '../lib/backendWs';
 
-export type View = 'agent' | 'brain' | 'devices' | 'smarthome' | 'skills' | 'vault' | 'connectors' | 'meetingbot' | 'usage' | 'phone' | 'settings';
+export type View = 'agent' | 'brain' | 'devices' | 'smarthome' | 'skills' | 'vault' | 'connectors' | 'meetingbot' | 'meetings' | 'recall' | 'usage' | 'phone' | 'settings';
 
 export interface AvatarConfig {
   skin: string;

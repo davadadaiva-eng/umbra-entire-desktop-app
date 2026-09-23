@@ -106,6 +106,8 @@ export class PairingOverlay {
   private timer: NodeJS.Timeout | null = null;
   private qrPath: string;
   private psPath: string;
+  private cachedPayload: string | null = null;
+  private cachedExpires = 0;
 
   constructor(dataDir: string) {
     const tmp = path.join(dataDir, 'tmp');
@@ -143,11 +145,27 @@ export class PairingOverlay {
 
   private async refresh(handlers: PairingOverlayHandlers): Promise<void> {
     fs.mkdirSync(path.dirname(this.qrPath), { recursive: true });
-    await QRCode.toFile(this.qrPath, handlers.getPayloadJson(), {
+    const now = Date.now();
+    let payload: string;
+    if (this.cachedPayload && now < this.cachedExpires - 30_000) {
+      payload = this.cachedPayload;
+    } else {
+      payload = handlers.getPayloadJson();
+      this.cachedPayload = payload;
+      try {
+        const parsed = JSON.parse(payload) as { expiresAt?: number };
+        this.cachedExpires = typeof parsed.expiresAt === 'number' ? parsed.expiresAt : now + 5 * 60 * 1000;
+      } catch {
+        this.cachedExpires = now + 5 * 60 * 1000;
+      }
+    }
+    const tmp = this.qrPath + '.tmp';
+    await QRCode.toFile(tmp, payload, {
       errorCorrectionLevel: 'M',
       width: 400,
       margin: 2,
     });
+    try { fs.renameSync(tmp, this.qrPath); } catch { try { fs.copyFileSync(tmp, this.qrPath); fs.unlinkSync(tmp); } catch {} }
   }
 
   private launch(link: string): void {

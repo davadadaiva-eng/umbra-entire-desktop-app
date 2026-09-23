@@ -14,6 +14,8 @@ import { SkillsView } from './components/SkillsView';
 import { VaultView } from './components/VaultView';
 import { ConnectorsView } from './components/ConnectorsView';
 import { MeetingBotView } from './components/MeetingBotView';
+import { MeetingsView } from './components/MeetingsView';
+import { RecallView } from './components/RecallView';
 import { UsageView } from './components/UsageView';
 import { PhoneView } from './components/PhoneView';
 const viewComponents: Record<string, React.FC> = {
@@ -25,6 +27,8 @@ const viewComponents: Record<string, React.FC> = {
   vault: VaultView,
   connectors: ConnectorsView,
   meetingbot: MeetingBotView,
+  meetings: MeetingsView,
+  recall: RecallView,
   usage: UsageView,
   phone: PhoneView,
   settings: SettingsView,

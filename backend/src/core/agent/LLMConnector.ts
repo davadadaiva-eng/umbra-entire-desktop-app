@@ -84,18 +84,22 @@ export class LLMConnector {
       stream: false,
       options: {
         temperature: options.temperature ?? 0.3,
-        num_predict: options.maxTokens ?? 4096,
+        num_predict: Math.min(options.maxTokens ?? 1024, 1024),
       },
     };
 
-    const res = await this.httpsPost(url, body);
+    const res = await this.httpsPost(url, body, {}, 120000);
 
     if (res.status < 200 || res.status >= 300) {
       throw new Error(`Ollama error: ${res.status} ${res.text}`);
     }
 
+    const rawContent = res.data.message?.content || '';
+    const thinking = res.data.message?.thinking || '';
+    // MiniCPM5 thinking models put real answer in `thinking` when content empty; merge both
+    const content = rawContent || thinking || '';
     return {
-      content: res.data.message?.content || '',
+      content,
       modelUsed: model,
       totalTokens: (res.data.prompt_eval_count || 0) + (res.data.eval_count || 0),
       inputTokens: res.data.prompt_eval_count || 0,
@@ -256,7 +260,7 @@ export class LLMConnector {
   }
 
   /** POST JSON via curl.exe (bypasses Node v24 TLS stack). */
-  private httpsPost(url: string, body: any, headers: Record<string, string> = {}): Promise<{ status: number; data: any; text: string }> {
-    return HttpBridge.post(url, body, headers);
+  private httpsPost(url: string, body: any, headers: Record<string, string> = {}, timeoutMs = 60000): Promise<{ status: number; data: any; text: string }> {
+    return HttpBridge.post(url, body, headers, timeoutMs);
   }
 }

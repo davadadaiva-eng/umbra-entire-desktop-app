@@ -50,10 +50,11 @@ export interface SmartThingsConfig {
 }
 
 export function smartThingsConfigFromEnv(): SmartThingsConfig {
+  const token = process.env['UMBRA_SMARTTHINGS_TOKEN'] || process.env['SMARTTHINGS_TOKEN'] || process.env['VITE_SMARTTHINGS_TOKEN'] || '';
   return {
-    enabled: !!process.env['UMBRA_SMARTTHINGS_TOKEN'],
-    token: process.env['UMBRA_SMARTTHINGS_TOKEN'] || '',
-    baseUrl: (process.env['UMBRA_SMARTTHINGS_URL'] || 'https://api.smartthings.com').replace(/\/+$/, ''),
+    enabled: !!token,
+    token,
+    baseUrl: (process.env['UMBRA_SMARTTHINGS_URL'] || process.env['VITE_SMARTTHINGS_URL'] || process.env['SMARTTHINGS_URL'] || 'https://api.smartthings.com').replace(/\/+$/, ''),
   };
 }
 
@@ -121,9 +122,11 @@ export class SmartThingsService {
             try { parsed = data ? JSON.parse(data) : null; } catch { parsed = data; }
             const status = res.statusCode || 0;
             if (status < 200 || status >= 300) {
-              const msg = typeof parsed === 'object' && parsed !== null && 'message' in parsed
+              let msg = typeof parsed === 'object' && parsed !== null && 'message' in parsed
                 ? String((parsed as { message: unknown }).message)
                 : `SmartThings HTTP ${status}`;
+              if (status === 401) msg = 'SmartThings PAT expired/revoked — regenerate at account.smartthings.com/tokens';
+              if (status === 403) msg = 'SmartThings PAT missing devices/rooms scope — recreate token with required scopes';
               reject(new Error(msg));
               return;
             }
@@ -260,7 +263,7 @@ export class SmartThingsService {
       room: d.roomId ? rooms.get(d.roomId) || 'Unassigned' : 'Unassigned',
       switchCapable: this.hasCap(d, SWITCH_CAPABILITY),
       switchState: null,
-      online: !this.hasCap(d, 'healthCheck'),
+      online: true,
     }));
 
     if (withStates) {

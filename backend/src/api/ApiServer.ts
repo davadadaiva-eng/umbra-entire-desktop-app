@@ -381,8 +381,11 @@ export class ApiServer {
       const result = await TenantLedger.run(tenantId, () => handler(url, body));
       this.sendJson(res, 200, result);
     } catch (err: any) {
-      getLogger().warn({ route, err: err.message }, 'API route failed');
-      this.sendJson(res, 500, { error: err.message || 'Internal error' });
+      const msg = err.message || 'Internal error';
+      const isDisabled = /not configured|disabled|unavailable|not enabled|unreachable/i.test(msg);
+      const status = isDisabled ? 503 : 500;
+      getLogger().warn({ route, err: msg, status }, 'API route failed');
+      this.sendJson(res, status, { error: msg, code: isDisabled ? 'SERVICE_DISABLED' : 'INTERNAL_ERROR' });
     }
   }
 

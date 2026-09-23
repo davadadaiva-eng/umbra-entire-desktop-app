@@ -1,12 +1,14 @@
 import { useRef, useEffect } from 'react';
 import gsap from 'gsap';
 import { useAppStore, type View } from '../stores/appStore';
-import { Brain, Settings, LogOut, Bot, Smartphone, Wrench, Lock, Plug, BarChart3, Phone, ChevronLeft, ChevronRight, House, BotMessageSquare } from 'lucide-react';
+import { Brain, Settings, LogOut, Bot, Smartphone, Wrench, Lock, Plug, BarChart3, Phone, ChevronLeft, ChevronRight, House, BotMessageSquare, Users, Search } from 'lucide-react';
 
 const navItems: { id: View; label: string; icon: React.ReactNode }[] = [
   { id: 'agent', label: 'Agent', icon: <Bot size={16} /> },
   { id: 'connectors', label: 'Connectors', icon: <Plug size={16} /> },
   { id: 'meetingbot', label: 'Meeting Bot', icon: <BotMessageSquare size={16} /> },
+  { id: 'meetings', label: 'Meetings', icon: <Users size={16} /> },
+  { id: 'recall', label: 'Recall', icon: <Search size={16} /> },
   { id: 'brain', label: 'Memory', icon: <Brain size={16} /> },
   { id: 'devices', label: 'Devices', icon: <Smartphone size={16} /> },
   { id: 'smarthome', label: 'Smart Home', icon: <House size={16} /> },

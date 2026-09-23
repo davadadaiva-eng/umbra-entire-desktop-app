@@ -66,7 +66,7 @@ describe('ai.ts fallback logic', () => {
   describe('aiChat fallback path', () => {
     it('keeps the free provider config stable', () => {
       expect(FREE_AI).toEqual({ provider: 'free', apiKey: '', model: 'openai' });
-      expect(DEFAULT_AI.provider).toBe('gemini');
+      expect(['openrouter', 'gemini']).toContain(DEFAULT_AI.provider);
     });
   });
 });

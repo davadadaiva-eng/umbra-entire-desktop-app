@@ -100,6 +100,7 @@ function startDaemon(): Promise<void> {
       }
     });
     child.on('error', (e) => { if (!sawReady) reject(e); });
+    child.stdin?.on('error', () => {});
     child.on('exit', () => {
       daemon = null;
       daemonReady = null;
@@ -126,8 +127,18 @@ function request(cmd: string, args: string[] = [], timeoutMs = 60000): Promise<s
             reject: (e) => { clearTimeout(timer); reject(e); },
           });
           const d = daemon;
-          if (!d || !d.stdin) throw new Error('nativecore daemon unavailable');
-          d.stdin.write(JSON.stringify({ id, cmd, args }) + '\n');
+          if (!d || !d.stdin || (d.stdin as any).destroyed || (d.stdin as any).writableEnded || !(d.stdin as any).writable) throw new Error('nativecore daemon unavailable');
+          try {
+            d.stdin.write(JSON.stringify({ id, cmd, args }) + '\n', (err) => {
+              if (err) {
+                const p = pending.get(id);
+                if (p) { pending.delete(id); p.reject(err as Error); }
+              }
+            });
+          } catch (e: any) {
+            pending.delete(id);
+            throw e;
+          }
         });
         return result;
       } catch (e) {
@@ -146,7 +157,15 @@ function request(cmd: string, args: string[] = [], timeoutMs = 60000): Promise<s
 export async function stop(): Promise<void> {
   const d = daemon;
   if (!d || d.exitCode !== null) { daemon = null; daemonReady = null; return; }
-  if (d.stdin) { try { d.stdin.write('exit\n'); } catch { } }
+  if (d.stdin) {
+    try {
+      const s: any = d.stdin;
+      if (s.writable && !s.destroyed && !s.writableEnded) {
+        s.once?.('error', () => {});
+        s.write('exit\n', () => {});
+      }
+    } catch { }
+  }
   await new Promise<void>((resolve) => {
     const t = setTimeout(() => { try { d.kill(); } catch { } resolve(); }, 3000);
     d.once('exit', () => { clearTimeout(t); resolve(); });

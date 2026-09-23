@@ -5,7 +5,7 @@ import { isBackendAvailable, searchKnowledge, type KnowledgeResult } from '../li
 import { brainNotes, attachmentNotes, type BrainNote } from '../lib/brain';
 import { Send, Sparkles, FileText, Bot } from 'lucide-react';
 
-const VIEWS: View[] = ['agent', 'brain', 'skills', 'vault', 'connectors', 'meetings', 'usage', 'phone', 'devices', 'settings'];
+const VIEWS: View[] = ['agent', 'brain', 'devices', 'smarthome', 'skills', 'vault', 'connectors', 'meetingbot', 'meetings', 'recall', 'usage', 'phone', 'settings'];
 
 interface Source {
   id: string;

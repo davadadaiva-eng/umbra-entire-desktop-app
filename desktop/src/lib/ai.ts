@@ -103,6 +103,8 @@ function isTransientError(e: unknown): boolean {
   if (e instanceof QuotaExceededError) return true;
   if (e instanceof TypeError) return true;
   if (e instanceof DOMException && e.name === 'AbortError') return true;
+  if (e instanceof Error && /HTTP 401/.test(e.message)) return true;
+  if (e instanceof Error && /Empty response/.test(e.message)) return true;
   return false;
 }
 

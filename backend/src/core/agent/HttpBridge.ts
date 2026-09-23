@@ -72,14 +72,16 @@ export class HttpBridge {
 
       args.push(url);
 
-      execFile('curl.exe', args, { timeout: timeoutMs + 5000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      execFile('curl.exe', args, { timeout: timeoutMs + 10000, maxBuffer: 20 * 1024 * 1024 }, (err, stdout, stderr) => {
         // Clean up temp file
         if (tmpFile) {
           try { fs.unlinkSync(tmpFile); } catch {}
         }
 
         if (err) {
-          reject(new Error(`curl failed: ${err.message}`));
+          const detail = stderr ? ` stderr=${String(stderr).slice(0,800)}` : '';
+          const out = stdout ? ` stdout=${String(stdout).slice(0,800)}` : '';
+          reject(new Error(`curl failed: ${err.message}${detail}${out} args=${args.slice(0,6).join(' ')}`));
           return;
         }
 

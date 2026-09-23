@@ -211,8 +211,8 @@ async function nodeFetchProxy(providerId, url, method, headers, body, signalToke
 // and requests are performed here with Node's https module.
 function smartthingsRequest(method, requestPath, body) {
   const https = require('https');
-  const token = process.env.SMARTTHINGS_TOKEN || process.env.VITE_SMARTTHINGS_TOKEN || '';
-  const base = (process.env.SMARTTHINGS_URL || 'https://api.smartthings.com').replace(/\/+$/, '');
+  const token = process.env.UMBRA_SMARTTHINGS_TOKEN || process.env.SMARTTHINGS_TOKEN || process.env.VITE_SMARTTHINGS_TOKEN || '';
+  const base = (process.env.UMBRA_SMARTTHINGS_URL || process.env.VITE_SMARTTHINGS_URL || process.env.SMARTTHINGS_URL || 'https://api.smartthings.com').replace(/\/+$/, '');
   return new Promise((resolve, reject) => {
     if (!token) {
       reject(new Error('SmartThings token not configured (set SMARTTHINGS_TOKEN in the environment)'));

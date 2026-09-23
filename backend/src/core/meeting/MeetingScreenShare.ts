@@ -28,9 +28,12 @@ export type ShareTarget = 'screen' | 'window' | 'tab';
 
 const WAIT = `const __wait = (ms) => new Promise((r) => setTimeout(r, ms));`;
 
-const CLICK_HELPER = `const __find = (re) =>
-  [...document.querySelectorAll('button, [role="button"], [aria-label], [data-tooltip]')]
-    .find((el) => re.test((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('data-tooltip') || '') + ' ' + (el.textContent || '')));`;
+const CLICK_HELPER = `const __find = (re) => {
+  const all = [...document.querySelectorAll('button, [role="button"], [aria-label], [data-tooltip]')];
+  // Pierce open shadow roots (Meet/Teams use them)
+  document.querySelectorAll('*').forEach((el) => { if (el.shadowRoot) all.push(...el.shadowRoot.querySelectorAll('button, [role="button"], [aria-label], [data-tooltip]')); });
+  return all.find((el) => re.test((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('data-tooltip') || '') + ' ' + (el.textContent || '')));
+};`;
 
 /** Return a status string describing what happened (or what was not found). */
 export function meetingShareScript(provider: MeetingProvider, target: ShareTarget = 'screen'): string {
@@ -43,21 +46,21 @@ export function meetingShareScript(provider: MeetingProvider, target: ShareTarge
 export function meetingStopShareScript(provider: MeetingProvider): string {
   if (provider === 'meet') {
     return `(async () => { ${WAIT} ${CLICK_HELPER}
-      const stop = __find(/stop presenting|stop sharing|stop screen share|you are presenting/i);
+      const stop = __find(/stop presenting|stop sharing|stop screen share|you are presenting|interrompi presentazione|interrompi condivisione/i);
       if (stop) { stop.click(); return 'stopped sharing'; }
       return 'stop-share button not found';
     })()`;
   }
   if (provider === 'zoom') {
     return `(async () => { ${WAIT} ${CLICK_HELPER}
-      const stop = __find(/stop share/i);
+      const stop = __find(/stop share|interrompi condivisione/i);
       if (stop) { stop.click(); return 'stopped sharing'; }
       return 'stop-share button not found';
     })()`;
   }
   if (provider === 'teams') {
     return `(async () => { ${WAIT} ${CLICK_HELPER}
-      const stop = __find(/stop presenting|stop sharing/i);
+      const stop = __find(/stop presenting|stop sharing|interrompi presentazione/i);
       if (stop) { stop.click(); return 'stopped sharing'; }
       return 'stop-share button not found';
     })()`;
@@ -150,15 +153,16 @@ export function meetingChatScript(provider: MeetingProvider, message: string): s
 
 function meetShareScript(target: ShareTarget): string {
   const source = target === 'tab' ? 'a chrome tab' : target === 'window' ? 'a window' : 'your entire screen';
+  const escSource = source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
   return `(async () => { ${WAIT} ${CLICK_HELPER}
-    const present = __find(/present now|present|share screen|share your screen/i);
+    const present = __find(/present now|present|share screen|share your screen|presenta ora|condividi schermo|condividi/i);
     if (!present) return 'present button not found';
     present.click();
     await __wait(800);
-    const source = __find(new RegExp('${source.replace(/\s+/g, '\\s+')}', 'i'));
+    const source = __find(new RegExp('${escSource}', 'i'));
     if (source) source.click();
     await __wait(400);
-    const confirm = __find(/^\\s*share\\s*$/i);
+    const confirm = __find(/^\\s*share\\s*$|^\\s*condividi\\s*$/i);
     if (confirm) confirm.click();
     return 'share clicked';
   })()`;
@@ -167,14 +171,14 @@ function meetShareScript(target: ShareTarget): string {
 function zoomShareScript(target: ShareTarget): string {
   void target;
   return `(async () => { ${WAIT} ${CLICK_HELPER}
-    const share = __find(/share screen/i);
+    const share = __find(/share screen|condividi schermo|condividi/i);
     if (!share) return 'share screen button not found';
     share.click();
     await __wait(900);
-    const screen = __find(/screen/i);
+    const screen = __find(/screen|schermo/i);
     if (screen) screen.click();
     await __wait(400);
-    const confirm = __find(/^\\s*share\\s*$/i);
+    const confirm = __find(/^\\s*share\\s*$|^\\s*condividi\\s*$/i);
     if (confirm) confirm.click();
     return 'share clicked';
   })()`;
@@ -182,15 +186,16 @@ function zoomShareScript(target: ShareTarget): string {
 
 function teamsShareScript(target: ShareTarget): string {
   const source = target === 'tab' ? 'window' : 'screen';
+  const escSource = source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return `(async () => { ${WAIT} ${CLICK_HELPER}
-    const share = __find(/share content|share screen|^share$/i);
+    const share = __find(/share content|share screen|^share$|condividi/i);
     if (!share) return 'share button not found';
     share.click();
     await __wait(900);
-    const src = __find(new RegExp('${source}', 'i'));
+    const src = __find(new RegExp('${escSource}', 'i'));
     if (src) src.click();
     await __wait(400);
-    const confirm = __find(/share screen/i);
+    const confirm = __find(/share screen|condividi schermo/i);
     if (confirm) confirm.click();
     return 'share clicked';
   })()`;
@@ -198,7 +203,7 @@ function teamsShareScript(target: ShareTarget): string {
 
 function genericShareScript(): string {
   return `(async () => { ${WAIT} ${CLICK_HELPER}
-    const btn = __find(/present|share screen|share content/i);
+    const btn = __find(/present|share screen|share content|condividi|presenta/i);
     if (!btn) return 'share button not found';
     btn.click();
     return 'share clicked';
@@ -207,7 +212,7 @@ function genericShareScript(): string {
 
 function genericStopShareScript(): string {
   return `(async () => { ${WAIT} ${CLICK_HELPER}
-    const stop = __find(/stop presenting|stop sharing|stop share/i);
+    const stop = __find(/stop presenting|stop sharing|stop share|interrompi presentazione|interrompi condivisione/i);
     if (stop) { stop.click(); return 'stopped sharing'; }
     return 'stop-share button not found';
   })()`;

@@ -71,7 +71,7 @@ export class PairingManager {
       expiresAt: payload.expiresAt,
       used: false,
     });
-    getLogger().info({ sessionId }, 'P2P pairing session created');
+    getLogger().debug({ sessionId }, 'P2P pairing session created');
     return payload;
   }
 
