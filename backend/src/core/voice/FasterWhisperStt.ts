@@ -46,9 +46,10 @@ export class FasterWhisperStt {
   }
 
   async health(): Promise<FasterWhisperHealth> {
-    const res = await fetch(`${this.baseUrl}/health`, { signal: AbortSignal.timeout(5000) });
-    if (!res.ok) throw new Error(`Health check failed: ${res.status}`);
-    return res.json() as Promise<FasterWhisperHealth>;
+    const { HttpBridge } = await import('../agent/HttpBridge.js');
+    const res = await HttpBridge.request({ url: `${this.baseUrl}/health`, method: 'GET', timeoutMs: 5000 });
+    if (res.status < 200 || res.status >= 300) throw new Error(`Health check failed: ${res.status}`);
+    return res.data as FasterWhisperHealth;
   }
 
   async isRunning(): Promise<boolean> {

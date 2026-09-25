@@ -179,29 +179,36 @@ async def speak(req: SpeakRequest):
         )
 
     try:
-        # Run piper CLI to synthesize WAV
+        # Windows: piper --output_file - fails with "# channels not specified" — use temp file then read
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = tmp.name
         cmd = [
             STATE["piper_bin"],
             "--model", str(voice_path),
-            "--output_file", "-",  # Output to stdout
+            "--output_file", tmp_path,
             "--speaker", str(req.speaker_id),
             "--length-scale", str(req.length_scale),
             "--noise-scale", str(req.noise_scale),
             "--noise-w", str(req.noise_w),
         ]
-
+        # Piper reads text from stdin when no --input_file given; feed via stdin
         result = subprocess.run(
             cmd,
             input=req.text.encode("utf-8"),
             capture_output=True,
             timeout=30,
         )
-
         if result.returncode != 0:
             error_msg = result.stderr.decode("utf-8", errors="replace")[:500]
+            try: os.unlink(tmp_path)
+            except: pass
             return JSONResponse(status_code=500, content={"error": f"Piper failed: {error_msg}"})
-
-        wav_bytes = result.stdout
+        try:
+            with open(tmp_path, "rb") as f:
+                wav_bytes = f.read()
+        finally:
+            try: os.unlink(tmp_path)
+            except: pass
         if not wav_bytes or len(wav_bytes) < 44:
             return JSONResponse(status_code=500, content={"error": "Piper produced no audio"})
 

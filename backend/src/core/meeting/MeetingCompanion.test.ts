@@ -55,7 +55,7 @@ describe('MeetingCompanion', () => {
   it('requires an STT engine + recorder to start listening', async () => {
     const c = make({ stt: undefined, recorder: undefined });
     await c.join('https://meet.example/abc');
-    expect(() => c.startListening()).toThrow(/needs a loopback recorder/);
+    expect(() => c.startListening()).toThrow(/needs an STT engine/);
   });
 
   it('executes orders heard in the transcript', async () => {
@@ -251,8 +251,16 @@ describe('MeetingCompanion', () => {
   });
 
   it('still requires a recorder even with a diarizer', async () => {
-    const c = make({ stt: undefined, recorder: undefined, diarize: { transcribe: jest.fn() } });
-    await c.join('https://meet.example/abc');
-    expect(() => c.startListening()).toThrow(/loopback recorder/);
+    jest.useFakeTimers();
+    try {
+      const c = make({ stt: undefined, recorder: undefined, diarize: { transcribe: jest.fn().mockResolvedValue([]) } });
+      await c.join('https://meet.example/abc');
+      expect(() => c.startListening()).not.toThrow();
+      expect(c.status()!.status).toBe('listening');
+      c.stopListening();
+    } finally {
+      jest.clearAllTimers();
+      jest.useRealTimers();
+    }
   });
 });
