@@ -1,0 +1,42 @@
+# Umbra OS — AI Agent Discovery
+
+> Invisible AI computer assistant for Windows (Node.js/TypeScript backend + React/Electron desktop app).
+
+## Project
+
+Umbra OS is a local-first AI assistant for Windows. It runs an AI agent loop (plan → act → observe → verify) on an isolated virtual desktop, controls a browser via CDP, manages voice, P2P mesh, MCP connectors, a credential vault, billing, and exposes a REST + WebSocket API.
+
+## Base URLs
+
+- Backend API: `http://127.0.0.1:8787` (loopback only by default)
+- Desktop PWA: `http://<device-ip>:<webPort>` (from `config.p2p.webPort`, default 9443)
+- MCP JSON-RPC: POST to `http://127.0.0.1:8787/mcp`
+- WebSocket events: `ws://127.0.0.1:8787/api/ws`
+- Preview stream: `ws://127.0.0.1:9090`
+
+## Discovery Files
+
+- Full LLM-readable project map: [/llms.txt](llms.txt)
+- Complete documentation: [/llms-full.txt](llms-full.txt)
+- This file: [/robots.txt](robots.txt)
+- AI coding agent onboarding: [/AGENTS.md](AGENTS.md)
+
+## Sensitive Paths
+
+The following paths are disallowed in robots.txt and require authentication at runtime:
+
+- `/api` — REST + WebSocket API (loopback-bound, consent-gated actions)
+- `/vault` — credential vault endpoints (AES-256-GCM, HWID+DPAPI bound)
+- `/mesh` — P2P mesh daemon endpoints
+
+## What AI Agents Can Do
+
+1. **Read** this repository's source code and documentation (permissive license: MIT)
+2. **Build** the project: `cd backend && npm install && npm run build`
+3. **Run** the backend: `npm run dev` (ts-node) or `npm start` (dist)
+4. **Test** via the REST API at `http://127.0.0.1:8787/api/*`
+5. **Query** the MCP server at `http://127.0.0.1:8787/mcp` (JSON-RPC)
+6. **Submit tasks** via `POST /api/task { description, priority? }`
+7. **Chat** via `POST /api/chat { message, target? }`
+
+See AGENTS.md for a 5-step onboarding checklist for AI coding agents.

@@ -10,6 +10,36 @@ import { Eye, EyeOff, Mic, Smartphone, Settings as SettingsIcon, Cpu, CheckCircl
 
 const accentColors = ['#3B82F6', '#60A5FA', '#B600A8', '#7621B0', '#BE4C00', '#0E7C7B'];
 
+const PREFS_KEY = 'umbra:settings-prefs';
+
+const PREF_DEFAULTS: Record<string, string> = {
+  theme: 'Noir',
+  density: 'Comfortable',
+  history: 'Enabled',
+  autoconnect: 'On',
+  startup: 'On',
+  updates: 'On',
+};
+
+const PREF_OPTIONS: Record<string, string[]> = {
+  theme: ['Noir', 'Light'],
+  density: ['Comfortable', 'Compact'],
+  history: ['Enabled', 'Disabled'],
+  autoconnect: ['On', 'Off'],
+  startup: ['On', 'Off'],
+  updates: ['On', 'Off'],
+};
+
+function loadPrefs(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY);
+    if (!raw) return { ...PREF_DEFAULTS };
+    return { ...PREF_DEFAULTS, ...(JSON.parse(raw) as Record<string, string>) };
+  } catch {
+    return { ...PREF_DEFAULTS };
+  }
+}
+
 const settingGroups: { id: string; label: string; icon: string; items: { id: string; label: string; value: string }[] }[] = [
   {
     id: 'appearance',
@@ -85,6 +115,27 @@ export function SettingsView() {
   const [modelStatus, setModelStatus] = useState<Record<string, unknown> | null>(null);
   const [audioDevices, setAudioDevices] = useState<{ render: unknown[]; capture: unknown[] } | null>(null);
   const [audioSettingDefault, setAudioSettingDefault] = useState(false);
+  const [prefs, setPrefs] = useState<Record<string, string>>(loadPrefs);
+
+  const setPref = (id: string, value: string) => {
+    setPrefs((cur) => {
+      const next = { ...cur, [id]: value };
+      try { localStorage.setItem(PREFS_KEY, JSON.stringify(next)); } catch { /* ignore */ }
+      return next;
+    });
+  };
+
+  const cyclePref = (id: string) => {
+    const opts = PREF_OPTIONS[id];
+    if (!opts) return;
+    const cur = prefs[id] ?? opts[0];
+    const next = opts[(opts.indexOf(cur) + 1) % opts.length];
+    setPref(id, next);
+  };
+
+  const prefValue = (id: string, fallback: string) => prefs[id] ?? fallback;
+  const isToggleable = (id: string) => Boolean(PREF_OPTIONS[id]);
+  const isOn = (_id: string, value: string) => ['On', 'Enabled', 'Comfortable', 'Noir'].includes(value);
 
   const prov = providerById(provider);
   const sttProvInfo = sttProviderById(sttProvider);
@@ -760,8 +811,46 @@ export function SettingsView() {
                           />
                         ))}
                       </div>
+                    ) : isToggleable(item.id) ? (
+                      <button
+                        onClick={() => cyclePref(item.id)}
+                        title={`Click to change · saved locally (${prefValue(item.id, item.value)})`}
+                        className="flex items-center gap-2 rounded-full pl-2.5 pr-1 py-1"
+                        style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', fontFamily: 'var(--font)', cursor: 'pointer' }}
+                      >
+                        <span className="text-[11px] font-medium" style={{ color: 'var(--text-primary)' }}>{prefValue(item.id, item.value)}</span>
+                        <span
+                          style={{
+                            width: 28,
+                            height: 16,
+                            borderRadius: 999,
+                            position: 'relative',
+                            background: isOn(item.id, prefValue(item.id, item.value)) ? avatar.accent : 'var(--surface-3)',
+                            transition: 'background 0.2s',
+                          }}
+                        >
+                          <span
+                            style={{
+                              position: 'absolute',
+                              top: 2,
+                              left: isOn(item.id, prefValue(item.id, item.value)) ? 14 : 2,
+                              width: 12,
+                              height: 12,
+                              borderRadius: 999,
+                              background: '#fff',
+                              transition: 'left 0.2s',
+                            }}
+                          />
+                        </span>
+                      </button>
                     ) : (
-                      <span className="text-xs font-light" style={{ color: 'var(--text-faint)' }}>{item.value}</span>
+                      <span
+                        className="text-xs font-light"
+                        title="Coming soon — managed automatically"
+                        style={{ color: 'var(--text-faint)', cursor: 'help', borderBottom: '1px dotted var(--hairline-strong)' }}
+                      >
+                        {item.value}
+                      </span>
                     )}
                   </div>
                 ))}

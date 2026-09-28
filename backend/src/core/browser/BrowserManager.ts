@@ -4,6 +4,8 @@ import * as path from 'path';
 import * as http from 'http';
 import WebSocket from 'ws';
 import { getLogger } from '../Logger';
+import { ensurePublicUrl } from './UrlGuard';
+import { SessionManager } from './SessionManager';
 
 export interface BrowserTab {
   id: string;
@@ -67,6 +69,14 @@ export interface BrowserManagerOptions {
   extraArgs?: string[];
 }
 
+/**
+ * Guard invoked before arbitrary JS runs via evaluate(). Wrappers
+ * (RealDesktop2 / Desktop2Environment) install a consent + URL guard here.
+ * Low-level fixed-expression callers (getPageInfo/snapshot) bypass callers
+ * that go through evaluate() directly only when no guard is installed.
+ */
+export type EvaluateGuard = (expression: string, currentUrl?: string) => Promise<void> | void;
+
 export class BrowserManager {
   private process: ChildProcess | null = null;
   private attached: boolean = false;
@@ -77,11 +87,25 @@ export class BrowserManager {
   private ws: WebSocket | null = null;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   private msgId = 0;
+  private evaluateGuard: EvaluateGuard | null = null;
+  /** Serial browser I/O + persistent profile sweeper (OpenMuse port). */
+  private readonly sessions: SessionManager;
+  private readonly sessionKey = 'browser';
 
   constructor(port: number = 9222, profileDir?: string, options?: BrowserManagerOptions) {
     this.port = port;
     this.profileDir = profileDir || path.join(process.env['USERPROFILE'] || '.', '.umbra', 'edge-profile');
     this.options = { useDefaultProfile: false, killOnStop: true, ...options };
+    this.sessions = new SessionManager(path.join(path.dirname(this.profileDir), 'browser-sessions'));
+    void this.sessions.init().catch(() => {});
+    this.sessions.startSweeper(async () => {
+      getLogger().debug('BrowserManager: idle sweeper tick (no auto-close in CDP mode)');
+    });
+  }
+
+  /** Install (or clear) the consent + URL guard for arbitrary evaluate(). */
+  setEvaluateGuard(fn: EvaluateGuard | null): void {
+    this.evaluateGuard = fn;
   }
 
   async start(browserPath?: string): Promise<boolean> {
@@ -141,6 +165,7 @@ export class BrowserManager {
   }
 
   async stop(): Promise<void> {
+    await this.sessions.close().catch(() => {});
     if (this.ws) {
       try { this.ws.close(); } catch { }
       this.ws = null;
@@ -167,7 +192,10 @@ export class BrowserManager {
   }
 
   async newTab(url: string): Promise<BrowserTab | null> {
-    const body = await this.httpPut(`http://127.0.0.1:${this.port}/json/new?${encodeURIComponent(url)}`);
+    // SSRF guard: only public HTTP(S) destinations (about:blank allowed).
+    await ensurePublicUrl(url);
+    return this.sessions.serial(this.sessionKey, async () => {
+      const body = await this.httpPut(`http://127.0.0.1:${this.port}/json/new?${encodeURIComponent(url)}`);
     const t = JSON.parse(body) as Record<string, unknown>;
     const tab: BrowserTab = {
       id: String(t.id || ''),
@@ -177,7 +205,9 @@ export class BrowserManager {
       wsUrl: String(t.webSocketDebuggerUrl || ''),
     };
     await this.activateTab(tab.id);
-    return tab;
+      this.sessions.touch(this.sessionKey);
+      return tab;
+    });
   }
 
   async activateTab(id: string): Promise<void> {
@@ -206,17 +236,39 @@ export class BrowserManager {
   }
 
   async navigate(url: string): Promise<void> {
-    await this.ensureConnected();
-    await this.call('Page.navigate', { url });
+    // SSRF guard before navigate (mirrors OpenMuse worker navigate()).
+    const checked = await ensurePublicUrl(url);
+    await this.sessions.serial(this.sessionKey, async () => {
+      await this.ensureConnected();
+      await this.call('Page.navigate', { url: checked ? checked.href : url });
+      this.sessions.touch(this.sessionKey);
+      // Chromium can follow redirects outside the initial guard: validate the
+      // final location so a redirect to a blocked destination is not silent.
+      try {
+        const info = await this.getPageInfoInner();
+        if (info.url && info.url !== 'about:blank') await ensurePublicUrl(info.url);
+      } catch {
+        // Best-effort post-navigate check; navigation itself already happened.
+      }
+    });
   }
 
-  async getPageInfo(): Promise<PageInfo> {
+  /** Inner page read without serial (used by navigate + public wrapper). */
+  private async getPageInfoInner(): Promise<PageInfo> {
     await this.ensureConnected();
     const res = await this.call('Runtime.evaluate', {
       expression: '({ title: document.title, url: location.href })',
       returnByValue: true,
     });
     return res?.result?.value as PageInfo || { title: '', url: '' };
+  }
+
+  async getPageInfo(): Promise<PageInfo> {
+    const info = await this.sessions.serial(this.sessionKey, () => this.getPageInfoInner());
+    // Read-path guard: never report a blocked destination as success.
+    if (info.url && info.url !== 'about:blank') await ensurePublicUrl(info.url);
+    this.sessions.touch(this.sessionKey);
+    return info;
   }
 
   async screenshot(): Promise<Buffer | null> {
@@ -231,6 +283,9 @@ export class BrowserManager {
   }
 
   async getAccessibilitySnapshot(): Promise<string | null> {
+    // Read-path guard: resolve current URL first, refuse blocked destinations.
+    const current = await this.sessions.serial(this.sessionKey, () => this.getPageInfoInner()).catch(() => null);
+    if (current?.url && current.url !== 'about:blank') await ensurePublicUrl(current.url);
     await this.ensureConnected();
     try {
       const res = await this.call('Runtime.evaluate', {
@@ -340,6 +395,12 @@ export class BrowserManager {
   }
 
   async evaluate(expression: string): Promise<unknown> {
+    // Gated entry: when a guard is installed (consent + URL check from the
+    // Desktop2 wrappers), arbitrary JS cannot run without passing it.
+    if (this.evaluateGuard) {
+      const currentUrl = this.activeTab?.url || undefined;
+      await this.evaluateGuard(expression, currentUrl);
+    }
     await this.ensureConnected();
     const res = await this.call('Runtime.evaluate', { expression, returnByValue: true });
     if (res?.exceptionDetails) throw new Error(JSON.stringify(res.exceptionDetails));

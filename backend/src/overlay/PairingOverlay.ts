@@ -108,6 +108,8 @@ export class PairingOverlay {
   private psPath: string;
   private cachedPayload: string | null = null;
   private cachedExpires = 0;
+  private currentSessionHost: string | null = null;
+  private currentSessionPort: number | null = null;
 
   constructor(dataDir: string) {
     const tmp = path.join(dataDir, 'tmp');
@@ -121,6 +123,9 @@ export class PairingOverlay {
       getLogger().info('Pairing overlay is Windows-only — skipped');
       return;
     }
+    // Store host/port for session reuse
+    this.currentSessionHost = 'localhost'; // default, will be updated from link if needed
+    this.currentSessionPort = 9444; // default
     await this.refresh(handlers);
     this.launch(handlers.getLink());
     this.timer = setInterval(() => {
@@ -147,8 +152,21 @@ export class PairingOverlay {
     fs.mkdirSync(path.dirname(this.qrPath), { recursive: true });
     const now = Date.now();
     let payload: string;
+    
+    // Try to reuse an existing valid session first
     if (this.cachedPayload && now < this.cachedExpires - 30_000) {
       payload = this.cachedPayload;
+    } else if (this.currentSessionHost && this.currentSessionPort) {
+      // Check if PairingManager has an active session we can reuse
+      // We need to call getPayloadJson to get the session, but we'll cache it
+      payload = handlers.getPayloadJson();
+      this.cachedPayload = payload;
+      try {
+        const parsed = JSON.parse(payload) as { expiresAt?: number };
+        this.cachedExpires = typeof parsed.expiresAt === 'number' ? parsed.expiresAt : now + 5 * 60 * 1000;
+      } catch {
+        this.cachedExpires = now + 5 * 60 * 1000;
+      }
     } else {
       payload = handlers.getPayloadJson();
       this.cachedPayload = payload;

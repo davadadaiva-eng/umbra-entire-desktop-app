@@ -1,0 +1,62 @@
+# Umbra OS — robots.txt
+# Last updated: 2026-09-27
+#
+# AI Crawler Access Policy
+# Umbra OS is a local-first desktop application. The source repository on GitHub
+# contains code, documentation, and configuration examples. AI crawlers are
+# permitted to index this public documentation for research and citation.
+#
+# Sensitive paths (live API, credential vault, P2P mesh) are disallowed.
+
+# ── General crawlers ────────────────────────────────────────────────
+User-agent: *
+Allow: /
+Disallow: /backend/src/core/vault/
+Disallow: /backend/src/core/mcp/
+Disallow: /backend/src/native/
+Disallow: /backend/umbra-keys.json
+Disallow: /backend/.venv/
+Disallow: /backend/external/
+Disallow: /backend/logs/
+Disallow: /backend/dist/
+Disallow: /desktop/.env
+Disallow: /desktop/dist/
+Disallow: /desktop/release/
+Disallow: /node_modules/
+
+# ── AI Search-Augmented Crawlers (allow — these drive citations) ─────
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+# ── AI Training Crawlers (business decision — allow for citation) ─────
+# Note: the Umbra OS backend API (port 8787) binds to loopback only.
+# /api is disallowed here so no public-facing API surface is exposed.
+User-agent: GPTBot
+Allow: /
+Disallow: /api/
+Disallow: /vault/
+Disallow: /mesh/
+
+User-agent: ClaudeBot
+Allow: /
+Disallow: /api/
+Disallow: /vault/
+Disallow: /mesh/
+
+# ── Aggressive/Unwanted Scrapers (block) ────────────────────────────
+User-agent: Bytespider
+Disallow: /
+
+User-agent: CCBot
+Disallow: /backend/umbra-keys.json
+Disallow: /backend/.env
+Disallow: /desktop/.env
+
+# ── Sitemaps ────────────────────────────────────────────────────────
+Sitemap: https://github.com/umbra-os/umbra-os/sitemap.xml

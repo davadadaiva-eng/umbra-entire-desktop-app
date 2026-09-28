@@ -7,6 +7,7 @@ const fakeLlm = {
 
 const fakeReader = {
   ocrImage: jest.fn().mockResolvedValue('screen text here'),
+  isOcrReady: jest.fn().mockReturnValue(true),
 } as unknown as ScreenReader;
 
 const capture = jest.fn().mockResolvedValue({

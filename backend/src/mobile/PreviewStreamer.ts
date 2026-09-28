@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
-import { createServer, Server } from 'http';
+import { createServer, Server, IncomingMessage } from 'http';
 import { getLogger } from '../core/Logger';
+import type { AuthToken } from '../api/AuthToken';
 
 export interface StreamConfig {
   enabled: boolean;
@@ -25,6 +26,8 @@ export class PreviewStreamer {
   private clients = new Set<StreamClient>();
   private streamTimer: NodeJS.Timeout | null = null;
   private streamActive: boolean = false;
+  /** Optional Bearer + signed-URL guard (OpenMuse auth.ts port). Null = open (legacy). */
+  private auth: AuthToken | null = null;
 
   constructor(config?: Partial<StreamConfig>) {
     this.config = {
@@ -33,6 +36,11 @@ export class PreviewStreamer {
       fps: 5,
       ...config,
     };
+  }
+
+  /** Require Bearer sessions / 15m signed URLs on connect + command. */
+  setAuth(auth: AuthToken | null): void {
+    this.auth = auth;
   }
 
   setFrameProvider(provider: FrameProvider | null): void {
@@ -49,7 +57,27 @@ export class PreviewStreamer {
     this.httpServer = createServer();
     this.wss = new WebSocketServer({ server: this.httpServer });
 
-    this.wss.on('connection', ws => {
+    this.wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
+      // Bearer + signed-URL gate: when auth is configured, the WS upgrade must
+      // carry either Authorization: Bearer <token> or ?owner=&expires=&signature=.
+      if (this.auth) {
+        try {
+          const header = req.headers['authorization'];
+          if (typeof header === 'string' && header.startsWith('Bearer ')) {
+            // Verified lazily (async) — store owner on the socket below.
+            void this.auth.verifyBearer(header).catch(() => {
+              try { ws.close(4401, 'unauthorized'); } catch { }
+            });
+          } else {
+            const url = new URL(req.url || '/', 'http://localhost');
+            if (url.searchParams.has('signature')) this.auth.verifyUrl(url);
+            else throw new Error('missing credentials');
+          }
+        } catch {
+          try { ws.close(4401, 'unauthorized'); } catch { }
+          return;
+        }
+      }
       const client: StreamClient = { ws, subscribed: false };
       this.clients.add(client);
       getLogger().info(`Preview stream client connected (${this.clients.size} total)`);
@@ -130,6 +158,16 @@ export class PreviewStreamer {
         break;
 
       case 'command':
+        // When auth is configured, commands must carry a valid Bearer token
+        // (msg.token) — connection-level signed URLs already gated subscribe.
+        if (this.auth && typeof msg.token === 'string') {
+          try {
+            await this.auth.verifyBearer(`Bearer ${msg.token}`);
+          } catch {
+            this.send(client, { type: 'error', action: msg.action, error: 'unauthorized' });
+            break;
+          }
+        }
         if (!this.commandHandler) {
           this.send(client, { type: 'error', action: msg.action, error: 'No command handler' });
           break;

@@ -107,6 +107,21 @@ export interface UmbraConfig {
   openai?: ProviderConfig;
   anthropic?: ProviderConfig;
   openaiCompatible?: ProviderConfig & { endpoint: string };
+  /**
+   * LLM boot state, resolved at startup by the health check in
+   * `UmbraOS.initialize()`. `disabled: true` means the configured provider is
+   * unreachable (or was switched off via `UMBRA_LLM_PROVIDER=none`) — Umbra
+   * keeps running and reports a helpful message instead of failing every task
+   * with an opaque provider error. Never persisted; recomputed on every boot.
+   */
+  llm?: {
+    disabled: boolean;
+    /** Human-readable explanation surfaced in /api/status and the UI. */
+    reason?: string;
+    /** Provider in effect (may differ from `provider` when disabled). */
+    provider?: string;
+    checkedAt?: number;
+  };
   hotkeys: {
     overlay: string;
     pause: string;
@@ -410,7 +425,7 @@ export interface UmbraConfig {
   };
 }
 
-export type TaskStatus = 'pending' | 'planning' | 'executing' | 'healing' | 'completed' | 'failed' | 'cancelled';
+export type TaskStatus = 'pending' | 'planning' | 'executing' | 'healing' | 'completed' | 'failed' | 'cancelled' | 'waiting_input' | 'paused';
 
 /** A single step in a task plan (mirrors TaskPlanner.PlannedStep). */
 export interface TaskPlanStep {
@@ -445,6 +460,14 @@ export interface Task {
   consentGranted?: boolean;
   /** Which node last ran this task — 'desktop' or 'cloud'. */
   resumeNode?: 'desktop' | 'cloud';
+  /** Optimistic concurrency control version — incremented on each save. */
+  version?: number;
+  /** SHA-256 hash of input+intent for idempotent task creation. */
+  idempotencyKey?: string;
+  /** Worker ID that currently holds the lease on this task. */
+  leaseOwner?: string;
+  /** Lease expiration timestamp (ISO string). */
+  leaseDeadline?: string;
 }
 
 export interface TaskResult {
@@ -494,6 +517,37 @@ export interface AuditEntry {
   signature: string;
   previousHash: string;
   swarmId?: number;
+}
+
+export interface ActivityEntry {
+  id: string;
+  taskId: string;
+  title: string;
+  detail: string;
+  status: 'info' | 'success' | 'warning' | 'error';
+  timestamp: Date;
+}
+
+export interface ActionProposal {
+  id: string;
+  taskId: string;
+  action: string;
+  args: Record<string, unknown>;
+  hash: string;
+  status: 'awaiting_review' | 'approved' | 'denied' | 'expired';
+  expiresAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface InputRequest {
+  id: string;
+  taskId: string;
+  question: string;
+  options?: string[];
+  createdAt: Date;
+  answeredAt?: Date;
+  answer?: string;
 }
 
 export type DisplayStatus = 'idle' | 'allocated' | 'active' | 'error';

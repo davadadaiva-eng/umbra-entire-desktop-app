@@ -116,7 +116,7 @@ async function main() {
     check('404 route', notFound.status === 404);
 
     const badJson = await api('/api/task', 'POST', '{bad json');
-    check('invalid json -> 500', badJson.status === 500);
+    check('invalid json -> 400', badJson.status === 400);
 
     await new Promise((resolve, reject) => {
       const ws = new WebSocket('ws://127.0.0.1:' + PORT + '/api/ws');

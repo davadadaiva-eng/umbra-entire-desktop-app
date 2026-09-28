@@ -70,6 +70,16 @@ export class ScreenReader {
   private semaphore: OcrSemaphore;
   private lastOcrText: string = '';
   private poolSize: number;
+  // Dedup concurrent worker initialization for the same index — prevents
+  // double "ready" logs from the race between warmup() and lazy getOcrWorker()
+  // calls (startWatching() and ActivityWatcher.start() both trigger init).
+  private workerInitPromises: Map<number, Promise<Tesseract.Worker | null>> = new Map();
+  // Cache langPath resolution so the filesystem check + gzip runs once, not per-worker.
+  private cachedLangPath: string | undefined;
+  private langPathResolved: boolean = false;
+  // Set true when all poolSize workers are initialized; allows callers to
+  // degrade gracefully instead of blocking on a 100+ second worker load.
+  private ocrReady: boolean = false;
 
   constructor(privacy: PrivacyGuard, options?: { ocrPoolSize?: number }) {
     this.privacy = privacy;
@@ -81,43 +91,106 @@ export class ScreenReader {
     this.llm = llm;
   }
 
+  /**
+   * Eagerly initialize all OCR workers in the pool. Resolves within 30 s
+   * regardless of whether the workers have finished loading — the app must
+   * not block boot on Tesseract's slow first-time core/Language download.
+   * Workers that finish loading after the timeout are picked up automatically
+   * via updateReadiness() inside getOcrWorker().
+   */
   async warmup(): Promise<void> {
-    await Promise.all(Array.from({ length: this.poolSize }, (_, i) =>
+    if (this.ocrReady) {
+      getLogger().info('OCR worker pool already ready');
+      return;
+    }
+
+    const initPromises = Array.from({ length: this.poolSize }, (_, i) =>
       this.getOcrWorker(i).catch(() => null),
-    ));
+    );
+
+    const timeout = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        const ready = this.ocrWorkers.filter((w) => w !== undefined && w !== null).length;
+        if (ready < this.poolSize) {
+          getLogger().warn(
+            { ready, poolSize: this.poolSize },
+            'OCR workers not ready within 30s — continuing in background; OCR degrades gracefully until ready',
+          );
+        }
+        resolve();
+      }, 30000);
+    });
+
+    await Promise.race([Promise.all(initPromises), timeout]);
+    this.updateReadiness();
   }
 
   private async getOcrWorker(index: number): Promise<Tesseract.Worker | null> {
-    if (!this.ocrWorkers[index]) {
-      try {
-        getLogger().info({ index }, 'Initializing Tesseract OCR worker');
-        const langPath = await this.resolveLangPath();
-        if (langPath) {
-          getLogger().info({ langPath }, 'Using local Tesseract traineddata');
-        } else {
-          getLogger().warn('No local traineddata found — falling back to Tesseract CDN');
-        }
-        this.ocrWorkers[index] = await Tesseract.createWorker('eng', 1, {
-          ...(langPath ? { langPath } : {}),
-          logger: (m: Tesseract.LoggerMessage) => {
-            if (m.status === 'recognizing') getLogger().debug({ progress: m.progress }, 'Tesseract');
-          },
-        });
-        getLogger().info({ index }, 'Tesseract OCR worker ready');
-      } catch (e) {
-        getLogger().warn({ err: e, index }, 'Failed to initialize Tesseract OCR worker');
-        return null;
-      }
+    // Already initialized — return the cached worker.
+    if (this.ocrWorkers[index]) {
+      return this.ocrWorkers[index];
     }
-    return this.ocrWorkers[index] ?? null;
+    // Already initializing — return the in-flight promise so concurrent
+    // callers (warmup + lazy ocrImage) share a single createWorker() call.
+    if (this.workerInitPromises.has(index)) {
+      return this.workerInitPromises.get(index)!;
+    }
+    // Start a fresh initialization and track it for dedup.
+    const initPromise = this.initOcrWorker(index);
+    this.workerInitPromises.set(index, initPromise);
+    try {
+      const result = await initPromise;
+      this.workerInitPromises.delete(index);
+      this.updateReadiness();
+      return result;
+    } catch (e) {
+      this.workerInitPromises.delete(index);
+      this.updateReadiness();
+      getLogger().warn({ err: e, index }, 'Failed to initialize Tesseract OCR worker');
+      return null;
+    }
   }
 
-  private async resolveLangPath(): Promise<string | undefined> {
+  /**
+   * Create a single Tesseract worker. Called once per index via getOcrWorker,
+   * which dedups concurrent invocations through workerInitPromises.
+   */
+  private async initOcrWorker(index: number): Promise<Tesseract.Worker | null> {
+    getLogger().info({ index }, 'Initializing Tesseract OCR worker');
+    const langPath = this.resolveLangPath();
+    if (langPath) {
+      getLogger().info({ langPath }, 'Using local Tesseract traineddata');
+    } else {
+      getLogger().warn('No local traineddata found — falling back to Tesseract CDN');
+    }
+    const worker = await Tesseract.createWorker('eng', 1, {
+      ...(langPath ? { langPath } : {}),
+      logger: (m: Tesseract.LoggerMessage) => {
+        if (m.status === 'recognizing') getLogger().debug({ progress: m.progress }, 'Tesseract');
+      },
+    });
+    this.ocrWorkers[index] = worker;
+    getLogger().info({ index }, 'Tesseract OCR worker ready');
+    return worker;
+  }
+
+  /**
+   * Resolve the directory containing eng.traineddata.gz, preparing it from
+   * disk if necessary. Cached so the filesystem check + gzip runs once,
+   * not once per worker in the pool.
+   */
+  private resolveLangPath(): string | undefined {
+    if (this.langPathResolved) return this.cachedLangPath;
+    this.langPathResolved = true;
+
     const langDir = path.join(os.homedir(), '.umbra', 'lang');
     const candidates = [langDir, process.cwd()];
 
     for (const dir of candidates) {
-      if (fs.existsSync(path.join(dir, 'eng.traineddata.gz'))) return dir;
+      if (fs.existsSync(path.join(dir, 'eng.traineddata.gz'))) {
+        this.cachedLangPath = dir;
+        return dir;
+      }
     }
 
     const raw = path.join(process.cwd(), 'eng.traineddata');
@@ -129,6 +202,7 @@ export class ScreenReader {
           fs.writeFileSync(dest, zlib.gzipSync(fs.readFileSync(raw)));
           getLogger().info('Prepared eng.traineddata.gz from local source');
         }
+        this.cachedLangPath = langDir;
         return langDir;
       } catch (err: any) {
         getLogger().debug({ err: err.message }, 'Failed to prepare local traineddata');
@@ -136,6 +210,22 @@ export class ScreenReader {
     }
 
     return undefined;
+  }
+
+  /** Set true when the full worker pool is initialized. */
+  private updateReadiness(): void {
+    const readyCount = this.ocrWorkers.filter((w) => w !== undefined && w !== null).length;
+    if (readyCount === this.poolSize && !this.ocrReady) {
+      this.ocrReady = true;
+      getLogger().info({ ready: readyCount, poolSize: this.poolSize }, 'OCR worker pool fully initialized');
+    } else if (readyCount < this.poolSize) {
+      this.ocrReady = false;
+    }
+  }
+
+  /** True when all pool workers are initialized and ready to recognize. */
+  isOcrReady(): boolean {
+    return this.ocrReady;
   }
 
   async ocrImage(screenshotBuffer: Buffer): Promise<string> {
@@ -403,5 +493,7 @@ Example output (do NOT copy this example — describe what you actually see in t
       }
     }
     this.ocrWorkers = [];
+    this.workerInitPromises.clear();
+    this.ocrReady = false;
   }
 }

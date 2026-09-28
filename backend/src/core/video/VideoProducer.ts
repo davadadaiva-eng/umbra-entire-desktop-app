@@ -6,6 +6,19 @@ import { VoiceboxTTS } from './VoiceboxTTS';
 import { LLMConnector, LLMMessage } from '../agent/LLMConnector';
 import { getLogger } from '../Logger';
 
+/**
+ * VideoProducer — Remotion-based video pipeline (Remotion fallback when the
+ * OpenMontage bridge is unavailable).
+ *
+ * Full production: script (LLM) → narration (Voicebox/Piper) → Remotion
+ * composition (hand-authored template) → render (OpenMontage bridge or
+ * direct `npx remotion render` CLI).
+ *
+ * When OpenMontage is not installed, the producer renders the composition
+ * directly via the Remotion CLI (`npx remotion render`), so video production
+ * still works without the external tool.
+ */
+
 export type VideoSceneType = 'title' | 'bullets' | 'quote' | 'text' | 'image';
 
 export interface VideoScene {
@@ -74,10 +87,6 @@ export class VideoProducer {
 
   /** Full production: script -> narration -> Remotion composition -> render. */
   async produceVideo(brief: VideoBrief): Promise<VideoResult> {
-    if (!this.isAvailable()) {
-      throw new Error('OpenMontage not installed — cannot produce video');
-    }
-
     const script = brief.script || (await this.generateScript(brief));
     const slug = this.slugify(brief.title || script.title);
     const outDir = this.outputDir(slug);
@@ -96,31 +105,129 @@ export class VideoProducer {
     });
 
     const videoPath = path.join(outDir, 'final.mp4');
-    const result: ToolRunResult = await this.bridge.runTool('video_compose', {
-      operation: 'render',
-      output_path: videoPath,
-      edit_decisions: {
-        render_runtime: 'remotion',
-        composition_mode: 'atelier',
-        renderer_family: 'bespoke',
-        bespoke: {
-          entry: entryPath,
-          composition_id: COMPOSITION_ID,
-          props_path: propsPath,
-          public_dir: publicDir,
-        },
-      },
-    });
 
-    if (!result.success) {
-      throw new Error(`Remotion render failed: ${result.error || 'unknown error'}`);
+    // Try the OpenMontage bridge first; fall back to direct `npx remotion render`
+    // when the external tool is not installed.
+    if (this.isAvailable()) {
+      const result: ToolRunResult = await this.bridge.runTool('video_compose', {
+        operation: 'render',
+        output_path: videoPath,
+        edit_decisions: {
+          render_runtime: 'remotion',
+          composition_mode: 'atelier',
+          renderer_family: 'bespoke',
+          bespoke: {
+            entry: entryPath,
+            composition_id: COMPOSITION_ID,
+            props_path: propsPath,
+            public_dir: publicDir,
+          },
+        },
+      });
+
+      if (!result.success) {
+        getLogger().warn({ error: result.error }, 'OpenMontage render failed — falling back to Remotion CLI');
+      } else if (fs.existsSync(videoPath)) {
+        getLogger().info({ videoPath, seconds: result.duration_seconds }, 'VideoProducer: production complete (OpenMontage)');
+        return { videoPath, narrationPath: narrationPath || undefined, script, compositionEntry: entryPath };
+      }
+    } else {
+      getLogger().warn(
+        'OpenMontage not installed — using built-in VideoProducer Remotion CLI fallback. ' +
+          'Install with: cd backend && git clone https://github.com/umbra-os/OpenMontage.git external/OpenMontage',
+      );
     }
+
+    // ── Fallback: render directly via the Remotion CLI ─────────
+    const remotionOk = await this.renderViaRemotionCli(entryPath, propsPath, publicDir, videoPath, brief, script, audioSeconds);
+    if (!remotionOk) {
+      throw new Error(
+        `Video production failed — OpenMontage not installed and Remotion CLI unavailable. ` +
+          `Install OpenMontage: cd backend && git clone https://github.com/umbra-os/OpenMontage.git external/OpenMontage ` +
+          `|| install Remotion: npm install -g remotion`,
+      );
+    }
+
     if (!fs.existsSync(videoPath)) {
       throw new Error(`Remotion render reported success but no video at ${videoPath}`);
     }
 
-    getLogger().info({ videoPath, seconds: result.duration_seconds }, 'VideoProducer: production complete');
+    getLogger().info({ videoPath }, 'VideoProducer: production complete (Remotion CLI fallback)');
     return { videoPath, narrationPath: narrationPath || undefined, script, compositionEntry: entryPath };
+  }
+
+  /**
+   * Fallback renderer: invoke the Remotion CLI directly (`npx remotion render`)
+   * to produce the video from the generated composition. Returns true on
+   * success, false if the CLI is not available (so the caller can surface a
+   * clear error with install instructions).
+   */
+  private async renderViaRemotionCli(
+    entryPath: string,
+    propsPath: string,
+    publicDir: string,
+    outputPath: string,
+    brief: VideoBrief,
+    script: VideoScript,
+    audioSeconds: number,
+  ): Promise<boolean> {
+    const fps = brief.fps || 30;
+    const width = brief.width || 1920;
+    const height = brief.height || 1080;
+
+    // The composition entry lives at <repo>/remotion-composer/projects/<slug>/index.tsx.
+    // Remotion expects the cwd (or the first positional arg) to be the project root.
+    const projectDir = path.dirname(entryPath);
+    const sceneSeconds = script.scenes.reduce((sum, s) => sum + this.sceneSeconds(s), 0);
+    const minDuration = sceneSeconds + 1.5;
+    const totalSeconds = Math.max(minDuration, audioSeconds + 1.2);
+    const durationInFrames = Math.max(30, Math.round(totalSeconds * fps));
+
+    const args = [
+      'remotion', 'render',
+      entryPath,
+      COMPOSITION_ID,
+      outputPath,
+      '--props', propsPath,
+      '--fps', String(fps),
+      '--width', String(width),
+      '--height', String(height),
+      '--frames', `0-${durationInFrames - 1}`,
+      '--public-dir', publicDir,
+      '--silent',
+    ];
+
+    return new Promise(resolve => {
+      const child = spawn('npx', args, {
+        cwd: projectDir,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+
+      let stderr = '';
+      child.stderr.on('data', d => (stderr += d.toString()));
+      child.stdout.on('data', d => getLogger().debug({ msg: d.toString().trim() }, 'Remotion CLI'));
+
+      child.on('error', err => {
+        getLogger().warn({ err: err.message }, 'Remotion CLI not available — install with `npm install -g remotion` or use OpenMontage');
+        resolve(false);
+      });
+
+      child.on('close', code => {
+        if (code === 0) {
+          resolve(true);
+        } else {
+          getLogger().warn({ code, stderr: stderr.slice(-500) }, 'Remotion CLI render exited with error');
+          resolve(false);
+        }
+      });
+
+      // 30-minute hard timeout for renders
+      setTimeout(() => {
+        try { child.kill('SIGTERM'); } catch { }
+        resolve(false);
+      }, 30 * 60 * 1000);
+    });
   }
 
   /** Ask the LLM for a script (narration + scene plan) for the brief. */

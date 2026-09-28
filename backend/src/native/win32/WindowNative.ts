@@ -53,8 +53,11 @@ export interface CursorPos {
   y: number;
 }
 
-const CURSOR_SCRIPT_VERSION = '2';
+const CURSOR_SCRIPT_VERSION = '3';
 
+// "$($p.X)|$($p.Y)" — subexpression interpolation. Do NOT use
+// $p.X+"|"+$p.Y: PowerShell tries to add [int]+[string] and throws
+// InvalidCast ("Cannot convert value ... to type System.Int32").
 const PS_CURSOR_SCRIPT = `#umbra-cursor-v${CURSOR_SCRIPT_VERSION}
 $sig = @'
 [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
@@ -63,7 +66,7 @@ public struct POINT { public int X; public int Y; }
 $null = Add-Type -MemberDefinition $sig -Name "CursorAPI" -Namespace Win32 -PassThru
 $p = New-Object Win32.CursorAPI+POINT
 if ([Win32.CursorAPI]::GetCursorPos([ref]$p)) {
-  Write-Output ("{0}|{1}" -f $p.X, $p.Y)
+  Write-Output "$($p.X)|$($p.Y)"
 } else {
   Write-Output "-1|-1"
 }`;
@@ -90,7 +93,74 @@ function ensureCursorScript(tmpDir: string): string {
 
 const FOREGROUND_SCRIPT_VERSION = '2';
 
+/** Throttle window for cursor polling — one powershell spawn per 2s max. */
+const CURSOR_CACHE_TTL_MS = 2000;
+
+let cachedCursor: CursorPos = { x: 0, y: 0 };
+let cachedCursorAt = 0;
+/** Last known NativeCore daemon cursor (populated by getCursorPosAsync). */
+let nativeCoreCursor: CursorPos | null = null;
+let nativeCoreCursorAt = 0;
+let nativeCoreInflight = false;
+let lastNativeAttemptAt = 0;
+
+/** Clear the cursor throttle cache (tests + manual refresh). */
+export function clearCursorCache(): void {
+  cachedCursor = { x: 0, y: 0 };
+  cachedCursorAt = 0;
+  nativeCoreCursor = null;
+  nativeCoreCursorAt = 0;
+}
+
+/** Non-blocking refresh of the NativeCore cursor for the next sync call. */
+function refreshNativeCoreCursor(): void {
+  const now = Date.now();
+  if (nativeCoreInflight) return;
+  if (now - lastNativeAttemptAt < CURSOR_CACHE_TTL_MS) return;
+  lastNativeAttemptAt = now;
+  nativeCoreInflight = true;
+  import('./NativeCore')
+    .then(mod => mod.getCursorPos())
+    .then(pos => {
+      if (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
+        nativeCoreCursor = { x: pos.x, y: pos.y };
+        nativeCoreCursorAt = Date.now();
+      }
+    })
+    .catch(() => {})
+    .finally(() => { nativeCoreInflight = false; });
+}
+
+/**
+ * Preferred cursor path — tries the long-lived NativeCore daemon first
+ * (no per-call powershell spawn, no string-concat InvalidCast risk),
+ * then falls back to the cached get-cursor.ps1 script.
+ */
+export async function getCursorPosAsync(): Promise<CursorPos> {
+  try {
+    const mod = await import('./NativeCore');
+    if (mod && typeof mod.getCursorPos === 'function') {
+      const pos = await mod.getCursorPos();
+      if (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
+        nativeCoreCursor = { x: pos.x, y: pos.y };
+        nativeCoreCursorAt = Date.now();
+        cachedCursor = nativeCoreCursor;
+        cachedCursorAt = nativeCoreCursorAt;
+        return nativeCoreCursor;
+      }
+    }
+  } catch {}
+  return getCursorPos();
+}
+
 export function getCursorPos(): CursorPos {
+  const now = Date.now();
+  // Fast paths — NativeCore value first, then the 2s powershell throttle.
+  if (nativeCoreCursor && now - nativeCoreCursorAt < CURSOR_CACHE_TTL_MS) return nativeCoreCursor;
+  if (cachedCursorAt !== 0 && now - cachedCursorAt < CURSOR_CACHE_TTL_MS) return cachedCursor;
+  // Kick off a non-blocking daemon refresh for the next call; this call
+  // still uses the ps1 fallback so the sync API never blocks on the daemon.
+  refreshNativeCoreCursor();
   try {
     const tmpDir = (() => {
       const d = path.join(process.env['USERPROFILE'] || 'C:\\Users\\default', '.umbra', 'tmp');
@@ -108,9 +178,19 @@ export function getCursorPos(): CursorPos {
     if (parts.length === 2) {
       const x = parseInt(parts[0], 10);
       const y = parseInt(parts[1], 10);
-      if (!isNaN(x) && !isNaN(y)) return { x, y };
+      if (!isNaN(x) && !isNaN(y)) {
+        // "-1|-1" is the script's failure sentinel — keep the stale value.
+        if (x === -1 && y === -1) return cachedCursorAt !== 0 ? cachedCursor : { x: 0, y: 0 };
+        cachedCursor = { x, y };
+        cachedCursorAt = now;
+        return cachedCursor;
+      }
     }
   } catch {}
+  // On spawn/parse failure return the last known position instead of
+  // snapping to (0,0), so the cursor trail doesn't jump on transient errors.
+  if (cachedCursorAt !== 0) return cachedCursor;
+  if (nativeCoreCursor) return nativeCoreCursor;
   return { x: 0, y: 0 };
 }
 

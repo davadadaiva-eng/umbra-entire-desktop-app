@@ -1,5 +1,4 @@
 import { useEffect, useState, type CSSProperties } from 'react';
-import { motion, type Variants } from 'framer-motion';
 
 interface TypewriterProps {
   texts: string[];
@@ -17,14 +16,6 @@ interface TypewriterProps {
   letterSpacing?: string;
   style?: CSSProperties;
 }
-
-const cursorVariants: Variants = {
-  initial: { opacity: 0 },
-  animate: {
-    opacity: 1,
-    transition: { duration: 0.01, repeat: Infinity, repeatDelay: 0.4, repeatType: 'reverse' },
-  },
-};
 
 export function Typewriter({
   texts,
@@ -100,15 +91,14 @@ export function Typewriter({
         {prefix && <span>{prefix}</span>}
         <span style={{ color: typedColor }}>{displayText}</span>
         {showCursor && (
-          <motion.span
-            variants={cursorVariants}
-            initial="initial"
-            animate="animate"
-            style={{ color: cursorColor, marginLeft: '0.25rem' }}
+          <span
+            aria-hidden
+            style={{ color: cursorColor, marginLeft: '0.25rem', animation: 'umbra-cursor-blink 0.9s steps(1) infinite' }}
           >
             {cursorChar}
-          </motion.span>
+          </span>
         )}
+        <style>{`@keyframes umbra-cursor-blink { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0; } }`}</style>
       </div>
     </div>
   );

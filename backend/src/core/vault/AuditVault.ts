@@ -140,7 +140,9 @@ export class AuditVault {
     });
 
     fs.writeFileSync(keyPath, privateKey, 'utf-8');
+    try { fs.chmodSync(keyPath, 0o600); } catch { /* non-POSIX */ }
     fs.writeFileSync(path.join(this.vaultDir, 'verification-key.pem'), publicKey, 'utf-8');
+    try { fs.chmodSync(path.join(this.vaultDir, 'verification-key.pem'), 0o644); } catch { /* non-POSIX */ }
     return privateKey;
   }
 }

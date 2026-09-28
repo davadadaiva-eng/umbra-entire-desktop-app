@@ -194,12 +194,16 @@ export class HermesAgentBridge {
       // Official Windows installer (install.ps1): repo + venv under %LOCALAPPDATA%\hermes.
       local ? `${local}\\hermes\\hermes-agent\\bin\\hermes.exe` : undefined,
       local ? `${local}\\hermes\\bin\\hermes.exe` : undefined,
+      // Flat layout: %LOCALAPPDATA%\hermes\hermes.exe
+      local ? `${local}\\hermes\\hermes.exe` : undefined,
       local ? `${local}\\hermes\\hermes-agent\\venv\\Scripts\\hermes.exe` : undefined,
       home ? `${home}\\.hermes\\venv\\Scripts\\hermes.exe` : undefined,
     ].filter(Boolean) as string[];
     for (const candidate of candidates) {
       if (candidate && fs.existsSync(candidate)) return candidate;
     }
+    // Fall back to PATH resolution (spawn will surface a clear ENOENT if the
+    // CLI truly isn't installed — see isInstalled()).
     return 'hermes';
   }
 

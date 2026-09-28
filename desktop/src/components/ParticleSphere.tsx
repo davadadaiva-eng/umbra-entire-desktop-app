@@ -24,7 +24,64 @@ import {
     Group,
     Vector3,
     AdditiveBlending,
+    SRGBColorSpace,
 } from "three"
+
+// ── Perf: adaptive quality helpers (no API change — props stay identical) ──
+const CANVAS_OVERFLOW = 1.6 // was 2.5 — smaller framebuffer, still no clipping
+const MAX_PARTICLES_DESKTOP = 8000
+const MAX_PARTICLES_LOWEND = 3500
+
+function isLowEndDevice(): boolean {
+    if (typeof navigator === "undefined" || typeof window === "undefined")
+        return false
+    try {
+        const nav = navigator as Navigator & {
+            deviceMemory?: number
+            connection?: { saveData?: boolean }
+        }
+        if (nav.connection?.saveData) return true
+        if (typeof nav.deviceMemory === "number" && nav.deviceMemory <= 4)
+            return true
+        const cores = typeof nav.hardwareConcurrency === "number" ? nav.hardwareConcurrency : 8
+        if (cores <= 4) return true
+        const ua = typeof nav.userAgent === "string" ? nav.userAgent : ""
+        if (/Android|iPhone|iPad|Mobile/i.test(ua)) return true
+        if (typeof window.devicePixelRatio === "number" && window.devicePixelRatio >= 3 && cores <= 6)
+            return true
+        return false
+    } catch {
+        return false
+    }
+}
+
+function prefersReducedMotion(): boolean {
+    try {
+        return (
+            typeof window !== "undefined" &&
+            typeof window.matchMedia === "function" &&
+            window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        )
+    } catch {
+        return false
+    }
+}
+
+function getCappedPixelRatio(lowEnd: boolean): number {
+    try {
+        const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1
+        return Math.min(dpr, lowEnd ? 1.25 : 1.75)
+    } catch {
+        return 1
+    }
+}
+
+function getEffectiveParticleCount(requested: number, lowEnd: boolean): number {
+    const req = Math.floor(requested)
+    if (!Number.isFinite(req) || req <= 0) return 1500
+    const cap = lowEnd ? MAX_PARTICLES_LOWEND : MAX_PARTICLES_DESKTOP
+    return Math.max(400, Math.min(req, cap))
+}
 
 interface ParticleSphereRefactorProps {
     particlesCount: number
@@ -278,11 +335,20 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
         const containerHeight =
             container.clientHeight || container.offsetHeight || 400
 
+        const lowEnd = isLowEndDevice()
+        const reducedMotion = prefersReducedMotion()
+        const effectiveCount = getEffectiveParticleCount(particlesCount, lowEnd)
         // Canvas overflow multiplier - makes canvas larger than container to prevent clipping
         // The sphere and camera remain the same, just more "empty space" around the edges
-        const canvasOverflowMultiplier = 2.5 // 50% larger canvas on each side
+        const canvasOverflowMultiplier = CANVAS_OVERFLOW
         const canvasWidth = containerWidth * canvasOverflowMultiplier
         const canvasHeight = containerHeight * canvasOverflowMultiplier
+        // Mutable canvas offset — updated on resize so cursor math stays correct.
+        const offsetRef = { x: (canvasWidth - containerWidth) / 2, y: (canvasHeight - containerHeight) / 2 }
+        // Visibility refs — pause RAF when tab hidden or orb offscreen.
+        const tabVisibleRef = { current: typeof document === "undefined" ? true : document.visibilityState !== "hidden" }
+        const onScreenRef = { current: true }
+        const resizeQueuedRef = { current: false }
 
         // Scene setup
         const scene = new Scene()
@@ -319,15 +385,30 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
         cameraRef.current = camera
 
         // Renderer setup - canvas is larger than container to prevent clipping
-        const renderer = new WebGLRenderer({ antialias: true, alpha: true })
+        let renderer: WebGLRenderer
+        try {
+            renderer = new WebGLRenderer({
+                antialias: !lowEnd,
+                alpha: true,
+                stencil: false,
+                powerPreference: "high-performance",
+            })
+        } catch {
+            return
+        }
+        renderer.setPixelRatio(getCappedPixelRatio(lowEnd))
         renderer.setSize(canvasWidth, canvasHeight)
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-        renderer.outputColorSpace = "srgb"
+        renderer.setClearColor(0x000000, 0)
+        try {
+            renderer.outputColorSpace = SRGBColorSpace
+        } catch {
+            // ignore — older three fallback
+        }
         const canvas = renderer.domElement
         canvas.style.position = "absolute"
         // Center the larger canvas within the container
-        const offsetX = (canvasWidth - containerWidth) / 2
-        const offsetY = (canvasHeight - containerHeight) / 2
+        const offsetX = offsetRef.x
+        const offsetY = offsetRef.y
         canvas.style.left = `-${offsetX}px`
         canvas.style.top = `-${offsetY}px`
         canvas.style.width = `${canvasWidth}px`
@@ -350,22 +431,31 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
         particleDisplacementsRef.current = []
         particleScatterVelocitiesRef.current = []
 
-        // Resolve color tokens (CSS variables) and parse color properly
-        const resolvedSphereColor = resolveTokenColor(sphereColor)
-        const sphereRgba = parseColorToRgba(resolvedSphereColor || sphereColor)
-        // Use Color constructor with string for proper color space handling
-        // Then apply the parsed RGB values to ensure opacity is extracted correctly
-        const baseColorObj = resolvedSphereColor
-            ? new Color(resolvedSphereColor)
-            : new Color(sphereRgba.r, sphereRgba.g, sphereRgba.b)
-        const particleOpacity = sphereRgba.a
+        // Resolve color tokens (CSS variables) and parse color properly.
+        // Guard: unresolved var() strings throw inside THREE.Color — fall back safely.
+        let resolvedSphereColor = resolveTokenColor(sphereColor)
+        if (typeof resolvedSphereColor !== "string" || resolvedSphereColor.startsWith("var(")) {
+            resolvedSphereColor = typeof sphereColor === "string" && !sphereColor.startsWith("var(") ? sphereColor : "#ffffff"
+        }
+        const sphereRgba = parseColorToRgba(resolvedSphereColor || "#ffffff")
+        let baseColorObj: Color
+        try {
+            baseColorObj = new Color(resolvedSphereColor)
+        } catch {
+            try {
+                baseColorObj = new Color(sphereRgba.r, sphereRgba.g, sphereRgba.b)
+            } catch {
+                baseColorObj = new Color("#ffffff")
+            }
+        }
+        const particleOpacity = Number.isFinite(sphereRgba.a) ? sphereRgba.a : 1
 
         // Red color for displaced particles
         const redColor = new Color(1, 0, 0)
 
-        for (let i = 0; i < particlesCount; i++) {
+        for (let i = 0; i < effectiveCount; i++) {
             // Use golden angle spiral for even distribution
-            const y = 1 - (i / (particlesCount - 1)) * 2 // y goes from 1 to -1
+            const y = 1 - (i / (effectiveCount - 1)) * 2 // y goes from 1 to -1
             const radius = Math.sqrt(1 - y * y) // Radius at y
             const theta = goldenAngle * i // Golden angle increment
 
@@ -392,7 +482,9 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
             // Round particles using actual sphere geometries with InstancedMesh
             // Convert screen-space particle size to world-space radius to match visual size
             const sphereRadius = particleSize * 0.15 // Adjust this factor to match visual size
-            const sphereGeometry = new SphereGeometry(sphereRadius, 8, 8)
+            const segW = lowEnd ? 6 : 8
+            const segH = lowEnd ? 5 : 6
+            const sphereGeometry = new SphereGeometry(sphereRadius, segW, segH)
             // Use MeshBasicMaterial with AdditiveBlending for the glow effect
             const sphereMaterial = new MeshBasicMaterial({
                 color: 0xffffff,
@@ -404,12 +496,12 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
             particles = new InstancedMesh(
                 sphereGeometry,
                 sphereMaterial,
-                particlesCount
+                effectiveCount
             )
 
             // Set positions for each instance
             const matrix = new Matrix4()
-            for (let i = 0; i < particlesCount; i++) {
+            for (let i = 0; i < effectiveCount; i++) {
                 const idx = i * 3
                 matrix.setPosition(
                     vertices[idx],
@@ -420,20 +512,14 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
             }
             particles.instanceMatrix.needsUpdate = true
 
-            // Set up instance colors (per-instance coloring)
-            const instanceColors = new Float32Array(particlesCount * 3)
-            for (let i = 0; i < particlesCount; i++) {
-                const idx = i * 3
-                instanceColors[idx] = baseColorObj.r
-                instanceColors[idx + 1] = baseColorObj.g
-                instanceColors[idx + 2] = baseColorObj.b
+            // Set up instance colors via setColorAt (correct InstancedBufferAttribute path)
+            for (let i = 0; i < effectiveCount; i++) {
+                particles.setColorAt(i, baseColorObj)
             }
-            particles.instanceColor = new Float32BufferAttribute(
-                instanceColors,
-                3
-            )
+            if (particles.instanceColor) {
+                particles.instanceColor.needsUpdate = true
+            }
             sphereMaterial.vertexColors = false
-            particles.instanceColor.needsUpdate = true
         } else {
             // Square particles using Points
             const particlesGeometry = new BufferGeometry()
@@ -443,8 +529,8 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
             )
 
             // Set up vertex colors (per-vertex coloring)
-            const colors = new Float32Array(particlesCount * 3)
-            for (let i = 0; i < particlesCount; i++) {
+            const colors = new Float32Array(effectiveCount * 3)
+            for (let i = 0; i < effectiveCount; i++) {
                 const idx = i * 3
                 colors[idx] = baseColorObj.r
                 colors[idx + 1] = baseColorObj.g
@@ -497,9 +583,27 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
         // Velocity decay for throw: higher smoothing = more momentum
         const velocityDecay = mapLinear(smoothingN, 0, 1, 0.7, 0.96)
 
+        // Reusable per-frame temps — avoids 10k+ Vector3/Matrix4 allocs per frame.
+        const tmpLocal = new Vector3()
+        const tmpWorld = new Vector3()
+        const tmpProjected = new Vector3()
+        const tmpWorldRepulsion = new Vector3()
+        const tmpLocalRepulsion = new Vector3()
+        const tmpFinal = new Vector3()
+        const tmpMatrix = new Matrix4()
+        const tmpInverse = new Matrix4()
+        const tmpRight = new Vector3()
+        const tmpUp = new Vector3()
+        const effectiveRotationSpeed = reducedMotion ? 0 : rotationSpeed
+
         // Animation loop - uses cached isCanvas value for performance
         const animate = () => {
-            // Continue with animation (component should always render to show changes)
+            // Pause when tab hidden or orb scrolled offscreen — saves GPU/battery.
+            if (!tabVisibleRef.current || !onScreenRef.current) {
+                animationFrameId = null
+                animationFrameRef.current = null
+                return
+            }
             animateCore()
         }
 
@@ -508,9 +612,10 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
             const now = performance.now()
 
             // Calculate delta time and normalize it relative to 60 FPS
-            const deltaTime = now - lastFrameTime
+            // Clamp huge deltas (tab was hidden) to avoid physics jumps.
+            const deltaTime = Math.min(now - lastFrameTime, 100)
             lastFrameTime = now
-            const deltaFactor = deltaTime / targetDeltaTime
+            const deltaFactor = Math.max(0, Math.min(4, deltaTime / targetDeltaTime))
 
             let needsRender = false
             const threshold = 0.01
@@ -519,11 +624,11 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
             const canAutoRotate = true
             if (
                 !isDragging &&
-                rotationSpeed !== 0 &&
+                effectiveRotationSpeed !== 0 &&
                 canAutoRotate &&
                 (!stopOnHover || !isHovering)
             ) {
-                targetRotation.x += rotationSpeed * 0.1 * deltaFactor
+                targetRotation.x += effectiveRotationSpeed * 0.1 * deltaFactor
             }
 
             // Apply throw velocity when not dragging
@@ -554,7 +659,7 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
             if (
                 Math.abs(dx) > threshold ||
                 Math.abs(dy) > threshold ||
-                rotationSpeed !== 0 ||
+                effectiveRotationSpeed !== 0 ||
                 isDragging
             ) {
                 // While dragging, track the cursor 1:1 so the sphere never lags
@@ -587,13 +692,25 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
             const currentCanvasHeight =
                 currentContainerHeight * canvasOverflowMultiplier
             const currentCamera = cameraRef.current
+            if (!currentCamera) return
             const cursorRadiusSquared = cursorRadius * cursorRadius
+            // Hoist per-frame invariants out of the 8k-particle loop:
+            // inverse group matrix + camera basis computed once, not 8k times.
+            tmpInverse.copy(particlesGroup.matrixWorld).invert()
+            tmpRight.setFromMatrixColumn(currentCamera.matrixWorld, 0).normalize()
+            tmpUp.setFromMatrixColumn(currentCamera.matrixWorld, 1).normalize()
+            const frictionFactor = Math.pow(CURSOR_PHYSICS.FRICTION, deltaFactor)
+            const returnForce = CURSOR_PHYSICS.RETURN_FORCE * speedN * deltaFactor
+            const decayMultiplier = frictionFactor * (1 - returnForce)
 
             // Apply cursor repulsion to particles (only if enabled)
             if (
                 cursorConfig.enabled &&
                 baseParticlePositionsRef.current.length > 0
             ) {
+                const hasMouse = !!mouseRef.current
+                const mouseX = hasMouse ? (mouseRef.current as { x: number; y: number }).x : 0
+                const mouseY = hasMouse ? (mouseRef.current as { x: number; y: number }).y : 0
                 for (
                     let i = 0;
                     i < baseParticlePositionsRef.current.length;
@@ -603,61 +720,39 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
                     const displacement = particleDisplacementsRef.current[i]
 
                     // Apply repulsion force only if cursor is present and near particle
-                    if (mouseRef.current) {
-                        const mouse = mouseRef.current
-
+                    if (hasMouse) {
                         // Calculate current position: base position + displacement, then rotated by group
-                        const currentLocalPos = new Vector3()
-                        currentLocalPos.copy(basePos)
-                        currentLocalPos.add(displacement)
+                        tmpLocal.copy(basePos)
+                        tmpLocal.add(displacement)
 
                         // Transform to world space (apply group rotation)
-                        const worldPos = new Vector3()
-                        worldPos.copy(currentLocalPos)
-                        worldPos.applyMatrix4(particlesGroup.matrixWorld)
+                        tmpWorld.copy(tmpLocal)
+                        tmpWorld.applyMatrix4(particlesGroup.matrixWorld)
 
                         // Project 3D position to 2D screen space (using canvas dimensions)
-                        const projected = worldPos
-                            .clone()
-                            .project(currentCamera)
+                        tmpProjected.copy(tmpWorld).project(currentCamera)
                         const screenX =
-                            (projected.x * 0.5 + 0.5) * currentCanvasWidth
+                            (tmpProjected.x * 0.5 + 0.5) * currentCanvasWidth
                         const screenY =
-                            (-projected.y * 0.5 + 0.5) * currentCanvasHeight
+                            (-tmpProjected.y * 0.5 + 0.5) * currentCanvasHeight
 
                         // Calculate distance from cursor to particle in screen space
-                        const dx = mouse.x - screenX
-                        const dy = mouse.y - screenY
-                        const distanceSquared = dx * dx + dy * dy
+                        const ddx = mouseX - screenX
+                        const ddy = mouseY - screenY
+                        const distanceSquared = ddx * ddx + ddy * ddy
 
                         // Only the front layer (facing the camera, worldPos.z
                         // > 0) reacts — the back layer keeps rotating untouched.
                         if (
                             distanceSquared < cursorRadiusSquared &&
                             distanceSquared > 0 &&
-                            worldPos.z > 0
+                            tmpWorld.z > 0
                         ) {
                             // Apply repulsion force
                             const distance = Math.sqrt(distanceSquared)
                             const force =
                                 (cursorRadius - distance) / cursorRadius
-                            const angle = Math.atan2(dy, dx)
-
-                            // Get camera's right and up vectors in world space
-                            const cameraRight = new Vector3()
-                            const cameraUp = new Vector3()
-                            cameraRight
-                                .setFromMatrixColumn(
-                                    currentCamera.matrixWorld,
-                                    0
-                                )
-                                .normalize()
-                            cameraUp
-                                .setFromMatrixColumn(
-                                    currentCamera.matrixWorld,
-                                    1
-                                )
-                                .normalize()
+                            const angle = Math.atan2(ddy, ddx)
 
                             // Calculate repulsion direction in screen space
                             const repulsion2D =
@@ -668,38 +763,21 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
                                 Math.sin(angle) * repulsion2D * 0.01
 
                             // Convert screen space repulsion to world space, then to local space
-                            const worldRepulsion = new Vector3()
-                            worldRepulsion.addScaledVector(
-                                cameraRight,
-                                repulsionX
-                            )
-                            worldRepulsion.addScaledVector(cameraUp, repulsionY)
+                            tmpWorldRepulsion.set(0, 0, 0)
+                            tmpWorldRepulsion.addScaledVector(tmpRight, repulsionX)
+                            tmpWorldRepulsion.addScaledVector(tmpUp, repulsionY)
 
                             // Transform world repulsion back to local space (inverse of group rotation)
-                            const localRepulsion = new Vector3()
-                            localRepulsion.copy(worldRepulsion)
-                            const inverseGroupMatrix = new Matrix4()
-                            inverseGroupMatrix
-                                .copy(particlesGroup.matrixWorld)
-                                .invert()
-                            localRepulsion.applyMatrix4(inverseGroupMatrix)
+                            tmpLocalRepulsion.copy(tmpWorldRepulsion)
+                            tmpLocalRepulsion.applyMatrix4(tmpInverse)
 
                             // Apply to displacement
-                            displacement.add(localRepulsion)
+                            displacement.add(tmpLocalRepulsion)
                         }
                     }
 
                     // Always apply friction and return force to decay displacements (even when cursor is gone)
-                    const frictionFactor = Math.pow(
-                        CURSOR_PHYSICS.FRICTION,
-                        deltaFactor
-                    )
-                    const returnForce =
-                        CURSOR_PHYSICS.RETURN_FORCE * speedN * deltaFactor
-                    // Apply friction (multiplicative decay)
-                    displacement.multiplyScalar(frictionFactor)
-                    // Apply return force (decay towards zero)
-                    displacement.multiplyScalar(1 - returnForce)
+                    displacement.multiplyScalar(decayMultiplier)
                 }
             }
 
@@ -735,12 +813,11 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
             const particleShape = particlesConfig.shape || "sphere"
 
             if (particleShape === "sphere" && particlesRef.current) {
-                // Update InstancedMesh positions
-                const matrix = new Matrix4()
+                // Update InstancedMesh positions (reuses tmpMatrix/tmpFinal — zero allocs)
                 const instanceColors = particlesRef.current.instanceColor
                     ? particlesRef.current.instanceColor.array
                     : null
-                let anyDisplaced = false
+                let colorsDirty = false
 
                 for (
                     let i = 0;
@@ -749,27 +826,38 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
                 ) {
                     const basePos = baseParticlePositionsRef.current[i]
                     const displacement = particleDisplacementsRef.current[i]
-                    const finalPos = new Vector3()
-                    finalPos.copy(basePos)
-                    finalPos.add(displacement)
-                    matrix.setPosition(finalPos.x, finalPos.y, finalPos.z)
-                    particlesRef.current.setMatrixAt(i, matrix)
+                    tmpFinal.copy(basePos)
+                    tmpFinal.add(displacement)
+                    tmpMatrix.setPosition(tmpFinal.x, tmpFinal.y, tmpFinal.z)
+                    particlesRef.current.setMatrixAt(i, tmpMatrix)
 
                     // Blend displaced particles toward red, settle back to base color
-                    if (instanceColors && displacement.lengthSq() > 0.0004) {
-                        const t = Math.min(displacement.length() / 0.18, 1)
+                    if (instanceColors) {
                         const idx = i * 3
-                        instanceColors[idx] =
-                            baseColorObj.r + (redColor.r - baseColorObj.r) * t
-                        instanceColors[idx + 1] =
-                            baseColorObj.g + (redColor.g - baseColorObj.g) * t
-                        instanceColors[idx + 2] =
-                            baseColorObj.b + (redColor.b - baseColorObj.b) * t
-                        anyDisplaced = true
+                        if (displacement.lengthSq() > 0.0004) {
+                            const t = Math.min(displacement.length() / 0.18, 1)
+                            instanceColors[idx] =
+                                baseColorObj.r + (redColor.r - baseColorObj.r) * t
+                            instanceColors[idx + 1] =
+                                baseColorObj.g + (redColor.g - baseColorObj.g) * t
+                            instanceColors[idx + 2] =
+                                baseColorObj.b + (redColor.b - baseColorObj.b) * t
+                            colorsDirty = true
+                        } else if (
+                            instanceColors[idx] !== baseColorObj.r ||
+                            instanceColors[idx + 1] !== baseColorObj.g ||
+                            instanceColors[idx + 2] !== baseColorObj.b
+                        ) {
+                            // Reset settled particles — previously stuck red forever.
+                            instanceColors[idx] = baseColorObj.r
+                            instanceColors[idx + 1] = baseColorObj.g
+                            instanceColors[idx + 2] = baseColorObj.b
+                            colorsDirty = true
+                        }
                     }
                 }
                 particlesRef.current.instanceMatrix.needsUpdate = true
-                if (anyDisplaced && instanceColors) {
+                if (colorsDirty && particlesRef.current.instanceColor) {
                     particlesRef.current.instanceColor.needsUpdate = true
                 }
             } else if (particleShape === "cube" && particlesRef.current) {
@@ -784,10 +872,9 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
                 ) {
                     const basePos = baseParticlePositionsRef.current[i]
                     const displacement = particleDisplacementsRef.current[i]
-                    const finalPos = new Vector3()
-                    finalPos.copy(basePos)
-                    finalPos.add(displacement)
-                    positions.setXYZ(i, finalPos.x, finalPos.y, finalPos.z)
+                    tmpFinal.copy(basePos)
+                    tmpFinal.add(displacement)
+                    positions.setXYZ(i, tmpFinal.x, tmpFinal.y, tmpFinal.z)
                 }
                 positions.needsUpdate = true
             }
@@ -795,7 +882,7 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
             needsRender = true
 
             // Render every frame
-            if (needsRender || rotationSpeed !== 0 || isDragging) {
+            if (needsRender || effectiveRotationSpeed !== 0 || isDragging) {
                 renderer.render(scene, camera)
             }
 
@@ -818,12 +905,14 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
             // In preview/live mode, only continue if there's actual animation
             const canAutoRotateForContinue = true
             const needsContinue =
-                isCanvas || // Always run in canvas mode for visibility
+                (isCanvas || // Always run in canvas mode for visibility
                 isDragging ||
-                (rotationSpeed !== 0 && canAutoRotateForContinue) ||
+                (effectiveRotationSpeed !== 0 && canAutoRotateForContinue) ||
                 hasVelocity ||
                 hasLerpDelta ||
-                hasCursorInteraction
+                hasCursorInteraction) &&
+                tabVisibleRef.current &&
+                onScreenRef.current
 
             if (needsContinue) {
                 animationFrameId = requestAnimationFrame(animate)
@@ -840,9 +929,21 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
         // Start animation loop - resets lastFrameTime to prevent delta jump
         const startAnimation = () => {
             if (animationFrameId === null) {
+                if (!tabVisibleRef.current || !onScreenRef.current) return
                 lastFrameTime = performance.now()
                 animationFrameId = requestAnimationFrame(animate)
                 animationFrameRef.current = animationFrameId
+            }
+        }
+
+        const stopAnimation = () => {
+            if (animationFrameId !== null) {
+                cancelAnimationFrame(animationFrameId)
+                animationFrameId = null
+            }
+            if (animationFrameRef.current) {
+                cancelAnimationFrame(animationFrameRef.current)
+                animationFrameRef.current = null
             }
         }
 
@@ -962,8 +1063,8 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
             ) {
                 // Convert container coordinates to canvas coordinates (add offset)
                 mouseRef.current = {
-                    x: mouseXInContainer + offsetX,
-                    y: mouseYInContainer + offsetY,
+                    x: mouseXInContainer + offsetRef.x,
+                    y: mouseYInContainer + offsetRef.y,
                 }
                 // Start animation if not running (needed for cursor interaction to work)
                 startAnimation()
@@ -993,8 +1094,8 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
                 ) {
                     // Convert container coordinates to canvas coordinates (add offset)
                     mouseRef.current = {
-                        x: touchXInContainer + offsetX,
-                        y: touchYInContainer + offsetY,
+                        x: touchXInContainer + offsetRef.x,
+                        y: touchYInContainer + offsetRef.y,
                     }
                     // Start animation if not running (needed for cursor interaction to work)
                     startAnimation()
@@ -1017,8 +1118,8 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
 
             const containerRect = container.getBoundingClientRect()
             // Convert container coordinates to canvas coordinates (add offset)
-            const clickX = event.clientX - containerRect.left + offsetX
-            const clickY = event.clientY - containerRect.top + offsetY
+            const clickX = event.clientX - containerRect.left + offsetRef.x
+            const clickY = event.clientY - containerRect.top + offsetRef.y
             const cursorRadiusSquared = cursorRadius * cursorRadius
             const clickForce = cursorConfig.clickForce || 10
 
@@ -1140,8 +1241,8 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
             if (!touch) return
 
             // Convert container coordinates to canvas coordinates (add offset)
-            const touchX = touch.clientX - containerRect.left + offsetX
-            const touchY = touch.clientY - containerRect.top + offsetY
+            const touchX = touch.clientX - containerRect.left + offsetRef.x
+            const touchY = touch.clientY - containerRect.top + offsetRef.y
             const cursorRadiusSquared = cursorRadius * cursorRadius
             const clickForce = cursorConfig.clickForce || 10
 
@@ -1264,7 +1365,8 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
             canvas.addEventListener("touchcancel", handleTouchEnd)
         }
 
-        // Resize handler
+        // Resize handler — debounced via queueResize below; skips hidden (0-size)
+        // containers and keeps DPR capped (covers monitor/zoom DPR changes).
         const handleResize = () => {
             if (
                 !containerRef.current ||
@@ -1273,20 +1375,22 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
             )
                 return
 
-            const newWidth =
-                containerRef.current.clientWidth ||
-                containerRef.current.offsetWidth ||
-                400
-            const newHeight =
-                containerRef.current.clientHeight ||
-                containerRef.current.offsetHeight ||
-                400
+            const rect = containerRef.current.getBoundingClientRect()
+            const newWidth = Math.floor(
+                rect.width || containerRef.current.clientWidth || containerRef.current.offsetWidth || 400
+            )
+            const newHeight = Math.floor(
+                rect.height || containerRef.current.clientHeight || containerRef.current.offsetHeight || 400
+            )
+            if (newWidth < 2 || newHeight < 2) return
 
             // Calculate new canvas dimensions with overflow
             const newCanvasWidth = newWidth * canvasOverflowMultiplier
             const newCanvasHeight = newHeight * canvasOverflowMultiplier
             const newOffsetX = (newCanvasWidth - newWidth) / 2
             const newOffsetY = (newCanvasHeight - newHeight) / 2
+            offsetRef.x = newOffsetX
+            offsetRef.y = newOffsetY
 
             cameraRef.current.aspect = newCanvasWidth / newCanvasHeight // Use canvas aspect ratio
             cameraRef.current.updateProjectionMatrix()
@@ -1300,7 +1404,8 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
             )
             cameraRef.current.position.z = cameraDistance
 
-            // Update canvas size and position
+            // Update canvas size and position (DPR may have changed on zoom/monitor move)
+            rendererRef.current.setPixelRatio(getCappedPixelRatio(lowEnd))
             rendererRef.current.setSize(newCanvasWidth, newCanvasHeight)
             const canvasEl = rendererRef.current.domElement
             canvasEl.style.left = `-${newOffsetX}px`
@@ -1308,17 +1413,194 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
             canvasEl.style.width = `${newCanvasWidth}px`
             canvasEl.style.height = `${newCanvasHeight}px`
 
-            rendererRef.current.render(sceneRef.current!, cameraRef.current)
+            if (tabVisibleRef.current && onScreenRef.current) {
+                try {
+                    rendererRef.current.render(sceneRef.current!, cameraRef.current)
+                } catch {
+                    // ignore one-off render errors (e.g. context lost during resize)
+                }
+            }
         }
 
-        // Canvas resize detection using zoom probe
+        const queueResize = () => {
+            if (resizeQueuedRef.current) return
+            resizeQueuedRef.current = true
+            requestAnimationFrame(() => {
+                resizeQueuedRef.current = false
+                handleResize()
+            })
+        }
+
+        // Shared teardown — cancels loops, removes listeners, frees GPU objects.
+        let resizeObserver: ResizeObserver | null = null
+        let ioObserver: IntersectionObserver | null = null
+        let zoomRafId = 0
+        const handleVisibility = () => {
+            tabVisibleRef.current = document.visibilityState !== "hidden"
+            if (!tabVisibleRef.current) {
+                stopAnimation()
+            } else if (onScreenRef.current) {
+                startAnimation()
+            }
+        }
+        const disposeAll = () => {
+            stopAnimation()
+            try {
+                resizeObserver?.disconnect()
+            } catch {
+                // ignore
+            }
+            try {
+                ioObserver?.disconnect()
+            } catch {
+                // ignore
+            }
+            try {
+                window.removeEventListener("resize", queueResize)
+            } catch {
+                // ignore
+            }
+            try {
+                document.removeEventListener("visibilitychange", handleVisibility)
+            } catch {
+                // ignore
+            }
+            if (zoomRafId !== 0) {
+                try {
+                    cancelAnimationFrame(zoomRafId)
+                } catch {
+                    // ignore
+                }
+                zoomRafId = 0
+            }
+            if (drag) {
+                canvas.removeEventListener("mousedown", handleMouseDown)
+            }
+            if (stopOnHover) {
+                canvas.removeEventListener("mousemove", handleMouseMoveHover)
+            }
+            if (cursorConfig.enabled) {
+                canvas.removeEventListener("mousemove", handleMouseMoveCursor)
+                canvas.removeEventListener("mouseleave", handleMouseLeaveCursor)
+                canvas.removeEventListener("click", handleClick)
+                canvas.removeEventListener("touchmove", handleTouchMove)
+                canvas.removeEventListener("touchstart", handleTouchStart)
+                canvas.removeEventListener("touchend", handleTouchEnd)
+                canvas.removeEventListener("touchcancel", handleTouchEnd)
+            }
+            try {
+                if (particlesRef.current) {
+                    try {
+                        const p = particlesRef.current as unknown as {
+                            dispose?: () => void
+                            geometry?: { dispose?: () => void }
+                            material?: { dispose?: () => void } | { dispose?: () => void }[]
+                        }
+                        if (typeof p.dispose === "function") p.dispose()
+                        if (p.geometry && typeof p.geometry.dispose === "function") p.geometry.dispose()
+                        if (Array.isArray(p.material)) {
+                            p.material.forEach((mat) => {
+                                try {
+                                    mat.dispose?.()
+                                } catch {
+                                    // ignore
+                                }
+                            })
+                        } else if (p.material && typeof p.material.dispose === "function") {
+                            p.material.dispose()
+                        }
+                    } catch {
+                        // ignore dispose errors
+                    }
+                    try {
+                        particlesGroup.remove(particlesRef.current)
+                    } catch {
+                        // ignore
+                    }
+                    particlesRef.current = null
+                }
+                try {
+                    particlesGroup.clear()
+                } catch {
+                    // ignore
+                }
+                try {
+                    scene.remove(particlesGroup)
+                } catch {
+                    // ignore
+                }
+                particlesGroupRef.current = null
+                sceneRef.current = null
+                cameraRef.current = null
+                baseParticlePositionsRef.current = []
+                particleDisplacementsRef.current = []
+                particleScatterVelocitiesRef.current = []
+            } catch {
+                // ignore
+            }
+            if (rendererRef.current) {
+                try {
+                    rendererRef.current.dispose()
+                    const gl = rendererRef.current as unknown as {
+                        forceContextLoss?: () => void
+                    }
+                    if (typeof gl.forceContextLoss === "function") gl.forceContextLoss()
+                } catch {
+                    // ignore
+                }
+                try {
+                    if (canvas.parentNode === container) container.removeChild(canvas)
+                    else if (canvas.parentNode) canvas.parentNode.removeChild(canvas)
+                } catch {
+                    // ignore
+                }
+                rendererRef.current = null
+            } else {
+                try {
+                    if (canvas.parentNode) canvas.parentNode.removeChild(canvas)
+                } catch {
+                    // ignore
+                }
+            }
+        }
+
+        // Pause on tab hide, resume on tab show.
+        document.addEventListener("visibilitychange", handleVisibility)
+
+        // Pause when scrolled offscreen / covered (IntersectionObserver).
+        try {
+            if (typeof IntersectionObserver !== "undefined") {
+                ioObserver = new IntersectionObserver(
+                    (entries) => {
+                        const vis = entries[0]?.isIntersecting ?? true
+                        onScreenRef.current = vis
+                        if (!vis) stopAnimation()
+                        else if (tabVisibleRef.current) startAnimation()
+                    },
+                    { threshold: 0 }
+                )
+                ioObserver.observe(container)
+            }
+        } catch {
+            ioObserver = null
+        }
+
+        // Preview/Live: debounced ResizeObserver + window resize.
+        try {
+            resizeObserver = new ResizeObserver(() => queueResize())
+            resizeObserver.observe(container)
+        } catch {
+            resizeObserver = null
+        }
+        window.addEventListener("resize", queueResize)
+
+        // Canvas-mode zoom probe (legacy Originkit path): throttled 4Hz poll.
         if (isCanvas && typeof window !== "undefined") {
             const TICK_MS = 250 // throttle to 4Hz
             const EPS_ZOOM = 0.001
             const EPS_SIZE = 0.5
             const EPS_ASPECT = 0.001
 
-            let rafId = 0
             const tick = (now?: number) => {
                 const probe = zoomProbeRef.current
                 if (probe && containerRef.current) {
@@ -1326,26 +1608,20 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
                     const rect = containerRef.current.getBoundingClientRect()
                     const cw = rect.width
                     const ch = rect.height
-                    const aspect = cw / ch
+                    const aspect = cw / (ch || 1)
 
                     const timeOk =
                         !lastResizeRef.current.ts ||
-                        (now || performance.now()) - lastResizeRef.current.ts >=
-                            TICK_MS
+                        (now || performance.now()) - lastResizeRef.current.ts >= TICK_MS
                     const zoomChanged =
-                        Math.abs(currentZoom - lastResizeRef.current.zoom) >
-                        EPS_ZOOM
+                        Math.abs(currentZoom - lastResizeRef.current.zoom) > EPS_ZOOM
                     const sizeChanged =
                         Math.abs(cw - lastResizeRef.current.w) > EPS_SIZE ||
                         Math.abs(ch - lastResizeRef.current.h) > EPS_SIZE
                     const aspectChanged =
-                        Math.abs(aspect - lastResizeRef.current.aspect) >
-                        EPS_ASPECT
+                        Math.abs(aspect - lastResizeRef.current.aspect) > EPS_ASPECT
 
-                    if (
-                        timeOk &&
-                        (zoomChanged || sizeChanged || aspectChanged)
-                    ) {
+                    if (timeOk && (zoomChanged || sizeChanged || aspectChanged)) {
                         lastResizeRef.current = {
                             ts: now || performance.now(),
                             zoom: currentZoom,
@@ -1356,118 +1632,14 @@ export default function ParticleSphereRefactor(__props: ParticleSphereRefactorPr
                         handleResize()
                     }
                 }
-                rafId = requestAnimationFrame(tick)
+                zoomRafId = requestAnimationFrame(tick)
             }
-            rafId = requestAnimationFrame(tick)
-
-            // Cleanup for canvas mode
-            return () => {
-                cancelAnimationFrame(rafId)
-                if (animationFrameId !== null) {
-                    cancelAnimationFrame(animationFrameId)
-                }
-                if (animationFrameRef.current) {
-                    cancelAnimationFrame(animationFrameRef.current)
-                }
-                if (drag) {
-                    canvas.removeEventListener("mousedown", handleMouseDown)
-                }
-                if (stopOnHover) {
-                    canvas.removeEventListener(
-                        "mousemove",
-                        handleMouseMoveHover
-                    )
-                }
-                // Remove cursor interaction event listeners if they were added
-                if (cursorConfig.enabled) {
-                    canvas.removeEventListener(
-                        "mousemove",
-                        handleMouseMoveCursor
-                    )
-                    canvas.removeEventListener(
-                        "mouseleave",
-                        handleMouseLeaveCursor
-                    )
-                    canvas.removeEventListener("click", handleClick)
-                    canvas.removeEventListener("touchmove", handleTouchMove)
-                    canvas.removeEventListener("touchstart", handleTouchStart)
-                    canvas.removeEventListener("touchend", handleTouchEnd)
-                    canvas.removeEventListener("touchcancel", handleTouchEnd)
-                }
-                if (rendererRef.current) {
-                    rendererRef.current.dispose()
-                    if (containerRef.current && canvas.parentNode) {
-                        containerRef.current.removeChild(canvas)
-                    }
-                }
-                if (particlesRef.current) {
-                    if (particlesRef.current.geometry) {
-                        particlesRef.current.geometry.dispose()
-                    }
-                    if (particlesRef.current.material) {
-                        if (Array.isArray(particlesRef.current.material)) {
-                            particlesRef.current.material.forEach((mat: any) =>
-                                mat.dispose()
-                            )
-                        } else {
-                            particlesRef.current.material.dispose()
-                        }
-                    }
-                }
-            }
+            zoomRafId = requestAnimationFrame(tick)
         }
 
-        // Preview/Live: use ResizeObserver
-        const resizeObserver = new ResizeObserver(() => handleResize())
-        resizeObserver.observe(container)
-        window.addEventListener("resize", handleResize)
-
-        // Cleanup for preview/live mode
+        // Cleanup (single path for both canvas + preview modes)
         return () => {
-            resizeObserver.disconnect()
-            window.removeEventListener("resize", handleResize)
-            if (animationFrameId !== null) {
-                cancelAnimationFrame(animationFrameId)
-            }
-            if (animationFrameRef.current) {
-                cancelAnimationFrame(animationFrameRef.current)
-            }
-            if (drag) {
-                canvas.removeEventListener("mousedown", handleMouseDown)
-            }
-            if (stopOnHover) {
-                canvas.removeEventListener("mousemove", handleMouseMoveHover)
-            }
-            // Remove cursor interaction event listeners if they were added
-            if (cursorConfig.enabled) {
-                canvas.removeEventListener("mousemove", handleMouseMoveCursor)
-                canvas.removeEventListener("mouseleave", handleMouseLeaveCursor)
-                canvas.removeEventListener("click", handleClick)
-                canvas.removeEventListener("touchmove", handleTouchMove)
-                canvas.removeEventListener("touchstart", handleTouchStart)
-                canvas.removeEventListener("touchend", handleTouchEnd)
-                canvas.removeEventListener("touchcancel", handleTouchEnd)
-            }
-            if (rendererRef.current) {
-                rendererRef.current.dispose()
-                if (containerRef.current && canvas.parentNode) {
-                    containerRef.current.removeChild(canvas)
-                }
-            }
-            if (particlesRef.current) {
-                if (particlesRef.current.geometry) {
-                    particlesRef.current.geometry.dispose()
-                }
-                if (particlesRef.current.material) {
-                    if (Array.isArray(particlesRef.current.material)) {
-                        particlesRef.current.material.forEach((mat: any) =>
-                            mat.dispose()
-                        )
-                    } else {
-                        particlesRef.current.material.dispose()
-                    }
-                }
-            }
+            disposeAll()
         }
     }, [
         particlesCount,

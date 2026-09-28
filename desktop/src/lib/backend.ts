@@ -179,7 +179,7 @@ export const armEmergencyStop = () =>
   backendFetch<void>('/api/consent', { method: 'POST', body: JSON.stringify({ action: 'arm' }) });
 
 export const disarmEmergencyStop = () =>
-  backendFetch<void>('/api/consent', { method: 'POST', body: JSON.stringify({ action: 'disarm' }) });
+  backendFetch<void>('/api/consent', { method: 'POST', body: JSON.stringify({ action: 'disarm', confirm: true }) });
 
 // ── Knowledge / Recall ──────────────────────────────────────────
 export interface KnowledgeResult {
@@ -201,8 +201,26 @@ export const searchKnowledge = (q: string) =>
   backendFetch<{ results: KnowledgeResult[] }>(`/api/knowledge/search?q=${encodeURIComponent(q)}`);
 
 // ── Memory ──────────────────────────────────────────────────────
-export const recallMemory = (query: string) =>
-  backendFetch<{ results: unknown[] }>(`/api/memory/recall?q=${encodeURIComponent(query)}`);
+export const recallMemory = async (query: string) => {
+  const raw = await backendFetch<unknown>(`/api/memory/recall?q=${encodeURIComponent(query)}`);
+  // Backend is canonical: GET /api/memory/recall returns the recall payload
+  // directly (not wrapped). Normalize every shape to { results }:
+  // - raw array -> { results: array }
+  // - { results: [...] } -> passthrough
+  // - { facts, similar, recent, query } (real backend) -> flattened { results }
+  if (Array.isArray(raw)) return { results: raw as unknown[] };
+  if (raw && typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>;
+    if (Array.isArray(obj.results)) return { results: obj.results as unknown[] };
+    const facts = Array.isArray(obj.facts) ? (obj.facts as unknown[]) : [];
+    const similar = Array.isArray(obj.similar) ? (obj.similar as unknown[]) : [];
+    const recent = Array.isArray(obj.recent) ? (obj.recent as unknown[]) : [];
+    if (facts.length > 0 || similar.length > 0 || recent.length > 0) {
+      return { results: [...facts, ...similar, ...recent] };
+    }
+  }
+  return { results: [] as unknown[] };
+};
 
 export const rememberMemory = (text: string) =>
   backendFetch<{ ok: boolean }>('/api/memory/remember', {
@@ -458,15 +476,31 @@ export const meetingLeave = () => backendFetch<void>('/api/meeting/leave', { met
 export const meetingStatus = () => backendFetch<Record<string, unknown>>('/api/meeting/status');
 
 export const meetingExecute = (action: string, params: Record<string, unknown> = {}) =>
-  backendFetch<unknown>('/api/meeting/action', {
+  backendFetch<unknown>('/api/meeting/execute', {
     method: 'POST',
     body: JSON.stringify({ action, params }),
   });
 
-export const meetingMute = (muted: boolean) => meetingExecute('mute', { muted });
-export const meetingRaiseHand = (raised: boolean) => meetingExecute('raiseHand', { raised });
-export const meetingChat = (message: string) => meetingExecute('chat', { message });
-export const meetingSpeak = (text: string) => meetingExecute('speak', { text });
+export const meetingMute = (muted: boolean) =>
+  backendFetch<{ result: unknown }>('/api/meeting/mute', {
+    method: 'POST',
+    body: JSON.stringify({ muted }),
+  });
+export const meetingRaiseHand = (raised: boolean) =>
+  backendFetch<{ result: unknown }>('/api/meeting/raise-hand', {
+    method: 'POST',
+    body: JSON.stringify({ raised }),
+  });
+export const meetingChat = (message: string) =>
+  backendFetch<{ result: unknown }>('/api/meeting/chat', {
+    method: 'POST',
+    body: JSON.stringify({ message }),
+  });
+export const meetingSpeak = (text: string, opts?: { voice?: string; language?: string }) =>
+  backendFetch<{ result: unknown }>('/api/meeting/speak', {
+    method: 'POST',
+    body: JSON.stringify({ text, ...opts }),
+  });
 
 export const meetingListen = () =>
   backendFetch<unknown>('/api/meeting/listen', { method: 'POST' });
@@ -575,7 +609,80 @@ export const shutdownBackend = () => backendFetch<{ ok: boolean }>('/api/shutdow
 export const getSystemStatus = () => backendFetch<Record<string, unknown>>('/api/status', { timeout: 5000 });
 
 // ── Device Mesh ─────────────────────────────────────────────────
-export const getDevices = () => backendFetch<{ devices: Array<{ id: string; name: string; type: string; online: boolean; lastSeen?: string }> }>('/api/devices');
+export interface DeviceInfo {
+  id: string;
+  name: string;
+  type: string;
+  online: boolean;
+  lastSeen?: string;
+}
+
+export function normalizeDevicesPayload(raw: unknown): DeviceInfo[] {
+  // Triple-shape normalization — the backend is canonical and may return:
+  // 1. a raw array: [...]
+  // 2. a wrapped array: { devices: [...] }
+  // 3. the full mesh view: { devices: { registered: [...], hub: {...}, ... } }
+  // Always normalize to a flat Array.
+  const toDevice = (d: unknown): DeviceInfo | null => {
+    if (!d || typeof d !== 'object') return null;
+    const o = d as Record<string, unknown>;
+    const id = String(o.id ?? o.deviceId ?? '');
+    if (!id) return null;
+    return {
+      id,
+      name: String(o.name ?? id),
+      type: String((o.type as string) ?? (o.role as string) ?? 'Device'),
+      online: Boolean(o.online ?? o.connected ?? false),
+      ...(o.lastSeen !== undefined ? { lastSeen: String(o.lastSeen) } : {}),
+    };
+  };
+  if (Array.isArray(raw)) {
+    return raw.map(toDevice).filter((d): d is DeviceInfo => d !== null);
+  }
+  if (raw && typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>;
+    const dev = obj.devices;
+    if (Array.isArray(dev)) {
+      return dev.map(toDevice).filter((d): d is DeviceInfo => d !== null);
+    }
+    if (dev && typeof dev === 'object') {
+      const inner = dev as Record<string, unknown>;
+      const registered = Array.isArray(inner.registered) ? inner.registered : [];
+      // hub.onlineDevices is a string[] of ids in the real backend — it carries
+      // no display metadata, so only merge it when it holds full objects.
+      const hub = inner.hub && typeof inner.hub === 'object' ? (inner.hub as Record<string, unknown>) : null;
+      const hubDevices = hub && Array.isArray(hub.onlineDevices) ? hub.onlineDevices : [];
+      const hubObjs = hubDevices.filter((d) => d && typeof d === 'object');
+      const hubIds = hubDevices.filter((d) => typeof d === 'string') as string[];
+      const mappedRegistered = registered.map(toDevice).filter((d): d is DeviceInfo => d !== null);
+      const mappedHubObjs = (hubObjs as unknown[]).map(toDevice).filter((d): d is DeviceInfo => d !== null);
+      const seen = new Set(mappedRegistered.map((d) => d.id));
+      const hubOnly = mappedHubObjs.filter((d) => !seen.has(d.id));
+      // String-only hub ids that are not already registered become minimal entries.
+      const missingIds = hubIds.filter((id) => !seen.has(id) && !hubOnly.some((d) => d.id === id));
+      const missingEntries: DeviceInfo[] = missingIds.map((id) => ({ id, name: id, type: 'Device', online: true }));
+      // Also support { connected: [...] } shape.
+      const connected = Array.isArray(inner.connected) ? inner.connected : [];
+      const mappedConnected = (connected as unknown[]).map(toDevice).filter((d): d is DeviceInfo => d !== null);
+      const all = [...mappedRegistered, ...hubOnly, ...missingEntries];
+      for (const c of mappedConnected) {
+        if (!all.some((d) => d.id === c.id)) all.push(c);
+      }
+      return all;
+    }
+    // Server-direct shape without the { devices } wrapper:
+    // { registered: [...], hub: {...}, connected: [...] }
+    if (Array.isArray(obj.registered) || Array.isArray(obj.connected)) {
+      return normalizeDevicesPayload({ devices: obj });
+    }
+  }
+  return [];
+}
+
+export const getDevices = async () => {
+  const raw = await backendFetch<unknown>('/api/devices');
+  return { devices: normalizeDevicesPayload(raw) };
+};
 export const deviceInvite = async () => {
   const res = await backendFetch<{ invite: { code: string; expiresAt?: number; joinUrl?: string } }>('/api/devices/invite', { method: 'POST' });
   return { code: res.invite.code };
@@ -745,14 +852,35 @@ export const meshRevoke = (deviceId: string) =>
   });
 
 // ── Connectors ──────────────────────────────────────────────────
-export const getConnectors = () =>
-  backendFetch<{ connectors: unknown[] }>('/api/connectors');
+export const getConnectors = async () => {
+  const raw = await backendFetch<unknown>('/api/connectors');
+  // GET /api/connectors returns { connectors: { connectors, total, categories } }
+  // (marketplace shape) — normalize every shape to a flat Array.
+  if (raw && typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>;
+    const c = obj.connectors;
+    if (Array.isArray(c)) return { connectors: c as unknown[] };
+    if (c && typeof c === 'object') {
+      const inner = c as Record<string, unknown>;
+      if (Array.isArray(inner.connectors)) return { connectors: inner.connectors as unknown[] };
+    }
+  }
+  if (Array.isArray(raw)) return { connectors: raw as unknown[] };
+  return { connectors: [] as unknown[] };
+};
 
-export const disconnectConnector = (connectorId: string) =>
-  backendFetch<{ disconnected: boolean }>('/api/connectors/disconnect', {
+export const disconnectConnector = async (connectorId: string) => {
+  const res = await backendFetch<{ result?: { success?: boolean; connected?: boolean; disconnected?: boolean } }>(`/api/connectors/${encodeURIComponent(connectorId)}/disconnect`, {
     method: 'POST',
-    body: JSON.stringify({ connectorId }),
   });
+  const r = res.result ?? {};
+  const disconnected =
+    typeof r.success === 'boolean' ? r.success
+    : typeof r.disconnected === 'boolean' ? r.disconnected
+    : typeof r.connected === 'boolean' ? !r.connected
+    : true;
+  return { disconnected };
+};
 
 // ── Connector Marketplace (new) ────────────────────────────────
 export interface ConnectorMarketplaceEntry {
@@ -800,14 +928,34 @@ export interface ConnectorExecuteResult {
   headers?: Record<string, string>;
 }
 
-export const listConnectors = (opts?: { q?: string; category?: string; limit?: number; offset?: number }) => {
+export const listConnectors = async (opts?: { q?: string; category?: string; limit?: number; offset?: number }): Promise<ConnectorListResult> => {
   const params = new URLSearchParams();
   if (opts?.q) params.set('q', opts.q);
   if (opts?.category) params.set('category', opts.category);
   if (opts?.limit) params.set('limit', String(opts.limit));
   if (opts?.offset) params.set('offset', String(opts.offset));
   const qs = params.toString();
-  return backendFetch<ConnectorListResult>(`/api/connectors${qs ? `?${qs}` : ''}`);
+  const raw = await backendFetch<unknown>(`/api/connectors${qs ? `?${qs}` : ''}`);
+  // Backend is canonical: GET /api/connectors returns
+  // { connectors: { connectors, total, categories } } — unwrap the nesting.
+  let inner: Record<string, unknown> = {};
+  if (raw && typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>;
+    if (obj.connectors && typeof obj.connectors === 'object' && !Array.isArray(obj.connectors)) {
+      inner = obj.connectors as Record<string, unknown>;
+    } else if (Array.isArray(obj.connectors)) {
+      inner = { connectors: obj.connectors, total: obj.connectors.length, categories: [] };
+    } else {
+      inner = obj;
+    }
+  }
+  const connectors = (Array.isArray(inner.connectors) ? inner.connectors : []) as ConnectorMarketplaceEntry[];
+  const total = typeof inner.total === 'number' ? inner.total : connectors.length;
+  const rawCats = inner.categories;
+  const categories: string[] = Array.isArray(rawCats)
+    ? rawCats.map((c) => (typeof c === 'string' ? c : String((c as Record<string, unknown>).category ?? (c as Record<string, unknown>).id ?? c)))
+    : [];
+  return { connectors, total, categories };
 };
 
 export const getConnector = (id: string) =>
@@ -828,32 +976,65 @@ export const connectConnector = (id: string, opts?: { apiKey?: string; baseUrl?:
     body: JSON.stringify(opts ?? {}),
   });
 
-export const disconnectConnectorById = (id: string) =>
-  backendFetch<{ disconnected: boolean }>(`/api/connectors/${id}/disconnect`, {
+export const disconnectConnectorById = async (id: string) => {
+  const res = await backendFetch<{ result?: { success?: boolean; connected?: boolean; disconnected?: boolean } }>(`/api/connectors/${encodeURIComponent(id)}/disconnect`, {
     method: 'POST',
   });
+  const r = res.result ?? {};
+  const disconnected =
+    typeof r.success === 'boolean' ? r.success
+    : typeof r.disconnected === 'boolean' ? r.disconnected
+    : typeof r.connected === 'boolean' ? !r.connected
+    : true;
+  return { disconnected };
+};
 
-export const getConnectorStatus = (id: string) =>
-  backendFetch<{ credential?: ConnectorCredential }>(`/api/connectors/${id}/status`);
+export const getConnectorStatus = async (id: string) => {
+  const res = await backendFetch<{ status?: ConnectorCredential; credential?: ConnectorCredential }>(`/api/connectors/${encodeURIComponent(id)}/status`);
+  // Backend is canonical: GET /api/connectors/:id/status returns { status: {...} }.
+  // Map it onto the { credential } shape the UI expects.
+  const credential = (res.credential ?? res.status) as ConnectorCredential | undefined;
+  return { credential };
+};
 
-export const connectorDiscover = (query: string) =>
-  backendFetch<ConnectorDiscoverResult>('/api/connectors/tools', {
+export const connectorDiscover = async (query: string, limit?: number) => {
+  const res = await backendFetch<{ tools?: Array<Record<string, unknown>> }>('/api/connectors/tools', {
     method: 'POST',
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({ query, ...(limit !== undefined ? { limit } : {}) }),
   });
+  // Backend is canonical: POST /api/connectors/tools returns { tools: [...] }.
+  // Map tools onto the { connectors: [{ connectorId, description, available }] }
+  // shape the Agent Tools UI expects.
+  const tools = Array.isArray(res.tools) ? res.tools : [];
+  const connectors = tools.map((t) => {
+    const connectorId = String(t.connectorId ?? t.id ?? t.name ?? 'unknown');
+    const description = String(t.description ?? t.query ?? connectorId);
+    const available = t.available !== undefined ? Boolean(t.available) : true;
+    return { connectorId, description, available };
+  });
+  return { connectors } satisfies ConnectorDiscoverResult;
+};
 
-export const connectorExecute = (opts: { connectorId: string; endpoint: string; method?: string; body?: unknown; headers?: Record<string, string> }) =>
+export const connectorExecute = (opts: { connectorId: string; endpoint: string; method?: string; payload?: Record<string, unknown>; userId?: string }) =>
   backendFetch<ConnectorExecuteResult>('/api/connectors/execute', {
     method: 'POST',
     body: JSON.stringify(opts),
   });
 
-export const syncConnectors = () =>
-  backendFetch<{ synced: number }>('/api/connectors/sync', { method: 'POST', timeout: 120000 });
+export const syncConnectors = async () => {
+  const res = await backendFetch<{ result?: { synced?: number; total?: number; added?: number } }>('/api/connectors/sync', { method: 'POST', timeout: 120000 });
+  // Backend is canonical: POST /api/connectors/sync returns { result: { synced } }
+  // (mock) or { result: { added, total } } (real catalog sync). Unwrap to { synced }.
+  const r = res.result ?? {};
+  const synced = typeof r.synced === 'number' ? r.synced : typeof r.total === 'number' ? r.total : typeof r.added === 'number' ? r.added : 0;
+  return { synced };
+};
 
-export const saveConnectorCredential = (opts: { slug: string; clientId?: string; clientSecret?: string; apiKey?: string; scopes?: string[] }) =>
+export const saveConnectorCredential = (opts: { slug: string; clientId?: string; clientSecret?: string; scopes?: string[] }) =>
   backendFetch<{ saved: boolean }>('/api/connectors/credential', {
     method: 'POST',
+    // Backend canonical fields are slug + clientId/client_id + clientSecret/client_secret + scopes.
+    // apiKey is NOT a credential field here — callers needing an API key use connectConnector.
     body: JSON.stringify(opts),
   });
 
@@ -970,7 +1151,7 @@ export const authLogin = (email: string, password: string) =>
 export const authLoginKey = (apiKey: string) =>
   backendFetch<{ user: unknown }>('/api/auth/login-key', {
     method: 'POST',
-    body: JSON.stringify({ key: apiKey }),
+    body: JSON.stringify({ apiKey }),
   });
 
 export const authMe = (apiKey: string) =>
@@ -982,7 +1163,7 @@ export const authDevices = (apiKey: string) =>
 export const authPairDevice = (apiKey: string, name: string, type: string) =>
   backendFetch<{ device: unknown }>('/api/auth/devices/pair', {
     method: 'POST',
-    body: JSON.stringify({ key: apiKey, name, type }),
+    body: JSON.stringify({ apiKey, name, type }),
   });
 
 export const authRemoveDevice = (apiKey: string, deviceId: string) =>

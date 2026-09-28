@@ -123,6 +123,10 @@ export class ChromeExtensionBridge {
     filtered: number;
     sessionId: string;
   }> {
+    if (this.consentGate?.isEmergencyStopArmed()) {
+      getLogger().warn('Chrome telemetry rejected — emergency stop is armed');
+      return { processed: 0, filtered: events.length, sessionId };
+    }
     if (!this.sessionId) this.sessionId = sessionId;
 
     let filtered = 0;
@@ -535,6 +539,18 @@ export class ChromeExtensionBridge {
     if (!connector) {
       getLogger().warn({ provider }, 'No connector mapping found for provider');
       return { connected: false, connectorId: '', provider };
+    }
+
+    // Require consent before storing session cookies (which include actual
+    // cookie values) in the credential vault.
+    if (this.consentGate) {
+      const consent = await this.consentGate.request(
+        `Save browser session cookies for ${provider} (${connector.name}) to the vault?`,
+      );
+      if (consent !== 'granted') {
+        getLogger().warn({ provider }, 'Connector session cookies not saved — consent denied');
+        return { connected: false, connectorId: '', provider };
+      }
     }
 
     // Store the session in the credential vault

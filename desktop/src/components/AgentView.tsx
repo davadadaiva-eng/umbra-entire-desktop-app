@@ -1465,7 +1465,7 @@ export function AgentView() {
     >
       <div className="absolute inset-0 z-0 pointer-events-none">
         <GlitterWrap
-          particleCount={420}
+          particleCount={280}
           color1="#ffffff"
           color2="#60A5FA"
           color3="#3B82F6"
@@ -1537,22 +1537,35 @@ export function AgentView() {
                             style={{ background: `radial-gradient(circle, ${acc}2e 0%, transparent 62%)`, filter: 'blur(20px)' }}
                           />
                         )}
-                        <ParticleSphere
-                          particlesCount={12000}
-                          particleScale={6}
-                          speed={25}
-                          smoothing={7}
-                          scale={10}
-                          drag={true}
-                          dragSpeed={5}
-                          cursorOn={true}
-                          cursorRadiusUI={80}
-                          cursorStrengthUI={12}
-                          clickForce={6}
-                          stopOnHover={false}
-                          sphereColor={acc}
-                          style={{ width: '100%', height: '100%' }}
-                        />
+                        {isFocus ? (
+                          <ParticleSphere
+                            particlesCount={6000}
+                            particleScale={6}
+                            speed={25}
+                            smoothing={7}
+                            scale={10}
+                            drag={true}
+                            dragSpeed={5}
+                            cursorOn={true}
+                            cursorRadiusUI={80}
+                            cursorStrengthUI={12}
+                            clickForce={6}
+                            stopOnHover={false}
+                            sphereColor={acc}
+                            style={{ width: '100%', height: '100%' }}
+                          />
+                        ) : (
+                          <div
+                            className="w-full h-full rounded-full"
+                            aria-hidden
+                            style={{
+                              background: `radial-gradient(circle at 32% 28%, ${acc}cc 0%, ${acc}44 34%, rgba(10,12,16,0.92) 68%)`,
+                              border: `1px solid ${acc}55`,
+                              boxShadow: `0 0 24px ${acc}33, inset 0 0 24px ${acc}22`,
+                              opacity: 0.9,
+                            }}
+                          />
+                        )}
                       </div>
                     </div>
                     <div

@@ -67,6 +67,7 @@ import { WhisperAsr } from './core/voice/WhisperAsr';
 import { FasterWhisperStt } from './core/voice/FasterWhisperStt';
 import { PiperTts } from './core/voice/PiperTts';
 import { VoiceStackHealth } from './core/voice/VoiceStackHealth';
+import { VOICE_FIX, isReachable } from './core/voice/VoiceFallbacks';
 import { PushToTalkService } from './core/voice/PushToTalkService';
 import { LoopbackRecorder } from './core/audio/LoopbackRecorder';
 import { MicRecorder } from './core/audio/MicRecorder';
@@ -118,6 +119,9 @@ import { ModelProvider, PlanTier, McpConnectorConfig, McpOauthClientConfig } fro
 import { ALL_SKILLS } from './core/skill/SkillStack';
 import { listSkillRepos } from './core/skill/SkillRepos';
 import { SocialAutomation } from './core/social/SocialAutomation';
+import { ApprovalGate } from './core/agent/ApprovalGate';
+import { createAuthToken } from './api/AuthToken';
+import { SignedUrl } from './mobile/SignedUrl';
 import { SmartThingsService } from './core/smart/SmartThingsService';
 import { SmartHomeScheduler } from './core/smart/SmartHomeScheduler';
 import { OpenCarruselBridge } from './core/media/OpenCarruselBridge';
@@ -128,6 +132,13 @@ import { VirtualWallet } from './core/billing/VirtualWallet';
 import { SmartRoutingMatrix, buildStickySystemPrompt } from './core/metering/SmartRoutingMatrix';
 import Stripe from 'stripe';
 import * as crypto from 'crypto';
+
+/** Engine selector: only these three values are valid; anything else falls back to 'browseruse'. */
+export type UmbraEngine = 'browseruse' | 'desktop2' | 'ghost';
+export function umbraEngine(): UmbraEngine {
+  const v = process.env['UMBRA_ENGINE'];
+  return v === 'desktop2' || v === 'ghost' ? v : 'browseruse';
+}
 
 export class UmbraOS {
   private configManager!: ConfigManager;
@@ -163,6 +174,9 @@ export class UmbraOS {
   private agentDesktop?: AgentDesktop;
   private audio!: NoiseCancellationEngine;
   private streamer?: PreviewStreamer;
+  /** Shared propose/decide gate for meeting/execute + desktop2/action (OpenMuse actions.ts port). */
+  private approvalGate = new ApprovalGate();
+  private previewSigned!: SignedUrl;
   private hud?: CommandHUD;
   private hotkey?: GlobalHotkey;
   private pushToTalkHotkey?: GlobalHotkey;
@@ -236,6 +250,21 @@ export class UmbraOS {
   private stripeClient?: Stripe;
   private startedAt: number = Date.now();
   private resumedTasks: number = 0;
+  /** True when the credential vault could not be unlocked at boot — surfaced
+   *  in /api/status so the UI can prompt "Vault locked — unlock in Settings". */
+  public credVaultLocked: boolean = false;
+  /** Cached at boot so /api/status does not stat the filesystem per poll. */
+  private hermesAvailable: boolean = false;
+  /** LLM boot health (see checkLlmHealth) — never throws, never blocks boot. */
+  private llmHealth: {
+    provider: string;
+    endpoint: string;
+    reachable: boolean;
+    disabled: boolean;
+    error?: string;
+    message?: string;
+    checkedAt: number;
+  } = { provider: '', endpoint: '', reachable: false, disabled: false, checkedAt: 0 };
 
   private initialized: boolean = false;
 
@@ -283,6 +312,13 @@ export class UmbraOS {
     //    breaker, token accounting, plan gate) ────────────────────────
     this.llm = new RoutedLLMConnector(config, this.metering, this.modelRouter, this.tenants);
 
+    // ── LLM health check at boot: the default provider is a LOCAL Ollama
+    //    (provider: 'ollama', models qwen2.5:*), which is simply not running
+    //    on most machines. Probe it once; if it is unreachable, record a
+    //    disabled state with a helpful message and keep booting — every AI
+    //    task then reports SERVICE_DISABLED instead of a raw connect error.
+    await this.checkLlmHealth();
+
     // ── Privacy Guard ────────────────────────────────────────
     this.privacy = new PrivacyGuard();
 
@@ -291,7 +327,7 @@ export class UmbraOS {
       dataDir: config.paths.dataDir,
       promptTimeoutMs: 30000,
       askOncePerSession: true,
-      autoApprove: config.autoApprove !== false,
+       autoApprove: config.autoApprove === true,
     });
     if (await this.consent.checkEmergencyStop()) {
       getLogger().warn('Consent gate: emergency-stop file present at startup — actions will be blocked');
@@ -384,6 +420,8 @@ export class UmbraOS {
       },
       this.consent,
     );
+    // ApprovalGate wiring (called once): desktop2/action consent checks consult the shared gate.
+    this.desktop2.setApprovalGate(this.approvalGate, 'desktop2');
 
     // ── Agent Desktop (persistent agent Chrome with CDP) — desktop only ──
     if (!this.headless) {
@@ -421,13 +459,20 @@ export class UmbraOS {
       path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe'),
       path.join(__dirname, '..', 'scripts', 'browser-use', 'bridge.py'),
     );
-    const engine = process.env['UMBRA_ENGINE'] || 'browseruse';
+    if (!this.fastEngine.isAvailable()) {
+      getLogger().warn(
+        'BrowserUseBridge: python venv or bridge script missing — fast engine disabled. ' +
+          'Falling back to the Desktop2 / Chrome CDP loop (AgentDesktop). ' +
+          'Install with: cd backend && python -m venv .venv && .venv\\Scripts\\pip install browser-use && .venv\\Scripts\\python -m playwright install chromium',
+      );
+    }
+    const engine: UmbraEngine = umbraEngine();
     if (engine === 'browseruse' && !this.headless) {
       await this.fastEngine.start();
     } else if (engine === 'browseruse') {
       getLogger().info('Fast engine disabled (headless) — cloud tasks use the step loop / built-in reasoning engine');
     } else {
-      getLogger().info('Fast engine disabled (UMBRA_ENGINE=desktop2) — using Desktop 2 loop');
+      getLogger().info(`Fast engine disabled (UMBRA_ENGINE=${engine}) — using Desktop 2 loop`);
     }
 
     // ── Video production (Remotion + OpenMontage tool registry) ──
@@ -456,7 +501,16 @@ export class UmbraOS {
       outputDir: path.join(config.paths.dataDir, 'tts'),
     });
     if (!this.openmontage.isInstalled()) {
-      getLogger().warn('OpenMontage not installed — video production disabled (external/OpenMontage)');
+      getLogger().warn(
+        'OpenMontage not installed — video production falling back to built-in VideoProducer (Remotion CLI). ' +
+          'Install with: cd backend && git clone https://github.com/umbra-os/OpenMontage.git external/OpenMontage && cd external/OpenMontage && pip install -r requirements.txt',
+      );
+    }
+    if (!this.vibeVoiceTts?.installed) {
+      getLogger().warn(
+        'VibeVoice not installed — TTS/ASR falling back to Piper TTS / Whisper ASR (already configured as alternates). ' +
+          'Install with: cd backend && npm run vibevoice:install (needs Python 3.10+ and a GPU recommended)',
+      );
     }
 
     // ── Agent Systems ────────────────────────────────────────
@@ -472,9 +526,24 @@ export class UmbraOS {
       new WorkspaceFiles(path.join(config.paths.dataDir, 'workspace')),
     );
     this.hermes = new HermesAgentBridge({
-      bin: config.hermes.bin || undefined,
+      // Empty bin = auto-detect (%LOCALAPPDATA%\hermes\hermes.exe and friends,
+      // then `hermes` on PATH). Never pass '' — the bridge would treat it as a
+      // literal path to the CWD and fail to spawn.
+      bin: (config.hermes.bin || '').trim() || undefined,
       timeoutMs: config.hermes.taskTimeoutMs,
     });
+    if (!config.hermes.autoDelegate) {
+      getLogger().info('Hermes auto-delegation is off (opt-in via hermes.autoDelegate / UMBRA_HERMES_AUTO_DELEGATE=1)');
+    }
+    if (this.hermes.isInstalled()) {
+      this.hermesAvailable = true;
+      getLogger().info({ bin: this.hermes.detectBin() }, 'Hermes agent engine detected');
+    } else {
+      getLogger().warn(
+        { bin: config.hermes.bin || '(auto)', searched: '%LOCALAPPDATA%\\hermes, %USERPROFILE%\\.hermes, PATH' },
+        'Hermes agent engine NOT found — delegation to the external agent is unavailable (set hermes.bin in config.json, HERMES_BIN, or install hermes)',
+      );
+    }
 
     this.agent.registerSubsystems({
       swarm: this.swarm,
@@ -526,10 +595,19 @@ export class UmbraOS {
         fps: 5,
       });
       this.streamer.setFrameProvider(() => this.realDesktop?.captureWindow() ?? this.desktop2.screenshot());
-      const ghostEngine = (process.env['UMBRA_ENGINE'] || 'browseruse') !== 'browseruse';
+      const ghostEngine = umbraEngine() !== 'browseruse';
       this.streamer.setCommandHandler((action, params) =>
         ghostEngine ? this.executeGhost(action, params) : this.desktop2.executeAction(action, params),
       );
+      // AuthToken + SignedUrl wiring (OpenMuse auth.ts port): opt-in via
+      // UMBRA_PREVIEW_AUTH=1 so local dev stays open by default.
+      this.previewSigned = new SignedUrl(createAuthToken(path.join(config.paths.dataDir, 'auth'), ''));
+      if (process.env['UMBRA_PREVIEW_AUTH'] === '1') {
+        this.streamer.setAuth(this.previewSigned.authToken);
+      } else {
+        // Enforced only when UMBRA_PREVIEW_AUTH=1 — otherwise leave open.
+        this.streamer.setAuth(null);
+      }
     }
 
     // ── Command HUD — desktop only ────────────────────────────
@@ -556,12 +634,23 @@ export class UmbraOS {
     // ── API Server (REST + WS for the read-only UI) ──────────
     this.api = new ApiServer({
       getStatus: () => this.getApiStatus(),
-      submitTask: (description, priority) => this.submitTask(description, priority),
+      submitTask: (description, priority, idempotencyKey) => this.submitTask(description, priority, idempotencyKey),
       chat: (message, target) => this.dispatchTask(message, target || 'auto'),
       getTask: id => this.agent.getTask(id),
       getActiveTasks: () => this.agent.getActiveTasks(),
+      getTaskActivity: id => Promise.resolve(this.agent.getTaskActivity(id)),
       cancelTask: taskId => this.agent.cancelTask(taskId),
       retryTask: (taskId, description) => this.agent.retryTask(taskId, description),
+      workerClaim: (taskId, workerId) => this.agent.workerClaim(taskId, workerId),
+      workerHeartbeat: (taskId, workerId) => this.agent.workerHeartbeat(taskId, workerId),
+      workerRelease: (taskId, workerId) => this.agent.workerRelease(taskId, workerId),
+      workerRecover: (workerId) => this.agent.workerRecover(workerId),
+      proposeAction: (taskId, action, args) => this.agent.proposeAction(taskId, action, args),
+      reviewAction: (proposalId, approved, hash) => this.agent.reviewAction(proposalId, approved, hash),
+      getProposal: (proposalId) => this.agent.getProposal(proposalId),
+      listProposals: (taskId) => this.agent.listProposals(taskId),
+      requestInput: (taskId, question, options) => this.agent.requestInput(taskId, question, options),
+      submitInput: (taskId, inputId, answer) => this.agent.submitInput(taskId, inputId, answer),
       executeDesktop2: (action, params) => this.executeDesktop2(action, params),
       executeGhost: (action, params) => this.executeGhost(action, params),
       captureGhost: () => this.captureGhost(),
@@ -741,10 +830,25 @@ export class UmbraOS {
       dataDir: config.paths.dataDir,
       hwid: getStableHwid(process.env['UMBRA_HWID']),
     });
+    this.credVaultLocked = true;
     try {
       this.credVault.unlock();
+      this.credVaultLocked = !this.credVault.isUnlocked;
     } catch (err) {
-      getLogger().warn({ err }, 'Credential vault locked — vault-backed connectors will be disabled');
+      this.credVaultLocked = true;
+      getLogger().warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        'Credential vault locked — vault-backed connectors are disabled until you unlock it in Settings',
+      );
+    }
+    if (this.credVaultLocked) {
+      // Surfaced in /api/status → credVault.locked so the UI can show
+      // "Vault locked — unlock in Settings" instead of failing silently.
+      getLogger().warn(
+        { entries: this.credVault.isUnlocked ? this.credVault.list().length : 0 },
+        'Credential vault is LOCKED — stored connector/API credentials are unavailable (unlock in Settings)',
+      );
+      eventBus.emit('vault:entry', 'locked');
     }
     // Wire chrome bridge to vault + consent for auto-register logins
     try { this.chromeBridge.setVault(this.credVault); this.chromeBridge.setConsent(this.consent); } catch {}
@@ -876,7 +980,7 @@ export class UmbraOS {
       // Phone control plane drives the real desktop (or Desktop 2) and
       // streams live frames back to the PWA.
       p2p.setCommandHandler((action, params) =>
-        (process.env['UMBRA_ENGINE'] || 'browseruse') !== 'browseruse'
+        umbraEngine() !== 'browseruse'
           ? this.executeGhost(action, params)
           : this.executeDesktop2(action, params),
       );
@@ -903,6 +1007,9 @@ export class UmbraOS {
         // Also push each lifecycle snapshot directly to the device that
         // submitted the task, so the phone tracks its own work live.
         relayTo: (deviceId, msg) => this.deviceClient?.relay(deviceId, msg),
+        // Broadcast already reaches locally-connected devices — skip the
+        // direct relay for those so the origin doesn't get every event twice.
+        isBroadcastCovered: deviceId => this.deviceHub?.isOnline(deviceId) ?? false,
       });
       this.taskSyncBridge.start();
       this.startDeviceClient();
@@ -1072,6 +1179,12 @@ export class UmbraOS {
       path.join(__dirname, '..', 'scripts'),
       config.paths.dataDir,
     );
+    if (!this.social.isAvailable()) {
+      getLogger().warn(
+        'SocialAutomation: python venv not available — using no-op scheduler fallback (posts will be logged as "not configured"). ' +
+          'Install with: cd backend && python -m venv .venv && .venv\\Scripts\\pip install -r scripts/social/requirements.txt && .venv\\Scripts\\python -m playwright install chromium',
+      );
+    }
 
     // ── Smart Home (Samsung SmartThings) ─────────────────────
     this.smartThings = new SmartThingsService({
@@ -1086,6 +1199,12 @@ export class UmbraOS {
       path.join(__dirname, '..', 'external', 'open-carrusel'),
       3100,
     );
+    if (!this.carrusel.isInstalled()) {
+      getLogger().warn(
+        'OpenCarrusel not installed — Instagram carousel designer unavailable. ' +
+          'Install with: cd backend && git clone https://github.com/umbra-os/open-carrusel.git external/open-carrusel && cd external/open-carrusel && npm install && npm run dev',
+      );
+    }
 
     // ── Twenty CRM (open-source Salesforce alternative, Docker Compose) ──
     this.twenty = new TwentyBridge(
@@ -1093,6 +1212,12 @@ export class UmbraOS {
       config.paths.dataDir,
       { serverUrl: `http://127.0.0.1:3000`, port: 3000 },
     );
+    if (!this.twenty.isAvailable()) {
+      getLogger().warn(
+        'Twenty CRM Docker stack not found — using local SQLite-backed CRM fallback. ' +
+          'Install with: cd backend && git clone https://github.com/twentyhq/twenty.git external/twenty',
+      );
+    }
 
     // ── Recording + Meeting persistence (always, even headless for API) ──
     this.meetingStore = new MeetingStore(config.paths.dataDir);
@@ -1108,6 +1233,9 @@ export class UmbraOS {
           ? {
               transcribe: async (audio: Buffer, format?: string) => {
                 const r = await this.speechToText!.transcribe({ audio, format: format as 'wav' | 'mp3' | 'webm' });
+                // A provider that is not listening degrades instead of throwing;
+                // the meeting just loses the transcript chunk, not the meeting.
+                if (!r.ok) getLogger().warn({ error: r.error, fix: r.hint }, 'Meeting transcript skipped — STT provider not running');
                 return { text: r.text };
               },
             }
@@ -1159,6 +1287,8 @@ export class UmbraOS {
         chunkSec: config.meeting.chunkSec,
         ordersEnabled: config.meeting.ordersEnabled !== false,
       });
+      // ApprovalGate wiring (called once): meeting/execute consent checks consult the shared gate.
+      this.meetingCompanion.setApprovalGate(this.approvalGate, 'meeting');
 
       // ── Voice-stack health: validate STT / TTS / ASR / cable / loopback
       //    at boot (and on demand via GET /api/voice/health). Reported in
@@ -1175,6 +1305,8 @@ export class UmbraOS {
         probes: {
           stt: async () => {
             const provider = config.voice.sttProvider ?? 'none';
+            const sttFix = this.speechToText?.fixCommand ?? VOICE_FIX.sttBrowser;
+            const sttFallback = "the desktop app's Web Speech API (on-device, no server)";
             if (provider === 'openai') {
               const hasKey = !!(config.openai?.apiKey || config.voice.sttApiKey);
               return hasKey
@@ -1192,7 +1324,7 @@ export class UmbraOS {
                 if (!res.ok) return { ok: true, detail: `whisper-local at ${healthUrl} returned HTTP ${res.status} — fallback to cloud STT`, status: 'degraded' } as any;
                 return { ok: true, detail: `whisper-local reachable at ${healthUrl}` };
               } catch (err: any) {
-                return { ok: true, detail: `whisper-local not running — fallback to Settings → Speech-to-text cloud provider`, error: `whisper-local unreachable: ${err.message}`, status: 'degraded' } as any;
+                return { ok: true, detail: `whisper-local not running — using ${sttFallback}`, error: `whisper-local unreachable: ${err.message}`, status: 'degraded', fix: sttFix, fallback: sttFallback } as any;
               } finally {
                 clearTimeout(timer);
               }
@@ -1201,23 +1333,24 @@ export class UmbraOS {
               const running = this.voiceboxClient ? await this.voiceboxClient.isRunning().catch(() => false) : false;
               return running
                 ? { ok: true, detail: 'Voicebox STT ready at ' + (config.voice.voiceboxUrl || 'http://127.0.0.1:17493') }
-                : { ok: false, error: 'Voicebox not running — start it (docs/voicebox-setup.md)' };
+                : { ok: true, status: 'degraded', error: 'Voicebox not running — using ' + sttFallback, detail: `Voice STT degraded — using ${sttFallback}`, fix: VOICE_FIX.sttVoicebox, fallback: sttFallback } as any;
             }
             if (provider === 'faster-whisper') {
+              const url = (config.voice.fasterWhisperUrl || 'http://127.0.0.1:17510').replace(/\/+$/, '') + '/health';
               try {
-                const url = (config.voice.fasterWhisperUrl || 'http://127.0.0.1:17510').replace(/\/+$/, '') + '/health';
                 const res = await HttpBridge.request({ url, method: 'GET', timeoutMs: 5000 });
                 const data: any = res.data || {};
                 if (data?.state === 'ready' || data?.ok) return { ok: true, detail: `Faster-Whisper STT ready at ${url} (${data.model || 'base'})` };
-                return { ok: false, error: `Faster-Whisper at ${url} not ready: ${data?.state || res.status} — start npm run whisper:stt-server` };
+                return { ok: true, status: 'degraded', error: `Faster-Whisper at ${url} not ready: ${data?.state || res.status}`, detail: `Voice STT degraded — using ${sttFallback}`, fix: VOICE_FIX.sttFasterWhisper, fallback: sttFallback } as any;
               } catch (e: any) {
-                return { ok: false, error: `Faster-Whisper at ${config.voice.fasterWhisperUrl} unreachable: ${e.message} — ensure server on 17510 is running` };
+                return { ok: true, status: 'degraded', error: `Faster-Whisper at ${config.voice.fasterWhisperUrl} unreachable: ${e.message}`, detail: `Voice STT degraded — using ${sttFallback}`, fix: VOICE_FIX.sttFasterWhisper, fallback: sttFallback } as any;
               }
             }
             return { ok: false, error: `Unknown STT provider: ${provider}` };
           },
           tts: async () => {
             const tts = config.meeting.tts ?? 'none';
+            const sapi = 'Windows SAPI (built into Windows)';
             if (tts === 'local') {
               return this.windowsTts?.available
                 ? { ok: true, detail: 'Windows SAPI TTS available' }
@@ -1226,52 +1359,53 @@ export class UmbraOS {
             if (tts === 'vibevoice') {
               return this.vibeVoiceTts?.installed
                 ? { ok: true, detail: 'VibeVoice venv installed (npm run vibevoice:install)' }
-                : { ok: false, error: 'VibeVoice not installed — run `npm run vibevoice:install`' };
+                : { ok: true, status: 'degraded', error: 'VibeVoice not installed', detail: `Voice TTS degraded — using ${sapi}`, fix: VOICE_FIX.ttsVibeVoice, fallback: sapi } as any;
             }
             if (tts === 'voicebox') {
               const running = this.voiceboxClient ? await this.voiceboxClient.isRunning().catch(() => false) : false;
               return running
                 ? { ok: true, detail: 'Voicebox API running at ' + (config.voice.voiceboxUrl || 'http://127.0.0.1:17493') }
-                : { ok: false, error: 'Voicebox not running — start it (docs/voicebox-setup.md)' };
+                : { ok: true, status: 'degraded', error: 'Voicebox not running', detail: `Voice TTS degraded — using ${sapi}`, fix: VOICE_FIX.ttsVoicebox, fallback: sapi } as any;
             }
             if (tts === 'piper') {
+              const url = (config.voice.piperUrl || 'http://127.0.0.1:17520').replace(/\/+$/, '') + '/health';
               try {
-                const url = (config.voice.piperUrl || 'http://127.0.0.1:17520').replace(/\/+$/, '') + '/health';
                 const res = await HttpBridge.request({ url, method: 'GET', timeoutMs: 5000 });
                 const data: any = res.data || {};
                 if (data?.ok || data?.state === 'ready') return { ok: true, detail: `Piper TTS ready at ${url} voice ${data.voice || config.voice.piperVoice}` };
-                return { ok: false, error: `Piper at ${url} not ready: ${data?.state || res.status}` };
+                return { ok: true, status: 'degraded', error: `Piper at ${url} not ready: ${data?.state || res.status}`, detail: `Voice TTS degraded — using ${sapi}`, fix: VOICE_FIX.ttsPiper, fallback: sapi } as any;
               } catch (e: any) {
-                return { ok: false, error: `Piper at ${config.voice.piperUrl} unreachable: ${e.message}` };
+                return { ok: true, status: 'degraded', error: `Piper at ${config.voice.piperUrl} unreachable: ${e.message}`, detail: `Voice TTS degraded — using ${sapi}`, fix: VOICE_FIX.ttsPiper, fallback: sapi } as any;
               }
             }
             return { ok: false, error: `Unknown TTS provider: ${tts}` };
           },
           asr: async () => {
             const provider = config.voice.asrProvider ?? 'none';
+            const plainStt = 'plain STT without speaker labels';
             if (provider === 'whisper') {
               const health = this.whisperAsr ? await this.whisperAsr.health().catch(() => null) : null;
               if (!health) {
-                return { ok: true, detail: 'Whisper-ASR not running — diarization will use basic STT, or start `npm run whisper:asr-server` for speaker labels', error: 'Whisper-ASR not running', status: 'degraded' } as any;
+                return { ok: true, detail: `Whisper-ASR not running — diarization uses ${plainStt}`, error: 'Whisper-ASR not running', status: 'degraded', fix: VOICE_FIX.asrWhisper, fallback: plainStt } as any;
               }
               if (health.state === 'loading') {
-                return { ok: true, detail: 'Whisper-ASR loading — model downloading/loading (first run ~520 MB)', status: 'degraded' } as any;
+                return { ok: true, detail: 'Whisper-ASR loading — model downloading/loading (first run ~520 MB)', status: 'degraded', fallback: plainStt, fix: VOICE_FIX.asrWhisper } as any;
               }
               if (health.state === 'error') {
-                return { ok: true, detail: `Whisper-ASR error — fallback to basic STT`, error: `Whisper-ASR failed: ${health.error ?? 'unknown'}`, status: 'degraded' } as any;
+                return { ok: true, detail: `Whisper-ASR error — fallback to basic STT`, error: `Whisper-ASR failed: ${health.error ?? 'unknown'}`, status: 'degraded', fallback: plainStt, fix: VOICE_FIX.asrWhisper } as any;
               }
               return { ok: true, detail: `Whisper-ASR ready on ${health.device ?? 'auto'}` };
             }
             if (provider === 'vibevoice') {
               const health = this.vibeVoiceAsr ? await this.vibeVoiceAsr.health().catch(() => null) : null;
               if (!health) {
-                return { ok: true, detail: 'VibeVoice-ASR not running — diarization via basic STT', error: 'VibeVoice-ASR not running', status: 'degraded' } as any;
+                return { ok: true, detail: `VibeVoice-ASR not running — diarization via ${plainStt}`, error: 'VibeVoice-ASR not running', status: 'degraded', fix: VOICE_FIX.asrVibeVoice, fallback: plainStt } as any;
               }
               if (health.state === 'loading') {
-                return { ok: true, detail: 'VibeVoice-ASR loading — model downloading/loading (first run is ~17 GB)', status: 'degraded' } as any;
+                return { ok: true, detail: 'VibeVoice-ASR loading — model downloading/loading (first run is ~17 GB)', status: 'degraded', fallback: plainStt, fix: VOICE_FIX.asrVibeVoice } as any;
               }
               if (health.state === 'error') {
-                return { ok: true, detail: `VibeVoice-ASR error — fallback`, error: `VibeVoice-ASR failed: ${health.error ?? 'unknown'}`, status: 'degraded' } as any;
+                return { ok: true, detail: `VibeVoice-ASR error — fallback`, error: `VibeVoice-ASR failed: ${health.error ?? 'unknown'}`, status: 'degraded', fallback: plainStt, fix: VOICE_FIX.asrVibeVoice } as any;
               }
               return { ok: true, detail: `VibeVoice-ASR ready on ${health.device ?? 'auto'}` };
             }
@@ -1283,7 +1417,7 @@ export class UmbraOS {
             const devices = await this.audioRouter.listDevices('both').catch(() => []);
             if (cable === 'auto') {
               const found = findCable(devices, 'render');
-              if (!found) return { ok: true, detail: 'No VB-Cable — meeting audio via browser/ASR feedAudio, or install VB-Cable for cable routing', error: 'No virtual audio cable — install VB-Cable (vb-audio.com/Cable)', status: 'degraded' } as any;
+              if (!found) return { ok: true, detail: 'No VB-Cable — meeting audio via browser/ASR feedAudio, or install VB-Cable for cable routing', error: 'No virtual audio cable — install VB-Cable (vb-audio.com/Cable)', status: 'degraded', fix: VOICE_FIX.cable, fallback: 'the browser/ASR feedAudio API' } as any;
               return {
                 ok: true,
                 detail: `VB-Cable found (${found.name}); default mic ${config.meeting.routeMic ? 'will route to the cable on join' : 'unchanged'}`,
@@ -1293,27 +1427,34 @@ export class UmbraOS {
             const match = devices.find(d => d.id === cable || d.name === cable);
             return match
               ? { ok: true, detail: `Cable device present: ${match.name}` }
-              : { ok: false, error: `Configured cable device not found: ${cable}` };
+              : { ok: true, status: 'degraded', error: `Configured cable device not found: ${cable}`, detail: `Cable "${cable}" not found — using the default render device`, fix: VOICE_FIX.cable, fallback: 'the default render device' } as any;
           },
           loopback: async () => {
             return this.loopbackRecorder?.available
               ? { ok: true, detail: 'WASAPI loopback capture available' }
-              : { ok: false, error: 'Loopback capture unavailable (WASAPI disabled or blocked — try VB-Cable/Stereo Mix)' };
+              : { ok: true, status: 'degraded', error: 'Loopback capture unavailable (WASAPI disabled or blocked)', detail: 'Loopback capture unavailable — Umbra cannot hear system audio; meeting audio falls back to the browser/ASR feed', fix: VOICE_FIX.loopback, fallback: 'the browser/ASR feedAudio path' } as any;
           },
           mic: async () => {
-            if (!this.audioRouter) return { ok: false, error: 'Audio router unavailable' };
+            if (!this.audioRouter) return { ok: false, error: 'Audio router unavailable', fix: VOICE_FIX.mic } as any;
             const devices = await this.audioRouter.listDevices('capture').catch(() => []);
             return devices.length > 0
               ? {
                   ok: true,
                   detail: `Microphone present: ${devices.map(d => d.name).slice(0, 3).join(', ')}${devices.length > 3 ? '…' : ''}`,
                 }
-              : { ok: false, error: 'No microphone capture device found — push-to-talk cannot hear you' };
+              : { ok: false, error: 'No microphone capture device found — push-to-talk cannot hear you', fix: VOICE_FIX.mic } as any;
           },
         },
       });
-      // Run once at boot (never blocks startup on failure).
-      this.voiceStackHealth.refresh().catch(() => getLogger().debug('Voice-stack health check failed'));
+      // Run once at boot (never blocks startup on failure). A dead STT/TTS
+      // server is a warning, not a boot failure.
+      this.voiceStackHealth
+        .refresh()
+        .then(report => {
+          getLogger().info({ degraded: report.degraded, fixes: report.fixes }, report.summary);
+          this.voiceStackHealth?.logReport(getLogger());
+        })
+        .catch(err => getLogger().debug({ err: err?.message }, 'Voice-stack health check failed'));
 
       // ── Push-to-talk ("tap to listen"): hold the hotkey, speak, release —
       //    the microphone is captured (MicRecorder, waveIn), transcribed by
@@ -1383,7 +1524,7 @@ export class UmbraOS {
     // ── Agent browser: launch once at boot, reused by all tasks ──
     // (ghost/desktop2 modes own Chrome themselves — RealDesktop2 uses the
     //  user's REAL profile; let the agent-chrome instance start on demand)
-    if ((process.env['UMBRA_ENGINE'] || 'browseruse') === 'browseruse') {
+    if (umbraEngine() === 'browseruse') {
       this.agentDesktop?.ensure().catch(() => {});
     }
 
@@ -1462,6 +1603,28 @@ export class UmbraOS {
       agent: this.agent ? { activeTasks: this.agent.getActiveTasks().length } : null,
       swarm: swarmStatus,
       models: this.configManager.raw.models,
+      // Boot-time LLM probe: the UI shows the actionable message here instead
+      // of every task failing with a raw provider connect error.
+      llm: {
+        ...this.llmHealth,
+        disabled: this.llmHealth.disabled,
+        message: this.llmHealth.message
+          || (this.llmHealth.disabled ? 'LLM provider unavailable' : 'LLM provider ready'),
+      },
+      // Credential vault state — `locked: true` ⇒ "Vault locked — unlock in
+      // Settings" in the UI; vault-backed connectors stay disabled.
+      credVault: {
+        locked: this.credVaultLocked,
+        available: !!this.credVault?.isUnlocked,
+        message: this.credVaultLocked ? 'Vault locked — unlock in Settings' : 'Vault unlocked',
+      },
+      hermes: {
+        configured: this.hermesAvailable,
+        autoDelegate: this.configManager.raw.hermes?.autoDelegate === true,
+        message: this.hermesAvailable
+          ? 'Agent engine available'
+          : 'Hermes agent engine not found — delegation unavailable',
+      },
       execution: {
         role: this.role,
         headless: this.headless,
@@ -1473,12 +1636,58 @@ export class UmbraOS {
       voiceStack: this.voiceStackHealth ? this.voiceStackHealth.snapshot() : null,
       pushToTalk: this.getPushToTalkStatus(),
       chromeExtension: this.chromeBridge.getStatus(),
+      bridges: {
+        fastEngine: {
+          available: this.fastEngine?.isAvailable() ?? false,
+          ready: this.fastEngine?.isReady() ?? false,
+          fallback: 'Desktop2 / Chrome CDP loop (AgentDesktop)',
+          message: this.fastEngine?.isAvailable()
+            ? (this.fastEngine.isReady() ? 'Fast engine running' : 'Fast engine available but not started (headless or disabled)')
+            : 'BrowserUseBridge not installed — using Desktop2 / Chrome CDP loop fallback',
+        },
+        openmontage: {
+          available: this.openmontage?.isInstalled() ?? false,
+          fallback: 'VideoProducer (Remotion CLI)',
+          message: this.openmontage?.isInstalled()
+            ? 'OpenMontage installed'
+            : 'OpenMontage not installed — using built-in VideoProducer (Remotion CLI) fallback',
+        },
+        vibevoice: {
+          available: this.vibeVoiceTts?.installed ?? false,
+          fallback: 'Piper TTS / Whisper ASR',
+          message: this.vibeVoiceTts?.installed
+            ? 'VibeVoice installed'
+            : 'VibeVoice not installed — using Piper TTS / Whisper ASR as alternates',
+        },
+        social: {
+          available: this.social?.isAvailable() ?? false,
+          fallback: 'no-op scheduler (logs "not configured")',
+          message: this.social?.isAvailable()
+            ? 'Social automation available'
+            : 'Social automation not configured — using no-op scheduler fallback',
+        },
+        carrusel: {
+          available: this.carrusel?.isInstalled() ?? false,
+          fallback: 'none (carousel design unavailable)',
+          message: this.carrusel?.isInstalled()
+            ? 'OpenCarrusel installed'
+            : 'OpenCarrusel not installed — Instagram carousel design unavailable',
+        },
+        twenty: {
+          available: this.twenty?.available ?? false,
+          running: this.twenty?.isRunning() ?? false,
+          fallback: 'local SQLite-backed CRM',
+          message: this.twenty?.available
+            ? (this.twenty.isRunning() ? 'Twenty CRM running' : 'Twenty CRM available but not started')
+            : 'Twenty CRM Docker stack not found — using local SQLite-backed CRM',
+        },
+      },
     };
   }
 
-  async submitTask(description: string, priority?: number): Promise<string> {
+  async submitTask(description: string, priority?: number, idempotencyKey?: string): Promise<string> {
     if (!this.initialized) throw new Error('Umbra OS not initialized');
-    const task = await this.agent.submitTask(description, priority);
+    const task = await this.agent.submitTask(description, priority, idempotencyKey);
     return task.id;
   }
 
@@ -1878,10 +2087,131 @@ export class UmbraOS {
     };
   }
 
+  // ── LLM boot health ──────────────────────────────────────────────
+
+  /** Endpoint the active provider is expected to answer on. */
+  private llmEndpoint(provider: string): string {
+    const c = this.configManager.raw;
+    switch (provider) {
+      case 'ollama': return String(c.ollama?.endpoint || 'http://localhost:11434').replace(/\/+$/, '');
+      case 'openai-compatible': return String(c.openaiCompatible?.endpoint || '').replace(/\/+$/, '');
+      case 'openai': return String(c.openai?.endpoint || 'https://api.openai.com/v1').replace(/\/+$/, '');
+      case 'anthropic': return 'https://api.anthropic.com/v1';
+      default: return '';
+    }
+  }
+
+  /** Cheap liveness URL for the active provider (null = not probeable). */
+  private llmProbeUrl(provider: string, endpoint: string): string | null {
+    if (!endpoint) return null;
+    if (provider === 'ollama') return `${endpoint}/api/tags`;
+    if (provider === 'openai-compatible' || provider === 'openai') return `${endpoint}/models`;
+    return null;
+  }
+
+  /** Human-readable reason the provider cannot be used, or undefined. */
+  private llmMissingCredential(provider: string): string | undefined {
+    const c = this.configManager.raw;
+    if (provider === 'openai-compatible') {
+      if (!c.openaiCompatible?.endpoint) {
+        return 'openai-compatible provider selected but no endpoint configured (openaiCompatible.endpoint) — set UMBRA_LLM_PROVIDER back to a local provider or configure it in Settings → Provider';
+      }
+      if (!c.openaiCompatible?.apiKey) {
+        return 'openai-compatible provider selected but no API key configured (openaiCompatible.apiKey) — set it in Settings → Provider';
+      }
+      return undefined;
+    }
+    if (provider === 'openai' && !c.openai?.apiKey) {
+      return 'OpenAI provider selected but no API key configured (openai.apiKey) — set it in Settings → Provider';
+    }
+    if (provider === 'anthropic' && !c.anthropic?.apiKey) {
+      return 'Anthropic provider selected but no API key configured (anthropic.apiKey) — set it in Settings → Provider';
+    }
+    return undefined;
+  }
+
+  /**
+   * One-shot startup probe of the configured LLM endpoint. Never throws and
+   * never blocks boot for more than ~2s: an unreachable provider downgrades
+   * Umbra to an explicit "LLM disabled" state with an actionable message
+   * (reported via /api/status → `llm`), instead of every AI task failing
+   * with an opaque connect error — or the process dying.
+   */
+  private async checkLlmHealth(): Promise<void> {
+    const c = this.configManager.raw;
+    const checkedAt = Date.now();
+    const pre = c.llm || { disabled: false };
+
+    if (pre.disabled) {
+      const reason = pre.reason || 'LLM disabled by configuration (UMBRA_LLM_PROVIDER=none)';
+      this.llmHealth = {
+        provider: pre.provider || c.provider,
+        endpoint: '',
+        reachable: false,
+        disabled: true,
+        error: reason,
+        message: reason,
+        checkedAt,
+      };
+      getLogger().warn({ reason }, 'LLM disabled at boot — AI tasks will report SERVICE_DISABLED (Umbra keeps running)');
+      return;
+    }
+
+    const provider = c.provider;
+    const endpoint = this.llmEndpoint(provider);
+    const probeUrl = this.llmProbeUrl(provider, endpoint);
+    const missing = this.llmMissingCredential(provider);
+
+    if (missing) {
+      this.llmHealth = { provider, endpoint, reachable: false, disabled: true, error: missing, message: missing, checkedAt };
+      getLogger().warn({ provider }, `LLM unavailable — ${missing}`);
+      return;
+    }
+    if (!probeUrl) {
+      // Nothing cheap to probe (authenticated-only provider): assume healthy
+      // and let the circuit breaker decide on the first real call.
+      this.llmHealth = {
+        provider,
+        endpoint,
+        reachable: true,
+        disabled: false,
+        message: 'No startup probe available for this provider — verified on first call',
+        checkedAt,
+      };
+      getLogger().info({ provider, endpoint }, 'LLM provider configured (no startup probe)');
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2000);
+    try {
+      const res = await fetch(probeUrl, { method: 'GET', signal: controller.signal });
+      // 401/404 still proves something is listening; only 5xx means unusable.
+      if (res.status < 500) {
+        this.llmHealth = {
+          provider, endpoint, reachable: true, disabled: false,
+          message: `Provider reachable (HTTP ${res.status})`, checkedAt,
+        };
+        getLogger().info({ provider, endpoint, status: res.status }, 'LLM provider reachable');
+      } else {
+        const reason = `LLM provider at ${endpoint} returned HTTP ${res.status}`;
+        this.llmHealth = { provider, endpoint, reachable: false, disabled: true, error: reason, message: reason, checkedAt };
+        getLogger().warn({ provider, endpoint, status: res.status }, reason);
+      }
+    } catch (err: any) {
+      const reason = `LLM provider unreachable at ${endpoint} (${err?.name === 'AbortError' ? 'timeout after 2s' : err?.message || 'connection refused'}) — start it, or point Umbra at another provider (UMBRA_LLM_PROVIDER=ollama|openai-compatible|none)`;
+      this.llmHealth = { provider, endpoint, reachable: false, disabled: true, error: reason, message: reason, checkedAt };
+      getLogger().warn({ provider, endpoint, err: err?.message }, reason);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async getModelStatus(): Promise<any> {
     const snap = this.modelRouter.snapshot();
     return {
       provider: this.configManager.raw.provider,
+      health: this.llmHealth,
       models: this.configManager.raw.models,
       plan: snap.plan,
       planName: snap.planName,
@@ -1906,19 +2236,44 @@ export class UmbraOS {
 
   /** Make a tiny live completion to validate the configured provider/key. */
   async testLlm(): Promise<any> {
+    // Unreachable/disabled provider (see checkLlmHealth): report the reason and
+    // how to fix it instead of surfacing a raw connect error.
+    if (this.llmHealth.disabled) {
+      return {
+        ok: false,
+        provider: this.llmHealth.provider,
+        endpoint: this.llmHealth.endpoint,
+        error: this.llmHealth.error || 'LLM provider unavailable',
+        message: this.llmHealth.message || this.llmHealth.error,
+        hint: 'Start the provider (e.g. `ollama serve`) or switch it in Settings → Provider',
+        health: this.llmHealth,
+      };
+    }
     const started = Date.now();
-    const res = await this.llm.complete(
-      [{ role: 'user', content: 'Reply with the single word: ok' }],
-      'fast',
-      { maxTokens: 8, temperature: 0 },
-    );
-    return {
-      ok: true,
-      model: res.modelUsed,
-      tokens: res.totalTokens,
-      latencyMs: Date.now() - started,
-      content: res.content.slice(0, 200),
-    };
+    try {
+      const res = await this.llm.complete(
+        [{ role: 'user', content: 'Reply with the single word: ok' }],
+        'fast',
+        { maxTokens: 8, temperature: 0 },
+      );
+      return {
+        ok: true,
+        model: res.modelUsed,
+        tokens: res.totalTokens,
+        latencyMs: Date.now() - started,
+        content: res.content.slice(0, 200),
+      };
+    } catch (err: any) {
+      // Re-probe so a provider that died after boot is reported as disabled.
+      await this.checkLlmHealth();
+      return {
+        ok: false,
+        provider: this.llmHealth.provider || this.configManager.raw.provider,
+        error: err?.message || 'LLM call failed',
+        message: this.llmHealth.message || err?.message || 'LLM call failed',
+        health: this.llmHealth,
+      };
+    }
   }
 
   /**
@@ -2018,6 +2373,10 @@ export class UmbraOS {
     const config = cm.raw;
     this.llm.updateConfig(config);
     this.modelRouter.updateConfig(config);
+    // Re-probe: the user just switched provider/keys — refresh the boot health
+    // so /api/status stops advertising the previous provider as disabled.
+    config.llm = { ...config.llm, disabled: false };
+    await this.checkLlmHealth();
     return this.getProviderConfig();
   }
 
@@ -2303,10 +2662,13 @@ export class UmbraOS {
     const asrProvider = this.configManager.raw.voice.asrProvider ?? 'none';
     const asrClient = asrProvider === 'whisper' ? this.whisperAsr : this.vibeVoiceAsr;
     const asrHealth = asrClient ? await asrClient.health().catch(() => null) : null;
+    const stack = this.voiceStackHealth ? this.voiceStackHealth.snapshot() : null;
     return {
       enabled: this.speechToText?.available ?? false,
       provider: this.speechToText?.provider ?? 'none',
       model: this.configManager.raw.voice.sttModel,
+      /** What to run to bring the configured STT server up. */
+      fix: this.speechToText?.fixCommand,
       asr: {
         provider: asrProvider,
         url: asrProvider === 'whisper' ? this.configManager.raw.voice.whisperAsrUrl : this.configManager.raw.voice.vibevoiceAsrUrl,
@@ -2320,17 +2682,91 @@ export class UmbraOS {
             }
           : {}),
       },
-      health: this.voiceStackHealth ? this.voiceStackHealth.snapshot() : null,
+      /** One-liner for the settings card: "Voice degraded: start whisper with …". */
+      summary: stack?.summary ?? null,
+      health: stack,
     };
   }
 
   /** Voice-stack health: cached report, or re-run every probe when refresh. */
   async getVoiceStackHealth(refresh = false): Promise<any> {
     if (!this.voiceStackHealth) {
-      return { ok: false, checkedAt: Date.now(), reason: 'voice stack not configured (headless/cloud mode)', components: [] };
+      return {
+        ok: true,
+        checkedAt: Date.now(),
+        reason: 'voice stack not configured (headless/cloud mode)',
+        summary: 'Voice stack not probed (headless/cloud mode)',
+        components: [],
+        degraded: [],
+        fixes: [],
+      };
     }
     if (refresh) await this.voiceStackHealth.refresh();
     return this.voiceStackHealth.snapshot();
+  }
+
+  /**
+   * Boot-time voice warnings.
+   *
+   * The config ships pointing at localhost STT/TTS ports (17510, 17520, …) and
+   * nothing starts those servers automatically, so a cold machine would
+   * otherwise fail every speak/transcribe call. Probe each configured server
+   * once, log a *warning* naming the exact command that starts it plus the
+   * fallback Umbra will use meanwhile, and let boot continue — a voice server
+   * that is not running is a degraded stack, not a broken app.
+   */
+  private logVoiceServersNotRunning(): void {
+    const log = getLogger();
+    const v = this.configManager.raw.voice;
+    const tts = this.configManager.raw.meeting.tts ?? 'none';
+
+    const probe = (component: string, url: string, check: Promise<boolean>, fix: string, fallback: string): void => {
+      check
+        .then(running => {
+          if (running) {
+            log.info({ component, url }, `Voice server up: ${component}`);
+            return;
+          }
+          log.warn(
+            { component, url, fallback, fix, hint: `Voice degraded: start ${component} — ${fix}` },
+            `Voice server not running: ${component} at ${url} — Umbra falls back to ${fallback}`,
+          );
+        })
+        .catch(err => log.debug({ component, err: err?.message }, `Voice server probe failed: ${component}`));
+    };
+
+    const stt = v.sttProvider ?? 'none';
+    if (v.enabled === true) {
+      if (stt === 'faster-whisper') {
+        probe(
+          'Faster-Whisper STT',
+          v.fasterWhisperUrl || 'http://127.0.0.1:17510',
+          this.fasterWhisperStt!.isRunning().catch(() => false),
+          VOICE_FIX.sttFasterWhisper,
+          "the desktop app's Web Speech API (on-device, no server)",
+        );
+      } else if (stt === 'whisper-local') {
+        probe(
+          'whisper.cpp STT',
+          v.sttEndpoint || 'http://localhost:8080',
+          isReachable(v.sttEndpoint || 'http://localhost:8080'),
+          VOICE_FIX.sttWhisperLocal,
+          "the desktop app's Web Speech API (on-device, no server)",
+        );
+      } else if (stt === 'voicebox') {
+        probe('Voicebox STT', v.voiceboxUrl || 'http://127.0.0.1:17493', this.voiceboxClient!.isRunning().catch(() => false), VOICE_FIX.sttVoicebox, "the desktop app's Web Speech API (on-device, no server)");
+      }
+    }
+    if (tts === 'piper') {
+      probe('Piper TTS', v.piperUrl || 'http://127.0.0.1:17520', this.piperTts!.isRunning().catch(() => false), VOICE_FIX.ttsPiper, 'Windows SAPI (built into Windows)');
+    } else if (tts === 'voicebox') {
+      probe('Voicebox TTS', v.voiceboxUrl || 'http://127.0.0.1:17493', this.voiceboxClient!.isRunning().catch(() => false), VOICE_FIX.ttsVoicebox, 'Windows SAPI (built into Windows)');
+    }
+    if ((v.asrProvider ?? 'none') === 'whisper') {
+      probe('Whisper-ASR (diarization)', v.whisperAsrUrl || 'http://127.0.0.1:17501', this.whisperAsr!.isRunning().catch(() => false), VOICE_FIX.asrWhisper, 'plain STT without speaker labels');
+    } else if ((v.asrProvider ?? 'none') === 'vibevoice') {
+      probe('VibeVoice-ASR (diarization)', v.vibevoiceAsrUrl || 'http://127.0.0.1:17502', this.vibeVoiceAsr!.isRunning().catch(() => false), VOICE_FIX.asrVibeVoice, 'plain STT without speaker labels');
+    }
   }
 
   /** Push-to-talk runtime state for /api/status and the PWA settings card. */
@@ -2368,6 +2804,7 @@ export class UmbraOS {
         stt: {
           transcribe: async req => {
             const r = await this.speechToText!.transcribe(req);
+            if (!r.ok) getLogger().warn({ error: r.error, fix: r.hint }, 'Push-to-talk heard nothing — STT provider not running');
             return { text: r.text };
           },
         },
@@ -2435,6 +2872,11 @@ export class UmbraOS {
       language: opts?.language,
     });
     const text = (result.text || '').trim();
+    if (!result.ok) {
+      // Degraded, not a crash: the STT server is down. Say so with the fix
+      // command so the client can tell the user how to restore it.
+      throw new Error(result.error || 'Speech-to-text server not running');
+    }
     if (!text) throw new Error('No speech recognized in the audio');
     const dispatch = await this.dispatchTask(text, opts?.target || 'auto');
     // Spoken acknowledgement closes the voice loop — the same TTS stack as
@@ -2747,18 +3189,23 @@ export class UmbraOS {
       else provider = 'windows';
     }
     if (provider === 'piper') {
-      if (!this.piperTts || !(await this.piperTts.isRunning())) {
-        // fallback chain: piper down → voicebox → vibevoice → windows
+      if (!this.piperTts) {
         if (this.voiceboxClient && await this.voiceboxClient.isRunning().catch(() => false)) provider = 'voicebox';
         else if (this.vibeVoiceTts?.installed) provider = 'vibevoice';
         else provider = 'windows';
       } else {
-        const wavBuffer = await this.piperTts.speak(text, {
+        // PiperTts.speakWithFallback covers the "server never started" case by
+        // rendering the same WAV with Windows SAPI, so we don't re-probe here.
+        const spoken = await this.piperTts.speakWithFallback(text, {
           voice: opts?.voice || v.piperVoice,
           language: opts?.language,
         });
-        await this.audioRouter?.play(wavBuffer);
-        return { result: 'Spoke (piper)', voice: opts?.voice || v.piperVoice };
+        await this.audioRouter?.play(spoken.wav);
+        if (spoken.degraded) {
+          getLogger().warn({ fix: spoken.fix }, 'Spoke with Windows SAPI — Piper TTS is not running');
+          return { result: 'Spoke (Windows SAPI fallback)', voice: opts?.voice || v.piperVoice, degraded: true, provider: spoken.provider, error: spoken.error, fix: spoken.fix };
+        }
+        return { result: 'Spoke (piper)', voice: opts?.voice || v.piperVoice, provider: spoken.provider, degraded: false };
       }
     }
     if (provider === 'voicebox') {
@@ -3538,6 +3985,7 @@ export class UmbraOS {
     this.hotkey?.stop();
     this.pushToTalkHotkey?.stop();
     this.issueWatcher?.stop();
+    this.pairing?.cleanup();
     this.p2p?.stop();
     this.pwa?.stop();
     this.deviceClient?.stop();

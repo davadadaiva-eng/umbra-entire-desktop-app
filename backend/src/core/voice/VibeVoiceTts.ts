@@ -104,6 +104,17 @@ export class VibeVoiceTts {
     return fs.existsSync(path.join(this.repoDir, 'vibevoice', 'modular', 'modeling_vibevoice_streaming_inference.py'));
   }
 
+  /** Convenience alias for `installed` — used by the UI status endpoint. */
+  get available(): boolean {
+    return this.installed;
+  }
+
+  /** Human-readable availability detail for the UI / status endpoint. */
+  get detail(): string {
+    if (this.installed) return 'VibeVoice repo installed';
+    return 'VibeVoice repo not installed — falling back to Piper TTS / Windows SAPI';
+  }
+
   /** Speaker prompts shipped in the repo, parsed into language/name/gender. */
   listVoices(): VibeVoiceVoice[] {
     try {
@@ -141,7 +152,7 @@ export class VibeVoiceTts {
     const t = text.trim();
     if (!t) throw new Error('VibeVoice: empty text');
     if (!this.installed) {
-      throw new Error('VibeVoice repo not found — run `git clone https://github.com/microsoft/VibeVoice.git external/VibeVoice`');
+      throw new Error('VibeVoice repo not found — run `cd backend && npm run vibevoice:install` (needs Python 3.10+ and a GPU recommended). Falling back to Piper TTS / Windows SAPI');
     }
 
     const voice = this.resolveVoice(opts.voice, opts.language);

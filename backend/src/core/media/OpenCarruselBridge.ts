@@ -67,6 +67,11 @@ export class OpenCarruselBridge {
       && fs.existsSync(path.join(this.repoDir, 'node_modules', 'next'));
   }
 
+  /** Convenience alias for `isInstalled()` — used by the UI status endpoint. */
+  get available(): boolean {
+    return this.isInstalled();
+  }
+
   isRunning(): boolean {
     return this.process !== null && !this.process.killed;
   }
@@ -76,7 +81,8 @@ export class OpenCarruselBridge {
   async start(): Promise<boolean> {
     if (this.isRunning()) return true;
     if (!this.isInstalled()) {
-      getLogger().warn('OpenCarruselBridge: not installed — run `npm install` in external/open-carrusel');
+       getLogger().warn('OpenCarruselBridge: not installed — Instagram carousel designer unavailable. ' +
+        'Install with: cd backend && git clone https://github.com/umbra-os/open-carrusel.git external/open-carrusel && cd external/open-carrusel && npm install && npm run dev');
       return false;
     }
 
@@ -85,7 +91,7 @@ export class OpenCarruselBridge {
       : path.join(this.repoDir, 'node_modules', '.bin', 'next');
 
     if (!fs.existsSync(bin)) {
-      getLogger().warn('OpenCarruselBridge: next binary missing — install deps first');
+       getLogger().warn('OpenCarruselBridge: next binary missing — install deps first. Run: cd external/open-carrusel && npm install');
       return false;
     }
 

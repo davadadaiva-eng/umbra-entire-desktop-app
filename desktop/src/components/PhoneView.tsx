@@ -1,8 +1,8 @@
-import { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect, useState, useCallback } from 'react';
 import gsap from 'gsap';
 import { useAppStore } from '../stores/appStore';
-import { isBackendAvailable, getTelcoStatus, configureTelco, telcoCall, type BackendError } from '../lib/backend';
-import { Phone, PhoneOff, Mic, MicOff, Volume2, PhoneIncoming, PhoneOutgoing, PhoneMissed, Plus, Trash2, Copy, Check, UserPlus, Settings, AlertCircle } from 'lucide-react';
+import { isBackendAvailable, getTelcoStatus, configureTelco, telcoCall, sendSms, type BackendError } from '../lib/backend';
+import { Phone, PhoneOff, Mic, MicOff, Volume2, PhoneIncoming, PhoneOutgoing, PhoneMissed, Plus, Trash2, Copy, Check, UserPlus, Settings, AlertCircle, MessageSquare, CheckCircle2, XCircle, Send } from 'lucide-react';
 
 interface Call {
   id: number;
@@ -65,6 +65,43 @@ export function PhoneView() {
   const [callTo, setCallTo] = useState('');
   const [callLoading, setCallLoading] = useState(false);
   const [callError, setCallError] = useState<string | null>(null);
+  const dialInputRef = useRef<HTMLInputElement>(null);
+
+  // SMS composer state
+  const [smsTo, setSmsTo] = useState('');
+  const [smsText, setSmsText] = useState('');
+  const [smsSending, setSmsSending] = useState(false);
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showToast = useCallback((type: 'success' | 'error', text: string) => {
+    setToast({ type, text });
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 3000);
+  }, []);
+
+  const focusDial = useCallback(() => {
+    dialInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    dialInputRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  const handleSendSms = useCallback(async () => {
+    if (!smsTo.trim() || !smsText.trim() || smsSending) return;
+    setSmsSending(true);
+    try {
+      if (!(await isBackendAvailable())) {
+        showToast('error', 'Backend offline — SMS unavailable');
+        return;
+      }
+      await sendSms(smsTo.trim(), smsText.trim());
+      setSmsText('');
+      showToast('success', `SMS sent to ${smsTo.trim()}`);
+    } catch (err) {
+      showToast('error', (err as BackendError).message || 'SMS failed — try again');
+    } finally {
+      setSmsSending(false);
+    }
+  }, [smsTo, smsText, smsSending, showToast]);
 
   // Fetch telco status from backend
   useEffect(() => {
@@ -184,7 +221,11 @@ export function PhoneView() {
           <button onClick={() => setShowConfig((v) => !v)} className="flex items-center gap-1.5 px-3 rounded-xl" style={{ height: 34, background: showConfig ? avatar.accent : 'var(--surface-2)', color: showConfig ? '#fff' : 'var(--text-dim)', border: '1px solid var(--hairline-strong)', fontFamily: 'var(--font)', fontSize: 12 }}>
             <Settings size={13} /> Config
           </button>
-          <button className="flex items-center gap-1.5 px-3.5 rounded-xl" style={{ height: 34, background: avatar.accent, color: '#fff', border: 'none', fontFamily: 'var(--font)', fontSize: 12 }}>
+          <button
+            onClick={focusDial}
+            title="Focus dial input"
+            className="flex items-center gap-1.5 px-3.5 rounded-xl" style={{ height: 34, background: avatar.accent, color: '#fff', border: 'none', fontFamily: 'var(--font)', fontSize: 12 }}
+          >
             <Plus size={13} /> New call
           </button>
         </div>
@@ -363,6 +404,7 @@ export function PhoneView() {
                 <label className="text-[11px] font-semibold block mb-1" style={{ color: 'var(--text-dim)' }}>Dial number</label>
                 <div className="flex gap-2">
                   <input
+                    ref={dialInputRef}
                     type="tel"
                     value={callTo}
                     onChange={(e) => setCallTo(e.target.value)}
@@ -402,10 +444,59 @@ export function PhoneView() {
                 {onCall ? <PhoneOff size={14} /> : <Phone size={14} />}
                 {onCall ? 'End simulated call' : 'Test call to +39 331 220 4481'}
               </button>
+
+              <div className="rounded-xl p-3 mt-1" style={{ background: 'rgba(255,255,255,0.022)', border: '1px solid var(--hairline)' }}>
+                <p className="text-[11px] font-semibold mb-2 flex items-center gap-1.5" style={{ color: 'var(--text-dim)' }}>
+                  <MessageSquare size={12} style={{ color: avatar.accent }} /> SMS composer
+                </p>
+                <input
+                  type="tel"
+                  value={smsTo}
+                  onChange={(e) => setSmsTo(e.target.value)}
+                  placeholder="To · +1 415 555 0100"
+                  className="w-full px-3 py-2 rounded-xl text-[12px] font-mono mb-2"
+                  style={{ background: 'rgba(0,0,0,0.28)', border: '1px solid var(--hairline)', color: 'var(--text-primary)', fontFamily: 'var(--font)' }}
+                />
+                <textarea
+                  value={smsText}
+                  onChange={(e) => setSmsText(e.target.value)}
+                  placeholder="Message…"
+                  rows={2}
+                  className="w-full px-3 py-2 rounded-xl text-[12px] font-light resize-none"
+                  style={{ background: 'rgba(0,0,0,0.28)', border: '1px solid var(--hairline)', color: 'var(--text-primary)', fontFamily: 'var(--font)' }}
+                />
+                <button
+                  onClick={() => void handleSendSms()}
+                  disabled={smsSending || !smsTo.trim() || !smsText.trim()}
+                  title={smsTo.trim() && smsText.trim() ? 'Send SMS via telco' : 'Enter recipient and message'}
+                  className="w-full mt-2 py-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5"
+                  style={{ background: avatar.accent, color: '#fff', border: 'none', fontFamily: 'var(--font)', opacity: smsSending || !smsTo.trim() || !smsText.trim() ? 0.5 : 1 }}
+                >
+                  {smsSending ? <Send size={12} className="animate-pulse" /> : <Send size={12} />}
+                  {smsSending ? 'Sending…' : 'Send SMS'}
+                </button>
+              </div>
             </div>
           </div>
         </div>
       </div>
+
+      {toast && (
+        <div
+          className="fixed bottom-6 left-1/2 z-50 flex items-center gap-2 px-4 py-2.5 rounded-xl"
+          style={{
+            transform: 'translateX(-50%)',
+            background: 'var(--surface-3)',
+            border: `1px solid ${toast.type === 'success' ? 'rgba(34,197,94,0.4)' : 'rgba(239,68,68,0.4)'}`,
+            boxShadow: '0 8px 30px rgba(0,0,0,0.5)',
+          }}
+        >
+          {toast.type === 'success'
+            ? <CheckCircle2 size={13} style={{ color: '#22c55e' }} />
+            : <XCircle size={13} style={{ color: '#ef4444' }} />}
+          <span className="text-xs font-medium" style={{ color: 'var(--text-primary)' }}>{toast.text}</span>
+        </div>
+      )}
     </div>
   );
 }

@@ -44,6 +44,35 @@ export default function GlitterWrap(props: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const rafRef = useRef<number | null>(null);
   const sizeRef = useRef({ w: 0, h: 0, dpr: 1 });
+  const pausedRef = useRef(false);
+
+  const isLowEndRef = useRef<boolean | null>(null);
+  const getLowEnd = () => {
+    if (isLowEndRef.current !== null) return isLowEndRef.current;
+    let low = false;
+    try {
+      const nav = navigator as Navigator & { deviceMemory?: number };
+      if (typeof nav.deviceMemory === 'number' && nav.deviceMemory <= 4) low = true;
+      else if (typeof nav.hardwareConcurrency === 'number' && nav.hardwareConcurrency <= 4) low = true;
+      else if (/Android|iPhone|iPad|Mobile/i.test(nav.userAgent || '')) low = true;
+    } catch {
+      low = false;
+    }
+    isLowEndRef.current = low;
+    return low;
+  };
+  const getCappedDpr = () => {
+    try {
+      return Math.min(window.devicePixelRatio || 1, getLowEnd() ? 1 : 1.5);
+    } catch {
+      return 1;
+    }
+  };
+  const getEffectiveCount = (requested: number) => {
+    const n = Math.floor(requested);
+    if (!Number.isFinite(n) || n <= 0) return 120;
+    return getLowEnd() ? Math.min(n, 220) : Math.min(n, 420);
+  };
   const renderTarget = RenderTarget.current();
   const isStatic =
     renderTarget === RenderTarget.export ||
@@ -157,7 +186,7 @@ export default function GlitterWrap(props: Props) {
     });
 
     const syncCount = () => {
-      const count = Math.max(1, Math.floor(propsRef.current.particleCount));
+      const count = Math.max(1, getEffectiveCount(propsRef.current.particleCount));
       if (stars.length === count) return;
       if (stars.length > count) {
         stars.length = count;
@@ -171,7 +200,7 @@ export default function GlitterWrap(props: Props) {
     };
 
     const resize = (entry?: ResizeObserverEntry) => {
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const dpr = getCappedDpr();
       const cr = entry?.contentRect;
       const rectW =
         cr?.width ||
@@ -355,17 +384,66 @@ export default function GlitterWrap(props: Props) {
       };
     }
 
+    const startLoop = () => {
+      if (rafRef.current != null || pausedRef.current) return;
+      lastT = performance.now();
+      rafRef.current = requestAnimationFrame(loop);
+    };
+    const stopLoop = () => {
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    };
     const loop = (t: number) => {
-      const deltaSec = (t - lastT) / 1000;
+      if (pausedRef.current || document.visibilityState === 'hidden') {
+        rafRef.current = null;
+        return;
+      }
+      // Clamp delta so hidden-tab gaps don't fling stars.
+      const deltaSec = Math.max(0, Math.min(0.1, (t - lastT) / 1000));
       lastT = t;
       drawFrame(deltaSec);
       rafRef.current = requestAnimationFrame(loop);
     };
-    rafRef.current = requestAnimationFrame(loop);
+    startLoop();
+
+    const handleGlitterVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        stopLoop();
+      } else {
+        pausedRef.current = false;
+        startLoop();
+      }
+    };
+    document.addEventListener('visibilitychange', handleGlitterVisibility);
+
+    // Pause when the starfield is offscreen (brain open / covered).
+    let glitterIO: IntersectionObserver | null = null;
+    try {
+      if (typeof IntersectionObserver !== 'undefined') {
+        glitterIO = new IntersectionObserver(
+          (entries) => {
+            const vis = entries[0]?.isIntersecting ?? true;
+            pausedRef.current = !vis;
+            if (!vis) stopLoop();
+            else if (document.visibilityState !== 'hidden') startLoop();
+          },
+          { threshold: 0 }
+        );
+        glitterIO.observe(container);
+      }
+    } catch {
+      glitterIO = null;
+    }
 
     return () => {
-      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+      stopLoop();
       ro.disconnect();
+      document.removeEventListener('visibilitychange', handleGlitterVisibility);
+      try {
+        glitterIO?.disconnect();
+      } catch {
+        // ignore
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isStatic]);

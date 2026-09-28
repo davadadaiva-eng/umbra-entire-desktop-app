@@ -33,6 +33,11 @@ export class OpenMontageBridge {
     return fs.existsSync(PYTHON) && fs.existsSync(DRIVER);
   }
 
+  /** Convenience alias for `isInstalled()` — used by the UI status endpoint. */
+  get available(): boolean {
+    return this.isInstalled();
+  }
+
   get repoDir(): string {
     return REPO_DIR;
   }
@@ -53,7 +58,19 @@ export class OpenMontageBridge {
 
   async runTool(name: string, inputs: Record<string, unknown> = {}): Promise<ToolRunResult> {
     if (!this.isInstalled()) {
-      throw new Error('OpenMontage not installed — run external/OpenMontage setup first');
+      getLogger().warn(
+        `OpenMontage not installed — tool "${name}" unavailable. ` +
+          'Falling back to the built-in VideoProducer (Remotion CLI). ' +
+          'Install with: cd backend && git clone https://github.com/umbra-os/OpenMontage.git external/OpenMontage && cd external/OpenMontage && pip install -r requirements.txt',
+      );
+      return {
+        success: false,
+        data: {},
+        artifacts: [],
+        error: 'OpenMontage not installed — falling back to built-in VideoProducer (Remotion CLI)',
+        cost_usd: 0,
+        duration_seconds: 0,
+      };
     }
     const args = ['--tool', name, '--params', JSON.stringify(inputs)];
     const raw = await this.runJson(args);

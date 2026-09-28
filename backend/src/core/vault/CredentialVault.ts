@@ -20,6 +20,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { execSync } from 'child_process';
+import { getLogger } from '../Logger';
 
 export interface VaultEntry {
   id: string;
@@ -99,6 +100,7 @@ export class CredentialVault {
   private dpapi: DpapiAdapter | null;
   private entries = new Map<string, VaultEntry>();
   private unlocked = false;
+  private ensureMachineKeyFailedLogged = false;
 
   constructor(options: CredentialVaultOptions) {
     this.file = path.join(options.dataDir, options.file ?? 'vault.bin');
@@ -318,6 +320,10 @@ export class CredentialVault {
       machineKey = this.ensureMachineKey();
     } catch {
       machineKey = null;
+    }
+    if (this.dpapi && machineKey === null && !this.ensureMachineKeyFailedLogged) {
+      getLogger().warn('Vault persisting with HWID+passphrase only — DPAPI machine key unavailable, security is degraded');
+      this.ensureMachineKeyFailedLogged = true;
     }
 
     const salt = crypto.randomBytes(KDF_SALT_LEN);

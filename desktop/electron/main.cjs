@@ -7,11 +7,13 @@ const isDev = !!DEV_URL;
 
 // ── Backend process ──────────────────────────────────────────────
 // The backend lives in the sibling `backend` folder and exposes the API at
-// port 8787.
-const BACKEND_DIR = path.join(__dirname, '..', 'backend');
+// port 8787. __dirname is desktop/electron, so the repo-root sibling is
+// ../../backend (electron/ -> desktop/ -> umbra-os/ -> backend/).
+const BACKEND_DIR = path.join(__dirname, '..', '..', 'backend');
 const BACKEND_ENTRY = path.join(BACKEND_DIR, 'dist', 'index.js');
 const BACKEND_DEV_ENTRY = path.join(BACKEND_DIR, 'src', 'index.ts');
 const BACKEND_PORT = 8787;
+const BACKEND_HOST = '127.0.0.1';
 let backendProcess = null;
 
 // Prefer the well-known install location, fall back to `node` on PATH so the
@@ -33,7 +35,7 @@ function resolveNodeExe() {
 async function isPortInUse(port) {
   return new Promise((resolve) => {
     const net = require('net');
-    const server = net.createConnection({ port, host: '127.0.0.1' });
+    const server = net.createConnection({ port, host: BACKEND_HOST });
     server.on('connect', () => { server.destroy(); resolve(true); });
     server.on('error', () => { server.destroy(); resolve(false); });
     server.setTimeout(1500, () => { server.destroy(); resolve(false); });
@@ -45,7 +47,7 @@ async function startBackend() {
   // Check if something is already listening on port 8787
   const alreadyRunning = await isPortInUse(BACKEND_PORT);
   if (alreadyRunning) {
-    console.log(`[umbra] backend already running on port ${BACKEND_PORT}`);
+    console.log(`[umbra] backend already running on http://${BACKEND_HOST}:${BACKEND_PORT}`);
     return;
   }
   const fs = require('fs');
@@ -53,12 +55,19 @@ async function startBackend() {
     console.error(`[umbra] backend folder not found: ${BACKEND_DIR} — run the backend manually (npm run dev:backend)`);
     return;
   }
-  const useCompiled = fs.existsSync(BACKEND_ENTRY);
+  // Verify compiled entry first, fall back to ts-node dev entry.
+  const hasCompiled = fs.existsSync(BACKEND_ENTRY);
+  const hasDevEntry = fs.existsSync(BACKEND_DEV_ENTRY);
+  if (!hasCompiled && !hasDevEntry) {
+    console.error(`[umbra] backend entry not found: ${BACKEND_ENTRY} (and no dev fallback at ${BACKEND_DEV_ENTRY}) — run npm run build:backend`);
+    return;
+  }
+  const useCompiled = hasCompiled;
   const nodeExe = resolveNodeExe();
   const args = useCompiled ? [BACKEND_ENTRY] : [path.join(BACKEND_DIR, 'node_modules', '.bin', 'ts-node'), BACKEND_DEV_ENTRY];
   const cwd = BACKEND_DIR;
 
-  console.log(`[umbra] starting backend from ${cwd} (${useCompiled ? 'compiled' : 'dev'})`);
+  console.log(`[umbra] starting backend on http://${BACKEND_HOST}:${BACKEND_PORT} from ${cwd} (${useCompiled ? `compiled ${BACKEND_ENTRY}` : `dev fallback ${BACKEND_DEV_ENTRY}`})`);
   try {
     // Full desktop mode (NOT UMBRA_HEADLESS=1): the app's Screen 2 / ghost /
     // Desktop 2 / meetings panels need the Windows-native subsystems

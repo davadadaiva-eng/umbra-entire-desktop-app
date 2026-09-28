@@ -223,6 +223,17 @@ export class RealDesktop2 {
 
     this.chrome = real;
     this.chromeRealProfile = true;
+    // Defense-in-depth: even direct chrome.evaluate() calls must pass
+    // consent + URL guard (evaluate() wrapper already gates; this covers
+    // any future direct use).
+    this.chrome.setEvaluateGuard(async (expression, currentUrl) => {
+      if (this.consent && (await this.consent.checkEmergencyStop())) {
+        throw new Error('Emergency stop armed — action blocked');
+      }
+      await this.requireConsent(`Run JavaScript in Chrome on Desktop 2 (${expression.length} chars): ${expression.substring(0, 160)}`);
+      const check = this.privacy.inspectUrl(currentUrl || (await this.currentChromeUrl()));
+      if (!check.allowed) throw new Error(`Privacy blocked: ${check.reason || 'sensitive URL'} — evaluate() refused`);
+    });
 
     if (url) {
       const target = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(url) ? url : `https://${url}`;
@@ -387,8 +398,28 @@ export class RealDesktop2 {
 
   async evaluate(expression: string): Promise<string> {
     if (!this.chrome || !this.chrome.isRunning()) throw new Error('Chrome not open on Desktop 2');
-    const val = await this.chrome.evaluate(expression);
-    return typeof val === 'string' ? val : JSON.stringify(val);
+    // Consent + URL guard: arbitrary JS is powerful (reads/modifies the real
+    // profile with all logins) — never run without an explicit grant and a
+    // privacy allow-check on the current page URL. The BrowserManager guard
+    // enforces the same for direct calls; bypassed here post-gate to avoid
+    // a double prompt.
+    if (this.consent && (await this.consent.checkEmergencyStop())) {
+      throw new Error('Emergency stop armed — action blocked');
+    }
+    await this.requireConsent(`Run JavaScript in Chrome on Desktop 2 (${expression.length} chars): ${expression.substring(0, 160)}`);
+    const currentUrl = await this.currentChromeUrl();
+    const urlCheck = this.privacy.inspectUrl(currentUrl);
+    if (!urlCheck.allowed) {
+      throw new Error(`Privacy blocked: ${urlCheck.reason || 'sensitive URL'} — evaluate() refused`);
+    }
+    const guard = (this.chrome as any).evaluateGuard;
+    try {
+      if (guard) this.chrome.setEvaluateGuard(null);
+      const val = await this.chrome.evaluate(expression);
+      return typeof val === 'string' ? val : JSON.stringify(val);
+    } finally {
+      if (guard) this.chrome.setEvaluateGuard(guard);
+    }
   }
 
   // ─── Unified action entry (mirrors Desktop2Environment) ────
@@ -398,8 +429,9 @@ export class RealDesktop2 {
       throw new Error('Emergency stop armed — action blocked');
     }
 
-    getLogger().info({ action, params }, 'RealDesktop2 executing action');
-    this.vault.log('realdesktop_action', action, params, 'started');
+    // Never log raw JS/secrets — truncate long strings, mask secret keys.
+    getLogger().info({ action, params: this.redactParams(params) }, 'RealDesktop2 executing action');
+    this.vault.log('realdesktop_action', action, this.redactParams(params), 'started');
 
     switch (action) {
       case 'open_app':
@@ -488,6 +520,34 @@ export class RealDesktop2 {
     if (result !== 'granted') {
       throw new Error(`Consent denied: ${reason}`);
     }
+  }
+
+  /** Current Chrome URL for the evaluate() URL guard (fail-closed → '' blocks). */
+  private async currentChromeUrl(): Promise<string> {
+    try {
+      if (!this.chrome) return '';
+      const tab = this.chrome.getActiveTab();
+      if (tab?.url) return tab.url;
+      const info = await this.chrome.getPageInfo();
+      return info?.url || '';
+    } catch {
+      return '';
+    }
+  }
+
+  /** Truncate long values + mask secret-looking keys so logs never hold secrets. */
+  private redactParams(params: Record<string, unknown>): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(params)) {
+      if (/secret|password|token|apikey|api_key|authorization|cookie/i.test(k)) {
+        out[k] = '***';
+      } else if (typeof v === 'string' && v.length > 300) {
+        out[k] = `${v.substring(0, 300)}…(${v.length} chars)`;
+      } else {
+        out[k] = v;
+      }
+    }
+    return out;
   }
 
   private isProcessRunning(name: string): Promise<boolean> {

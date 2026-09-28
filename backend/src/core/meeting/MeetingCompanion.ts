@@ -16,6 +16,7 @@
 import { MeetingAgent, TranscriptSegment, MeetingOutcome } from './MeetingAgent';
 import { MeetingOrder, detectOrders } from './MeetingOrders';
 import { LoopbackRecorder } from '../audio/LoopbackRecorder';
+import { ApprovalGate } from '../agent/ApprovalGate';
 import { eventBus } from '../EventBus';
 import { getLogger } from '../Logger';
 
@@ -93,6 +94,9 @@ export class MeetingCompanion {
   private listenTimer?: NodeJS.Timeout;
   private planId?: string;
   private ordersEnabled: boolean;
+  /** Optional hash+expiry+claim gate for meeting desktop actions. */
+  private approvalGate: ApprovalGate | null = null;
+  private approvalOwner = 'meeting';
 
   constructor(options: MeetingCompanionOptions = {}) {
     this.options = options;
@@ -193,7 +197,54 @@ export class MeetingCompanion {
   async execute(action: string, params: Record<string, unknown>): Promise<string> {
     if (!this.session) throw new Error('Join a meeting first');
     if (!this.options.onExecute) throw new Error('No desktop executor configured');
+    // ApprovalGate consent check: verify hash+expiry when a proposal rides along.
+    await this.checkApproval(params);
     return this.options.onExecute(action, params);
+  }
+
+  /** Install the ApprovalGate for meeting/execute consent checks. */
+  setApprovalGate(gate: ApprovalGate | null, owner = 'meeting'): void {
+    this.approvalGate = gate;
+    this.approvalOwner = owner;
+  }
+
+  /** Propose a meeting action for explicit review (30m expiry). */
+  async proposeAction(kind: string, data: Record<string, unknown>): Promise<import('../agent/ApprovalGate').ActionProposal> {
+    if (!this.approvalGate) throw new Error('ApprovalGate not configured');
+    return this.approvalGate.propose(this.approvalOwner, kind, data);
+  }
+
+  /**
+   * Execute through the gate: decide() claims awaiting_review -> executing
+   * exactly once, then runs the desktop executor.
+   */
+  async executeWithApproval(action: string, params: Record<string, unknown>, proposalId: string, hash: string): Promise<string> {
+    if (!this.session) throw new Error('Join a meeting first');
+    if (!this.options.onExecute) throw new Error('No desktop executor configured');
+    if (!this.approvalGate) return this.options.onExecute(action, params);
+    const gate = this.approvalGate;
+    const owner = this.approvalOwner;
+    const run = this.options.onExecute;
+    const finished = await gate.decide(owner, proposalId, hash, 'approve', async () => {
+      return run(action, { ...params, approvalId: proposalId, approvalHash: hash });
+    });
+    if (finished.status !== 'succeeded') throw new Error(finished.error ?? `Approval ${finished.status}`);
+    return finished.result ?? 'approved';
+  }
+
+  private async checkApproval(params: Record<string, unknown>): Promise<void> {
+    if (!this.approvalGate) return;
+    const id = params.approvalId;
+    const hash = params.approvalHash;
+    if (id === undefined && hash === undefined) return;
+    if (typeof id !== 'string' || typeof hash !== 'string') throw new Error('Invalid approval reference');
+    const proposal = this.approvalGate.get(this.approvalOwner, id);
+    if (!proposal) throw new Error('Approval not found — propose the action first');
+    if (proposal.hash !== hash) throw new Error('Approval hash mismatch — re-propose');
+    if (proposal.status !== 'awaiting_review' && proposal.status !== 'executing') {
+      throw new Error(`Approval is ${proposal.status} — create a fresh proposal`);
+    }
+    if (Date.parse(proposal.expiresAt) <= Date.now()) throw new Error('Approval expired — create a fresh proposal');
   }
 
   /** Share the meeting screen (delegates to onShareScreen / onExecute). */

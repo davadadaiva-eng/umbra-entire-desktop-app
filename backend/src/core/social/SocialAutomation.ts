@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from 'child_process';
+import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from '../Logger';
@@ -86,12 +86,20 @@ export class SocialAutomation {
     return fs.existsSync(this.pythonPath) && fs.existsSync(this.scriptPath);
   }
 
+  /** Convenience alias for `isAvailable()` — used by the UI status endpoint. */
+  get available(): boolean {
+    return this.isAvailable();
+  }
+
   // ── Execute a social action ───────────────────────────────
 
   async execute(action: SocialAction, timeoutMs: number = 120_000): Promise<SocialResult> {
     if (!this.isAvailable()) {
-      getLogger().warn('SocialAutomation: python CLI not available — install playwright + deps');
-      return { ok: false, error: 'Python CLI not available. Run: pip install -r scripts/social/requirements.txt && python -m playwright install chromium' };
+      getLogger().warn(
+        'SocialAutomation: python CLI not available — using no-op fallback that logs "not configured". ' +
+          'Install with: cd backend && python -m venv .venv && .venv\\Scripts\\pip install -r scripts/social/requirements.txt && .venv\\Scripts\\python -m playwright install chromium',
+      );
+      return { ok: false, error: 'Python CLI not available — social automation not configured. Install with: cd backend && python -m venv .venv && .venv\\Scripts\\pip install -r scripts/social/requirements.txt && .venv\\Scripts\\python -m playwright install chromium' };
     }
 
     const env: Record<string, string> = {

@@ -62,6 +62,15 @@ export interface TaskSyncBridgeOptions {
    * device, so the phone that dispatched the work tracks it live.
    */
   relayTo?: (deviceId: string, msg: TaskSyncEvent) => void;
+  /**
+   * True when `broadcast` already reaches the device (wire to
+   * DeviceHub.isOnline). When true the direct relay is skipped — otherwise
+   * the origin gets every event TWICE (once via broadcast, once via relay).
+   * When unwired (tests/legacy) the relay always fires to preserve behavior.
+   */
+  isBroadcastCovered?: (deviceId: string) => boolean;
+  /** Coalesce window for high-frequency task:progress (default 1000ms). */
+  coalesceMs?: number;
 }
 
 const LIFECYCLE_EVENTS: TaskLifecycleEvent[] = [
@@ -81,8 +90,13 @@ export class TaskSyncBridge {
   private started = false;
   private handlers: { ev: TaskLifecycleEvent; fn: (...args: unknown[]) => void }[] = [];
   private relayTo?: (deviceId: string, msg: TaskSyncEvent) => void;
+  private isBroadcastCovered?: (deviceId: string) => boolean;
+  private coalesceMs: number;
   /** taskId → the device that submitted it (so its lifecycle relays home). */
   private origins = new Map<string, string>();
+  /** 1s coalesce state for task:progress bursts (per taskId). */
+  private lastProgressSentAt = new Map<string, number>();
+  private pendingProgress = new Map<string, { payload: TaskSyncEvent; timer: NodeJS.Timeout }>();
 
   constructor(options: TaskSyncBridgeOptions) {
     this.broadcast = options.broadcast;
@@ -90,6 +104,8 @@ export class TaskSyncBridge {
     this.includeDescription = options.includeDescription ?? true;
     this.node = options.node ?? 'desktop';
     this.relayTo = options.relayTo;
+    this.isBroadcastCovered = options.isBroadcastCovered;
+    this.coalesceMs = options.coalesceMs ?? 1000;
   }
 
   /** Remember which device submitted a task, so its lifecycle relays home. */
@@ -118,6 +134,11 @@ export class TaskSyncBridge {
     this.started = false;
     for (const { ev, fn } of this.handlers) eventBus.off(ev, fn);
     this.handlers = [];
+    // Drop coalesced progress — a stale snapshot must not leak into the next start().
+    for (const [, p] of this.pendingProgress) {
+      try { clearTimeout(p.timer); } catch {}
+    }
+    this.pendingProgress.clear();
   }
 
   private handleEvent(ev: TaskLifecycleEvent, args: unknown[]): void {
@@ -145,17 +166,73 @@ export class TaskSyncBridge {
     if (extraError && !snapshot.error) snapshot.error = extraError;
 
     const payload: TaskSyncEvent = { t: 'task-event', event: ev, node: this.node, task: snapshot };
+
+    // task:progress can fire per-step — coalesce bursts to 1s (leading +
+    // trailing) so a fast executor doesn't spam every paired device.
+    if (ev === 'task:progress') {
+      this.sendProgressCoalesced(taskId, payload);
+      return;
+    }
+
+    // A terminal/non-progress event supersedes any coalesced progress for
+    // the same task — flush it first so receivers see progress before done.
+    this.flushProgress(taskId);
+    this.deliver(payload, taskId, ev);
+  }
+
+  /** Leading-edge immediate, trailing-edge coalesced progress per task. */
+  private sendProgressCoalesced(taskId: string, payload: TaskSyncEvent): void {
+    const now = Date.now();
+    const last = this.lastProgressSentAt.get(taskId) ?? 0;
+    if (now - last >= this.coalesceMs) {
+      this.lastProgressSentAt.set(taskId, now);
+      this.deliver(payload, taskId, 'task:progress');
+      return;
+    }
+    // Inside the window — keep only the latest, flush when the window ends.
+    const existing = this.pendingProgress.get(taskId);
+    if (existing) {
+      existing.payload = payload;
+      return;
+    }
+    const delay = this.coalesceMs - (now - last);
+    const timer = setTimeout(() => {
+      this.pendingProgress.delete(taskId);
+      this.lastProgressSentAt.set(taskId, Date.now());
+      this.deliver(payload, taskId, 'task:progress');
+    }, Math.max(0, delay));
+    try { (timer as unknown as { unref?: () => void }).unref?.(); } catch {}
+    this.pendingProgress.set(taskId, { payload, timer });
+  }
+
+  private flushProgress(taskId: string): void {
+    const pending = this.pendingProgress.get(taskId);
+    if (!pending) return;
+    this.pendingProgress.delete(taskId);
+    try { clearTimeout(pending.timer); } catch {}
+    this.lastProgressSentAt.set(taskId, Date.now());
+    this.deliver(pending.payload, taskId, 'task:progress');
+  }
+
+  private deliver(payload: TaskSyncEvent, taskId: string, ev: TaskLifecycleEvent): void {
     this.broadcast(payload);
 
     // Push the same snapshot directly to the device that submitted the task
-    // (if any), so the phone tracks its own work live, not just the broadcast.
+    // — UNLESS broadcast already reaches it (locally connected via the hub),
+    // in which case the relay would double-deliver every event.
     const origin = this.origins.get(taskId);
     if (origin && this.relayTo) {
-      this.relayTo(origin, payload);
+      let covered = false;
+      try { covered = this.isBroadcastCovered?.(origin) ?? false; } catch { covered = false; }
+      if (!covered) {
+        this.relayTo(origin, payload);
+      }
       // Terminal states — drop the origin so the map doesn't grow unbounded.
       if (ev === 'task:completed' || ev === 'task:failed' || ev === 'task:cancelled') {
         this.origins.delete(taskId);
       }
+    } else if (ev === 'task:completed' || ev === 'task:failed' || ev === 'task:cancelled') {
+      this.origins.delete(taskId);
     }
   }
 }

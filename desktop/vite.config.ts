@@ -16,13 +16,15 @@ export default defineConfig(({ mode }) => {
     server: {
       proxy: {
         // Browser dev: /smartthings/* -> https://api.smartthings.com/* (no CORS)
+        // Token is forwarded from the main-process env (never bundled):
+        // UMBRA_SMARTTHINGS_TOKEN / SMARTTHINGS_TOKEN take precedence over VITE_*.
         '/smartthings': {
-          target: env.VITE_SMARTTHINGS_URL || 'https://api.smartthings.com',
+          target: process.env.UMBRA_SMARTTHINGS_URL || env.UMBRA_SMARTTHINGS_URL || env.VITE_SMARTTHINGS_URL || 'https://api.smartthings.com',
           changeOrigin: true,
           rewrite: (p) => p.replace(/^\/smartthings/, ''),
           configure: (proxy) => {
             proxy.on('proxyReq', (proxyReq) => {
-              const token = env.VITE_SMARTTHINGS_TOKEN;
+              const token = process.env.UMBRA_SMARTTHINGS_TOKEN || process.env.SMARTTHINGS_TOKEN || env.UMBRA_SMARTTHINGS_TOKEN || env.SMARTTHINGS_TOKEN || env.VITE_SMARTTHINGS_TOKEN;
               if (token) proxyReq.setHeader('Authorization', `Bearer ${token}`);
             });
           },

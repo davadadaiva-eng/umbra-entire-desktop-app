@@ -3,6 +3,59 @@ import { useAppStore } from '../stores/appStore';
 import { Bot, Play, Square, MessageSquare, FileText, Loader2, WifiOff, ExternalLink, Send, X, Mic, Video } from 'lucide-react';
 
 const BOT_API = 'http://127.0.0.1:8000';
+// Backend proxy (canonical when the standalone :8000 bot is down).
+// import.meta.env is typed via vite/client; fall back for tests.
+const BACKEND_API = (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_BACKEND_URL || 'http://127.0.0.1:8787';
+
+function unwrapBot<T>(payload: unknown): T {
+  if (payload && typeof payload === 'object' && 'bot' in (payload as Record<string, unknown>)) {
+    return (payload as Record<string, unknown>).bot as T;
+  }
+  return payload as T;
+}
+
+function normalizeTranscript(payload: unknown): TranscriptLine[] {
+  const bot = unwrapBot<unknown>(payload);
+  if (Array.isArray(bot)) {
+    return bot.map((l, i) => {
+      const o = (l ?? {}) as Record<string, unknown>;
+      return {
+        speaker: String(o.speaker ?? o.who ?? 'Unknown'),
+        text: String(o.text ?? ''),
+        ts: Number(o.ts ?? o.at ?? i),
+      };
+    });
+  }
+  if (bot && typeof bot === 'object') {
+    const o = bot as Record<string, unknown>;
+    if (Array.isArray(o.lines)) {
+      return (o.lines as unknown[]).map((l, i) => {
+        const e = (l ?? {}) as Record<string, unknown>;
+        return { speaker: String(e.speaker ?? e.who ?? 'Unknown'), text: String(e.text ?? ''), ts: Number(e.ts ?? e.at ?? i) };
+      });
+    }
+    if (Array.isArray(o.segments)) {
+      return (o.segments as unknown[]).map((l, i) => {
+        const e = (l ?? {}) as Record<string, unknown>;
+        return { speaker: String(e.speaker ?? e.who ?? 'Bot'), text: String(e.text ?? ''), ts: Number(e.ts ?? e.at ?? i) };
+      });
+    }
+    if (typeof o.transcript === 'string' && o.transcript) {
+      return [{ speaker: 'Bot', text: o.transcript, ts: Date.now() }];
+    }
+  }
+  if (typeof bot === 'string' && bot) {
+    return [{ speaker: 'Bot', text: bot, ts: Date.now() }];
+  }
+  // Direct :8000 shape { lines } (no { bot } wrapper)
+  if (payload && typeof payload === 'object' && Array.isArray((payload as Record<string, unknown>).lines)) {
+    return ((payload as Record<string, unknown>).lines as unknown[]).map((l, i) => {
+      const e = (l ?? {}) as Record<string, unknown>;
+      return { speaker: String(e.speaker ?? e.who ?? 'Unknown'), text: String(e.text ?? ''), ts: Number(e.ts ?? e.at ?? i) };
+    });
+  }
+  return [];
+}
 
 interface BotStatus {
   state: 'idle' | 'joining' | 'in_meeting' | 'leaving' | 'error';
@@ -45,6 +98,8 @@ export function MeetingBotView() {
   const isMeetingActive = status.state === 'in_meeting' || status.state === 'joining' || status.state === 'leaving';
 
   const refreshStatus = useCallback(async () => {
+    // Try the standalone :8000 bot first, then fall back to the :8787 backend
+    // proxy (/api/meeting-bot/*) which stays up when :8000 is down.
     try {
       const res = await fetch(`${BOT_API}/status`);
       if (res.ok) {
@@ -52,6 +107,21 @@ export function MeetingBotView() {
         setStatus(data);
         if (data.state === 'error' && data.error) {
           setError(data.error);
+        }
+        return;
+      }
+    } catch { /* fall through to proxy */ }
+    try {
+      const res = await fetch(`${BACKEND_API}/api/meeting-bot/status`);
+      if (res.ok) {
+        const raw = await res.json();
+        const data = unwrapBot<BotStatus>(raw);
+        if (data && typeof data === 'object' && 'state' in data) {
+          setStatus(data as BotStatus);
+          if ((data as BotStatus).state === 'error' && (data as BotStatus).error) {
+            setError((data as BotStatus).error ?? '');
+          }
+          return;
         }
       }
     } catch {
@@ -64,9 +134,20 @@ export function MeetingBotView() {
       const res = await fetch(`${BOT_API}/transcript`);
       if (res.ok) {
         const data = await res.json();
-        if (Array.isArray(data.lines)) {
-          setTranscript(data.lines);
+        const lines = normalizeTranscript(data);
+        if (lines.length) setTranscript(lines);
+        else if (Array.isArray((data as { lines?: unknown }).lines)) {
+          setTranscript(data.lines as TranscriptLine[]);
         }
+        return;
+      }
+    } catch { /* fall through to proxy */ }
+    try {
+      const res = await fetch(`${BACKEND_API}/api/meeting-bot/transcript`);
+      if (res.ok) {
+        const data = await res.json();
+        const lines = normalizeTranscript(data);
+        if (lines.length) setTranscript(lines);
       }
     } catch {
       // silent
@@ -80,19 +161,36 @@ export function MeetingBotView() {
     }
     setLoading(true);
     setError('');
+    const payload = {
+      meeting_url: meetingUrl.trim(),
+      platform,
+      bot_name: botName.trim() || 'Umbra Bot',
+    };
+    // Direct :8000 first; on failure fall back to the :8787 backend proxy.
     try {
       const res = await fetch(`${BOT_API}/join`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          meeting_url: meetingUrl.trim(),
-          platform,
-          bot_name: botName.trim() || 'Umbra Bot',
-        }),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: 'Failed to join meeting' }));
-        throw new Error(err.detail || `HTTP ${res.status}`);
+        throw new Error((err as { detail?: string }).detail || `HTTP ${res.status}`);
+      }
+      setStatus({ state: 'joining', meeting_url: meetingUrl.trim(), platform, bot_name: botName.trim() || 'Umbra Bot' });
+      setTranscript([]);
+      setLoading(false);
+      return;
+    } catch { /* fall through to proxy */ }
+    try {
+      const res = await fetch(`${BACKEND_API}/api/meeting-bot/join`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Failed to join meeting' }));
+        throw new Error((err as { error?: string }).error || `HTTP ${res.status}`);
       }
       setStatus({ state: 'joining', meeting_url: meetingUrl.trim(), platform, bot_name: botName.trim() || 'Umbra Bot' });
       setTranscript([]);
@@ -107,9 +205,17 @@ export function MeetingBotView() {
     setError('');
     try {
       const res = await fetch(`${BOT_API}/leave`, { method: 'POST' });
+      if (res.ok) {
+        setStatus({ state: 'leaving' });
+        setCommandLoading(false);
+        return;
+      }
+    } catch { /* fall through to proxy */ }
+    try {
+      const res = await fetch(`${BACKEND_API}/api/meeting-bot/leave`, { method: 'POST' });
       if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: 'Failed to leave meeting' }));
-        throw new Error(err.detail || `HTTP ${res.status}`);
+        const err = await res.json().catch(() => ({ error: 'Failed to leave meeting' }));
+        throw new Error((err as { error?: string }).error || `HTTP ${res.status}`);
       }
       setStatus({ state: 'leaving' });
     } catch (e) {
@@ -128,14 +234,28 @@ export function MeetingBotView() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ command: command.trim() }),
       });
+      if (res.ok) {
+        const result = (await res.json().catch(() => ({ success: true }))) as CommandResult;
+        if (!result.success) {
+          setError(result.message || 'Command failed');
+        }
+        setCommandInput('');
+        setCommandLoading(false);
+        return;
+      }
+    } catch { /* fall through to proxy */ }
+    try {
+      const res = await fetch(`${BACKEND_API}/api/meeting-bot/command`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: command.trim() }),
+      });
       if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: 'Command failed' }));
-        throw new Error(err.detail || `HTTP ${res.status}`);
+        const err = await res.json().catch(() => ({ error: 'Command failed' }));
+        throw new Error((err as { error?: string }).error || `HTTP ${res.status}`);
       }
-      const result: CommandResult = await res.json();
-      if (!result.success) {
-        setError(result.message || 'Command failed');
-      }
+      // Proxy returns { bot: {...} } on success — treat any 2xx as success.
+      await res.json().catch(() => ({}));
       setCommandInput('');
     } catch (e) {
       setError(`Command failed: ${(e as Error).message}`);

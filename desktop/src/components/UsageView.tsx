@@ -1,16 +1,13 @@
-import { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import gsap from 'gsap';
 import { useAppStore } from '../stores/appStore';
 import { isBackendAvailable, getPlanUsage, getAuditStats, activatePlan, billingCheckout, getTenants, registerTenant, type BackendError } from '../lib/backend';
-import { TrendingUp, TrendingDown, Zap, BarChart3, Clock, AlertTriangle, ArrowUpRight, CircleDollarSign, Shield, Users, CreditCard } from 'lucide-react';
+import { TrendingUp, TrendingDown, Zap, BarChart3, Clock, AlertTriangle, ArrowUpRight, CircleDollarSign, Shield, Users, CreditCard, CheckCircle2, XCircle } from 'lucide-react';
 
-const DAYS = 30;
-const TOTAL_DAYS = 31;
-
-function buildSeries() {
+function buildSeries(len = 30) {
   const base = 840;
   const jitter = (n: number) => base + Math.round(Math.sin(n * 1.7) * 260 + Math.sin(n * 0.6) * 190 + (n % 3) * 120);
-  const series = Array.from({ length: DAYS }, (_, i) => Math.max(180, jitter(DAYS - i)));
+  const series = Array.from({ length: len }, (_, i) => Math.max(180, jitter(len - i)));
   return series;
 }
 
@@ -34,8 +31,21 @@ export function UsageView() {
   const [checkoutLoading, setCheckoutLoading] = useState<string | null>(null);
   const [registerError, setRegisterError] = useState('');
   const [registerSuccess, setRegisterSuccess] = useState('');
-  const series = useRef(buildSeries()).current;
+  const [planUsage, setPlanUsage] = useState<Record<string, unknown> | null>(null);
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showToast = useCallback((type: 'success' | 'error', text: string) => {
+    setToast({ type, text });
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 3200);
+  }, []);
+
+  const rangeLen = range === '30d' ? 30 : range === '90d' ? 90 : 12;
+  const windowLabel = range === '30d' ? '30-day' : range === '90d' ? '90-day' : '12-month';
+  const series = useMemo(() => buildSeries(rangeLen), [rangeLen]);
   const peak = maxIndex(series);
+  const max = Math.max(...series);
   const agentRows = Object.entries(usage.agents)
     .map(([name, u]) => ({ name, calls: u.calls, tokens: u.tokens }))
     .sort((a, b) => b.tokens - a.tokens);
@@ -66,7 +76,7 @@ export function UsageView() {
       try {
         const data = await getPlanUsage();
         if (cancelled || !data) return;
-        void data;
+        setPlanUsage(data as Record<string, unknown>);
       } catch { /* keep local data */ }
     })();
     return () => { cancelled = true; };
@@ -90,16 +100,30 @@ export function UsageView() {
     setActivatingTier(tier);
     try {
       await activatePlan(tier);
-    } catch { /* silent */ }
+      showToast('success', `${tier} plan activated`);
+    } catch {
+      showToast('error', `Could not activate ${tier}`);
+    }
     setActivatingTier(null);
   };
 
   const handleCheckout = async (tier: string) => {
     setCheckoutLoading(tier);
     try {
+      if (!(await isBackendAvailable())) {
+        showToast('error', 'Backend offline — checkout unavailable');
+        return;
+      }
       const res = await billingCheckout(tier);
-      if (res?.checkout?.url) window.open(res.checkout.url, '_blank');
-    } catch { /* silent */ }
+      if (res?.checkout?.url) {
+        window.open(res.checkout.url, '_blank');
+        showToast('success', `Checkout opened — ${tier}`);
+      } else {
+        showToast('error', 'Checkout unavailable — try again');
+      }
+    } catch {
+      showToast('error', 'Checkout failed — try again');
+    }
     setCheckoutLoading(null);
   };
 
@@ -120,8 +144,13 @@ export function UsageView() {
     }
   };
 
-  const max = Math.max(...series);
   const plan = 'Growth';
+
+  const planTier = planUsage ? String((planUsage.plan ?? planUsage.tier ?? (planUsage.usage as Record<string, unknown> | undefined)?.plan ?? plan) as string) : plan;
+  const usageNode = (planUsage?.usage ?? planUsage?.data ?? {}) as Record<string, unknown>;
+  const backendCalls = planUsage ? String(usageNode.calls ?? planUsage.calls ?? planUsage.totalCalls ?? '—') : null;
+  const backendTokens = planUsage ? String(usageNode.tokens ?? planUsage.tokens ?? planUsage.totalTokens ?? '—') : null;
+  const backendLimit = planUsage ? String(usageNode.limit ?? planUsage.limit ?? usageNode.callsLimit ?? '—') : null;
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -151,6 +180,25 @@ export function UsageView() {
       </div>
 
       <div ref={bodyRef} className="flex-1 overflow-y-auto px-6 py-5" style={{ maxWidth: 1040, width: '100%', margin: '0 auto' }}>
+        <div className="usage-block card p-4 mb-5 flex items-center gap-4 flex-wrap" style={{ background: 'var(--surface-1)' }}>
+          <span className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: `${avatar.accent}1c`, color: avatar.accent, border: `1px solid ${avatar.accent}44` }}>
+            <CreditCard size={14} />
+          </span>
+          <div className="flex-1 min-w-[180px]">
+            <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }}>
+              Backend plan · {planTier}
+            </p>
+            <p className="text-[11px] font-light" style={{ color: 'var(--text-dim)' }}>
+              {planUsage
+                ? `Calls ${backendCalls} · Tokens ${backendTokens} · Limit ${backendLimit}`
+                : 'Backend offline — showing device-local telemetry'}
+            </p>
+          </div>
+          <span className="text-[10px] px-2 py-1 rounded-md" style={{ background: planUsage ? 'rgba(34,197,94,0.12)' : 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: planUsage ? '#22c55e' : 'var(--text-faint)' }}>
+            {planUsage ? 'Live' : 'Local'}
+          </span>
+        </div>
+
         <div className="usage-block grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
           {[
             { label: 'Total calls', value: usage.totalCalls.toLocaleString('en-US'), sub: `${agentRows.length} agent${agentRows.length === 1 ? '' : 's'} active`, good: true },
@@ -200,7 +248,7 @@ export function UsageView() {
               </span>
               <div>
                 <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }}>Skill calls · daily</p>
-                <p className="text-[11px] font-light" style={{ color: 'var(--text-dim)' }}>{TOTAL_DAYS}-day rolling window · {range}</p>
+                <p className="text-[11px] font-light" style={{ color: 'var(--text-dim)' }}>{windowLabel} rolling window · {range}</p>
               </div>
             </div>
             <span className="flex items-center gap-1 text-[11px]" style={{ color: '#22c55e' }}>
@@ -223,7 +271,7 @@ export function UsageView() {
             ))}
           </div>
           <div className="flex justify-between mt-2 text-[9px]" style={{ color: 'var(--text-faint)' }}>
-            <span>{TOTAL_DAYS} days ago</span>
+            <span>{windowLabel} ago</span>
             <span>Today</span>
           </div>
         </div>
@@ -391,16 +439,39 @@ export function UsageView() {
 
         <div className="usage-block card p-5 flex items-center justify-between gap-4" style={{ background: `linear-gradient(120deg, ${avatar.accent}14, transparent)`, border: `1px solid ${avatar.accent}33` }}>
           <div>
-            <p className="text-sm font-bold" style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }}>Growth plan · 1,000,000 calls included</p>
+            <p className="text-sm font-bold" style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }}>{planTier} plan · 1,000,000 calls included</p>
             <p className="text-[11px] font-light mt-0.5" style={{ color: 'var(--text-dim)' }}>
               Your teams stay in budget — upgrade doubles your call allocation.
             </p>
           </div>
-          <button className="flex-shrink-0 px-4 py-2 rounded-xl text-sm font-semibold" style={{ background: avatar.accent, color: '#fff', border: 'none', fontFamily: 'var(--font)' }}>
-            Upgrade to Scale
+          <button
+            onClick={() => void handleCheckout('Scale')}
+            disabled={checkoutLoading === 'Scale'}
+            title="Open Scale checkout"
+            className="flex-shrink-0 px-4 py-2 rounded-xl text-sm font-semibold disabled:opacity-60"
+            style={{ background: avatar.accent, color: '#fff', border: 'none', fontFamily: 'var(--font)' }}
+          >
+            {checkoutLoading === 'Scale' ? 'Opening…' : 'Upgrade to Scale'}
           </button>
         </div>
       </div>
+
+      {toast && (
+        <div
+          className="fixed bottom-6 left-1/2 z-50 flex items-center gap-2 px-4 py-2.5 rounded-xl"
+          style={{
+            transform: 'translateX(-50%)',
+            background: 'var(--surface-3)',
+            border: `1px solid ${toast.type === 'success' ? 'rgba(34,197,94,0.4)' : 'rgba(239,68,68,0.4)'}`,
+            boxShadow: '0 8px 30px rgba(0,0,0,0.5)',
+          }}
+        >
+          {toast.type === 'success'
+            ? <CheckCircle2 size={13} style={{ color: '#22c55e' }} />
+            : <XCircle size={13} style={{ color: '#ef4444' }} />}
+          <span className="text-xs font-medium" style={{ color: 'var(--text-primary)' }}>{toast.text}</span>
+        </div>
+      )}
     </div>
   );
 }

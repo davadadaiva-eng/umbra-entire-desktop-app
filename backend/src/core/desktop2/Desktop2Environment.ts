@@ -1,9 +1,11 @@
 import { VirtualDisplayManager } from '../workspace/VirtualDisplayManager';
+import { VirtualDisplayRenderer, VirtualDisplayRendererState } from '../workspace/VirtualDisplayRenderer';
 import { InputGuard } from '../workspace/InputGuard';
 import { PrivacyGuard } from '../privacy/PrivacyGuard';
 import { AuditVault } from '../vault/AuditVault';
 import { BrowserManager, BrowserTab, PageInfo } from '../browser/BrowserManager';
 import { ConsentGate } from '../agent/ConsentGate';
+import { ApprovalGate } from '../agent/ApprovalGate';
 import { getLogger } from '../Logger';
 
 export interface Desktop2Config {
@@ -13,6 +15,13 @@ export interface Desktop2Config {
   browserPath: string;
   dataDir: string;
   browserPort?: number;
+  /**
+   * CDP port of the headless Chromium the virtual displays render from.
+   * Defaults to AgentDesktop's 9223.
+   */
+  renderCdpPort?: number;
+  /** Set false to start Desktop 2 without a display renderer. */
+  enableDisplayRenderer?: boolean;
 }
 
 export interface Desktop2State {
@@ -26,16 +35,21 @@ export interface Desktop2State {
   activeTabId: string | null;
   pageTitle: string;
   pageUrl: string;
+  renderer: VirtualDisplayRendererState | null;
 }
 
 export class Desktop2Environment {
   private displayManager: VirtualDisplayManager;
+  private renderer: VirtualDisplayRenderer | null;
   private inputGuard: InputGuard;
   private privacy: PrivacyGuard;
   private vault: AuditVault;
   private config: Desktop2Config;
   private browser: BrowserManager;
   private consent: ConsentGate | null;
+  /** Optional hash+expiry+claim gate for sensitive actions (OpenMuse actions.ts port). */
+  private approvalGate: ApprovalGate | null = null;
+  private approvalOwner = 'desktop2';
 
   private state: Desktop2State;
 
@@ -54,6 +68,35 @@ export class Desktop2Environment {
     this.config = config;
     this.consent = consent || null;
     this.browser = new BrowserManager(config.browserPort || 9222, `${config.dataDir}${require('path').sep}edge-profile`);
+    const renderer = config.enableDisplayRenderer === false
+      ? null
+      : new VirtualDisplayRenderer(displayManager, {
+        cdpPort: config.renderCdpPort ?? 9223,
+        // Every display page belongs to the renderer and starts blank; it
+        // never inherits or captures a tab the user already had open.
+        startUrl: '',
+        idleFps: 2,
+        canCapture: async () => {
+          // Defence-in-depth: honour the emergency stop and the same capture
+          // privacy check the explicit screenshot() path uses.
+          if (this.consent && (await this.consent.checkEmergencyStop())) return false;
+          return !this.privacy.inspectApp('desktop2_capture').blockCapture;
+        },
+      });
+    this.renderer = renderer;
+    renderer?.on('error', (displayId, err) => {
+      getLogger().debug({ displayId, err: err.message }, 'Desktop 2: display render error');
+    });
+    // Defense-in-depth: gate even direct browser.evaluate() calls.
+    this.browser.setEvaluateGuard(async (expression, currentUrl) => {
+      if (this.consent && (await this.consent.checkEmergencyStop())) {
+        throw new Error('Emergency stop armed — action blocked');
+      }
+      await this.requireConsent(`Run JavaScript in Desktop 2 browser (${expression.length} chars): ${expression.substring(0, 160)}`);
+      const url = currentUrl || this.state.pageUrl || this.browser.getActiveTab()?.url || '';
+      const check = this.privacy.inspectUrl(url);
+      if (!check.allowed) throw new Error(`Privacy blocked: ${check.reason || 'sensitive URL'} — evaluate() refused`);
+    });
     this.state = {
       isRunning: false,
       displayId: null,
@@ -65,6 +108,7 @@ export class Desktop2Environment {
       activeTabId: null,
       pageTitle: '',
       pageUrl: '',
+      renderer: null,
     };
   }
 
@@ -76,12 +120,9 @@ export class Desktop2Environment {
     try {
       const display = await this.displayManager.create();
       this.state.displayId = display.id;
-      this.inputGuard.registerVirtualDisplay(display.id, {
-        x: 0,
-        y: 0,
-        width: display.width,
-        height: display.height,
-      });
+      // Use the real region computed by VirtualDisplayManager so InputGuard
+      // can map synthetic coordinates to the correct virtual display.
+      this.inputGuard.registerVirtualDisplay(display.id, display.region);
     } catch (e) {
       getLogger().warn({ err: (e as Error).message }, 'Desktop 2: virtual display unavailable, browser-only mode');
     }
@@ -89,7 +130,24 @@ export class Desktop2Environment {
     this.state.isRunning = true;
     this.state.startedAt = new Date();
 
-    getLogger().info({ displayId: this.state.displayId }, 'Desktop 2 environment ready');
+    // The renderer follows display:created / display:destroyed, so it picks up
+    // displays created by Desktop 2 and by the swarm alike.
+    if (this.renderer) {
+      try {
+        await this.renderer.start();
+        if (this.state.displayId !== null) {
+          await this.renderer.setActiveDisplay(this.state.displayId);
+        }
+      } catch (e) {
+        getLogger().warn({ err: (e as Error).message }, 'Desktop 2: display renderer failed to start');
+      }
+      this.state.renderer = this.renderer.getState();
+    }
+
+    getLogger().info(
+      { displayId: this.state.displayId, renderer: this.state.renderer?.cdpConnected ?? false },
+      'Desktop 2 environment ready',
+    );
   }
 
   async stop(): Promise<void> {
@@ -97,6 +155,11 @@ export class Desktop2Environment {
     getLogger().info('Desktop 2 environment shutting down...');
 
     await this.closeBrowser();
+
+    if (this.renderer) {
+      await this.renderer.stop();
+      this.state.renderer = null;
+    }
 
     if (this.state.displayId) {
       this.inputGuard.unregisterVirtualDisplay(this.state.displayId);
@@ -240,16 +303,88 @@ export class Desktop2Environment {
     await this.browser.scroll(deltaX, deltaY, x, y);
   }
 
+  /**
+   * A PNG frame for the preview stream / PWA.
+   *
+   * Prefers the live browser capture, but falls back to the active virtual
+   * display's newest rendered frame — that is what makes Desktop 2's virtual
+   * monitors show content on the phone preview (port 9090) even when no
+   * interactive browser tab is open.
+   */
   async screenshot(): Promise<Buffer | null> {
-    if (!this.browser.isRunning()) return null;
-
     const captureCheck = this.privacy.inspectApp('desktop2_capture');
     if (captureCheck.blockCapture) {
       getLogger().warn('Privacy: blocked Desktop 2 screenshot');
       return null;
     }
 
-    return this.browser.screenshot();
+    if (this.browser.isRunning()) {
+      const shot = await this.browser.screenshot();
+      if (shot) return shot;
+    }
+
+    return this.getDisplayFramePng();
+  }
+
+  /**
+   * Newest PNG rendered into a virtual display. Defaults to the focused
+   * display. This is exactly the format PreviewStreamer expects.
+   */
+  getDisplayFramePng(displayId?: number): Buffer | null {
+    if (!this.renderer) return null;
+    const id = displayId ?? this.renderer.getActiveDisplayId() ?? this.state.displayId;
+    if (id === null) return null;
+    return this.renderer.getLatestPng(id);
+  }
+
+  /** Force a frame on one display (or all of them) right now. */
+  async renderDisplay(displayId: number): Promise<boolean> {
+    if (!this.renderer) return false;
+    return (await this.renderer.renderDisplay(displayId)) !== null;
+  }
+
+  async renderAllDisplays(): Promise<number> {
+    if (!this.renderer) return 0;
+    const frames = await this.renderer.renderAll();
+    this.state.renderer = this.renderer.getState();
+    return frames.length;
+  }
+
+  /** Switch which virtual display is focused (full FPS + page focus). */
+  async setActiveDisplay(displayId: number | null): Promise<void> {
+    if (!this.renderer) return;
+    await this.renderer.setActiveDisplay(displayId);
+  }
+
+  getRenderer(): VirtualDisplayRenderer | null {
+    return this.renderer;
+  }
+
+  /**
+   * Point a virtual display at a URL. The renderer only ever shows pages it
+   * created, so this is the supported way to put real content on a display.
+   * Consent- and privacy-gated like any other navigation.
+   */
+  async navigateDisplay(url: string, displayId?: number): Promise<string> {
+    if (!this.renderer) throw new Error('Desktop 2 display renderer not running');
+    const id = displayId ?? this.state.displayId;
+    if (id === null) throw new Error('No virtual display available');
+
+    const target = this.normalizeUrl(url);
+    const urlCheck = this.privacy.inspectUrl(target);
+    if (!urlCheck.allowed) {
+      getLogger().warn({ url: target, reason: urlCheck.reason }, 'Privacy: blocked display navigation');
+      throw new Error(`Privacy blocked: ${urlCheck.reason}`);
+    }
+
+    await this.requireConsent(`Show ${target} on virtual display ${id}`);
+
+    const frame = await this.renderer.navigate(id, target);
+    if (!frame) throw new Error('Display renderer could not navigate — is the browser running?');
+
+    this.vault.log('desktop2_display_navigate', target, { displayId: id }, 'navigated');
+    getLogger().info({ url: target, displayId: id }, 'Desktop 2: display navigated');
+    return `Display ${id} → ${target}`;
   }
 
   async getAccessibilitySnapshot(): Promise<string | null> {
@@ -259,7 +394,26 @@ export class Desktop2Environment {
 
   async evaluate(expression: string): Promise<unknown> {
     if (!this.browser.isRunning()) throw new Error('Desktop 2 browser not running');
-    return this.browser.evaluate(expression);
+    // Consent + URL guard: arbitrary JS can exfiltrate page content —
+    // require an explicit grant and a privacy allow-check on the live URL.
+    // The BrowserManager guard enforces the same checks for direct calls;
+    // it is bypassed here after this explicit gate to avoid a double prompt.
+    if (this.consent && (await this.consent.checkEmergencyStop())) {
+      throw new Error('Emergency stop armed — action blocked');
+    }
+    await this.requireConsent(`Run JavaScript in Desktop 2 browser (${expression.length} chars): ${expression.substring(0, 160)}`);
+    const liveUrl = this.state.pageUrl || this.browser.getActiveTab()?.url || '';
+    const urlCheck = this.privacy.inspectUrl(liveUrl);
+    if (!urlCheck.allowed) {
+      throw new Error(`Privacy blocked: ${urlCheck.reason || 'sensitive URL'} — evaluate() refused`);
+    }
+    const guard = (this.browser as any).evaluateGuard;
+    try {
+      if (guard) this.browser.setEvaluateGuard(null);
+      return await this.browser.evaluate(expression);
+    } finally {
+      if (guard) this.browser.setEvaluateGuard(guard);
+    }
   }
 
   async extract(selector?: string): Promise<string> {
@@ -330,6 +484,8 @@ export class Desktop2Environment {
     if (this.consent && (await this.consent.checkEmergencyStop())) {
       throw new Error('Emergency stop armed — action blocked');
     }
+    // ApprovalGate consent check (hash+expiry verified when a proposal rides along).
+    await this.checkApproval(params);
 
     const uiActions = ['click', 'clickSelector', 'type', 'typeInto', 'pressKey', 'hotkey', 'scroll', 'extract'];
     if (uiActions.includes(action) && !this.browser.isRunning()) {
@@ -338,9 +494,9 @@ export class Desktop2Environment {
       getLogger().info('Desktop 2: browser auto-started for UI action');
     }
 
-    getLogger().info({ action, params }, 'Desktop 2 executing action');
+    getLogger().info({ action, params: this.redactParams(params) }, 'Desktop 2 executing action');
 
-    this.vault.log('desktop2_action', action, params, 'started');
+    this.vault.log('desktop2_action', action, this.redactParams(params), 'started');
 
     switch (action) {
       case 'launchBrowser':
@@ -418,6 +574,22 @@ export class Desktop2Environment {
         const buf = await this.screenshot();
         return buf ? `Screenshot taken (${buf.length} bytes)` : 'Screenshot failed';
 
+      case 'renderDisplay':
+        await this.requireConsent(`Render virtual display ${String(params.displayId ?? '')}`);
+        const rendered = await this.renderDisplay(Number(params.displayId));
+        return rendered ? 'Frame rendered to virtual display' : 'Display render failed';
+
+      case 'renderAllDisplays':
+        const count = await this.renderAllDisplays();
+        return `Rendered ${count} virtual display(s)`;
+
+      case 'navigateDisplay':
+        return this.navigateDisplay(String(params.url || ''), params.displayId !== undefined ? Number(params.displayId) : undefined);
+
+      case 'setActiveDisplay':
+        await this.setActiveDisplay(params.displayId === undefined || params.displayId === null ? null : Number(params.displayId));
+        return `Active display: ${this.renderer?.getActiveDisplayId() ?? 'none'}`;
+
       case 'snapshot':
         const snap = await this.getAccessibilitySnapshot();
         return snap ? snap : 'Snapshot failed';
@@ -451,6 +623,8 @@ export class Desktop2Environment {
       ? this.state.uptimeMs + (Date.now() - this.state.startedAt.getTime())
       : this.state.uptimeMs;
 
+    if (this.renderer) this.state.renderer = this.renderer.getState();
+
     return { ...this.state, uptimeMs: currentUptime };
   }
 
@@ -463,6 +637,64 @@ export class Desktop2Environment {
     if (result !== 'granted') {
       throw new Error(`Consent denied: ${reason}`);
     }
+  }
+
+  /** Install the ApprovalGate (propose/decide hash+expiry+claim). */
+  setApprovalGate(gate: ApprovalGate | null, owner = 'desktop2'): void {
+    this.approvalGate = gate;
+    this.approvalOwner = owner;
+  }
+
+  /** Propose a sensitive desktop action for explicit review (30m expiry). */
+  async proposeAction(kind: string, data: Record<string, unknown>, taskId?: string): Promise<import('../agent/ApprovalGate').ActionProposal> {
+    if (!this.approvalGate) throw new Error('ApprovalGate not configured');
+    return this.approvalGate.propose(this.approvalOwner, kind, data, { taskId });
+  }
+
+  /** Read-only consent check: when approvalId/hash ride along, verify hash+expiry. */
+  private async checkApproval(params: Record<string, unknown>): Promise<void> {
+    if (!this.approvalGate) return;
+    const id = params.approvalId;
+    const hash = params.approvalHash;
+    if (id === undefined && hash === undefined) return;
+    if (typeof id !== 'string' || typeof hash !== 'string') throw new Error('Invalid approval reference');
+    const proposal = this.approvalGate.get(this.approvalOwner, id);
+    if (!proposal) throw new Error('Approval not found — propose the action first');
+    if (proposal.hash !== hash) throw new Error('Approval hash mismatch — re-propose');
+    if (proposal.status !== 'awaiting_review' && proposal.status !== 'executing') {
+      throw new Error(`Approval is ${proposal.status} — create a fresh proposal`);
+    }
+    if (Date.parse(proposal.expiresAt) <= Date.now()) throw new Error('Approval expired — create a fresh proposal');
+  }
+
+  /**
+   * Execute a sensitive action through the gate: decide() claims
+   * awaiting_review -> executing exactly once, then runs executeAction.
+   */
+  async executeWithApproval(action: string, params: Record<string, unknown>, proposalId: string, hash: string): Promise<string> {
+    if (!this.approvalGate) return this.executeAction(action, params);
+    const gate = this.approvalGate;
+    const owner = this.approvalOwner;
+    const finished = await gate.decide(owner, proposalId, hash, 'approve', async () => {
+      return this.executeAction(action, { ...params, approvalId: proposalId, approvalHash: hash });
+    });
+    if (finished.status !== 'succeeded') throw new Error(finished.error ?? `Approval ${finished.status}`);
+    return finished.result ?? 'approved';
+  }
+
+  /** Truncate long values + mask secret-looking keys so logs never hold secrets. */
+  private redactParams(params: Record<string, unknown>): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(params)) {
+      if (/secret|password|token|apikey|api_key|authorization|cookie/i.test(k)) {
+        out[k] = '***';
+      } else if (typeof v === 'string' && v.length > 300) {
+        out[k] = `${v.substring(0, 300)}…(${v.length} chars)`;
+      } else {
+        out[k] = v;
+      }
+    }
+    return out;
   }
 
   private async refreshState(): Promise<void> {

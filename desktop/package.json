@@ -14,7 +14,7 @@
     "preview": "vite preview",
     "desktop": "concurrently -k -s first \"vite\" \"wait-on http://localhost:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
     "desktop:full": "npm run build:backend && npm run desktop",
-    "desktop:pack": "npm run build && electron-builder",
+    "desktop:pack": "npm run build:backend && npm run build && electron-builder",
     "build:backend": "cd ../backend && npm run build",
     "dev:backend": "cd ../backend && npm run dev"
   },
@@ -23,7 +23,8 @@
     "productName": "UmbraOS",
     "files": [
       "dist/**/*",
-      "electron/**/*"
+      "electron/**/*",
+      "../backend/dist/**/*"
     ],
     "directories": {
       "output": "release"

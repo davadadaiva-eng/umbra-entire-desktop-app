@@ -1,6 +1,7 @@
 import { DisplayStatus } from '../../types';
 import { eventBus } from '../EventBus';
 import { getLogger } from '../Logger';
+import * as native from '../../native/win32/VirtualDisplayNative';
 
 export interface VirtualDisplay {
   id: number;
@@ -10,6 +11,18 @@ export interface VirtualDisplay {
   status: DisplayStatus;
   createdAt: Date;
   nativeHandle: number | null;
+  region: { x: number; y: number; width: number; height: number };
+}
+
+export interface ActiveDisplayInfo {
+  id: number;
+  width: number;
+  height: number;
+  fps: number;
+  status: DisplayStatus;
+  nativeHandle: number | null;
+  region: { x: number; y: number; width: number; height: number };
+  hasContent: boolean;
 }
 
 export class VirtualDisplayManager {
@@ -19,17 +32,20 @@ export class VirtualDisplayManager {
   private displayWidth: number;
   private displayHeight: number;
   private displayFps: number;
+  private regionXOffset: number;
 
   constructor(config: {
     maxDisplays: number;
     displayWidth: number;
     displayHeight: number;
     displayFps: number;
+    regionXOffset?: number;
   }) {
     this.maxDisplays = config.maxDisplays;
     this.displayWidth = config.displayWidth;
     this.displayHeight = config.displayHeight;
     this.displayFps = config.displayFps;
+    this.regionXOffset = config.regionXOffset ?? 0;
   }
 
   async create(): Promise<VirtualDisplay> {
@@ -46,6 +62,12 @@ export class VirtualDisplayManager {
       status: 'allocated',
       createdAt: new Date(),
       nativeHandle: null,
+      region: {
+        x: this.regionXOffset + id * this.displayWidth,
+        y: 0,
+        width: this.displayWidth,
+        height: this.displayHeight,
+      },
     };
 
     try {
@@ -59,7 +81,10 @@ export class VirtualDisplayManager {
 
     this.displays.set(id, display);
     eventBus.emit('display:created', id);
-    getLogger().info({ id, width: display.width, height: display.height }, 'Virtual display created');
+    getLogger().info(
+      { id, width: display.width, height: display.height, region: display.region, nativeHandle: display.nativeHandle },
+      'Virtual display created'
+    );
 
     return display;
   }
@@ -104,36 +129,53 @@ export class VirtualDisplayManager {
     return Array.from(this.displays.values()).filter(d => d.status === 'active').length;
   }
 
+  /**
+   * Returns enriched info for every active display, including whether the
+   * framebuffer currently holds rendered content. Used by Desktop2Environment
+   * and InputGuard to map synthetic coordinates to virtual regions.
+   */
+  getActiveDisplays(): ActiveDisplayInfo[] {
+    const nativeMap = new Map<number, { hasContent: boolean }>();
+    try {
+      for (const info of native.getActiveDisplays()) {
+        nativeMap.set(info.handle, { hasContent: info.hasContent });
+      }
+    } catch {
+      // native not available — hasContent will default to false
+    }
+
+    return Array.from(this.displays.values())
+      .filter(d => d.status === 'active')
+      .map(d => {
+        const nativeInfo = d.nativeHandle !== null ? nativeMap.get(d.nativeHandle) : undefined;
+        return {
+          id: d.id,
+          width: d.width,
+          height: d.height,
+          fps: d.fps,
+          status: d.status,
+          nativeHandle: d.nativeHandle,
+          region: d.region,
+          hasContent: nativeInfo ? nativeInfo.hasContent : false,
+        };
+      });
+  }
+
   async destroyAll(): Promise<void> {
     const ids = Array.from(this.displays.keys());
     await Promise.all(ids.map(id => this.destroy(id)));
   }
 
   private async createNativeDisplay(id: number): Promise<number> {
-    try {
-      const native = await import('../../native/win32/VirtualDisplayNative');
-      return native.createVirtualDisplay(id, this.displayWidth, this.displayHeight, this.displayFps);
-    } catch {
-      throw new Error('Native display module not available');
-    }
+    return native.createVirtualDisplay(id, this.displayWidth, this.displayHeight, this.displayFps);
   }
 
   private async destroyNativeDisplay(nativeHandle: number): Promise<void> {
-    try {
-      const native = await import('../../native/win32/VirtualDisplayNative');
-      return native.destroyVirtualDisplay(nativeHandle);
-    } catch {
-      throw new Error('Native display module not available');
-    }
+    return native.destroyVirtualDisplay(nativeHandle);
   }
 
   private async captureNativeDisplay(handle: number): Promise<Buffer> {
-    try {
-      const native = await import('../../native/win32/VirtualDisplayNative');
-      return native.captureDisplayBuffer(handle);
-    } catch {
-      throw new Error('Native capture not available');
-    }
+    return native.captureDisplayBuffer(handle);
   }
 
   private async captureVirtualBuffer(_id: number): Promise<Buffer> {

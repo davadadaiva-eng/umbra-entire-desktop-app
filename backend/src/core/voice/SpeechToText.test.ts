@@ -75,6 +75,44 @@ describe('SpeechToText', () => {
     const result = await stt.transcribe({ audio, format: 'wav' });
     expect(result.text).toBe('local transcript');
     expect(result.provider).toBe('whisper-local');
+    expect(result.ok).toBe(true);
     expect(fetchMock.mock.calls[0][0]).toBe('http://localhost:8080/inference');
+  });
+
+  it('degrades instead of throwing when the STT server is not running', async () => {
+    // Node/undici shape for ECONNREFUSED: TypeError('fetch failed') with the
+    // real netcode one level down in `cause`.
+    const refused = new TypeError('fetch failed');
+    (refused as any).cause = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:17510'), { code: 'ECONNREFUSED' });
+    (global as any).fetch = jest.fn().mockRejectedValue(refused);
+
+    const stt = new SpeechToText(makeConfig({
+      enabled: true,
+      sttProvider: 'faster-whisper',
+      fasterWhisperUrl: 'http://127.0.0.1:17510',
+    }));
+
+    const result = await stt.transcribe({ audio, format: 'wav' });
+
+    // Degraded, not an exception: the caller can fall back to Web Speech API.
+    expect(result.ok).toBe(false);
+    expect(result.text).toBe('');
+    expect(result.provider).toBe('faster-whisper');
+    expect(result.error).toMatch(/not running at http:\/\/127\.0\.0\.1:17510/);
+    expect(result.hint).toBe('cd backend && npm run whisper:stt-server');
+    expect(result.fallback).toMatch(/Web Speech API/);
+  });
+
+  it('still throws for a real request failure (not a dead server)', async () => {
+    (global as any).fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: async () => ({}),
+      text: async () => 'invalid api key',
+    } as unknown as Response);
+
+    const stt = new SpeechToText(makeConfig({ enabled: true, sttProvider: 'openai' }, 'sk-bad'));
+    // A 401 is a config bug — a fallback would just hide it.
+    await expect(stt.transcribe({ audio })).rejects.toThrow(/401/);
   });
 });

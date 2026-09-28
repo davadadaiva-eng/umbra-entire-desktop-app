@@ -2,7 +2,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const WebSocket = require('ws');
 
-const UMBRA_DIR = 'E:\\umbra projects\\umbra';
+const UMBRA_DIR = path.resolve(__dirname, '..');
 const API = 'http://127.0.0.1:8787';
 
 let failures = 0;

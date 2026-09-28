@@ -446,13 +446,26 @@ describe('ApiServer', () => {
     expect(res.status).toBe(404);
   });
 
-  test('invalid json returns 500', async () => {
+  test('invalid json returns a structured 400', async () => {
     const res = await fetch(`http://127.0.0.1:${PORT}/api/task`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: '{bad json',
     });
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as any;
+    expect(json.error).toContain('Invalid JSON body');
+    expect(json.code).toBe('BAD_REQUEST');
+  });
+
+  test('a non-object json body returns 400', async () => {
+    const res = await fetch(`http://127.0.0.1:${PORT}/api/task`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '[1,2,3]',
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as any).code).toBe('BAD_REQUEST');
   });
 
   test('mcp initialize handshake', async () => {

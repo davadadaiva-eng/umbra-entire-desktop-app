@@ -5,17 +5,47 @@ import { eventBus } from '../core/EventBus';
 import { getLogger } from '../core/Logger';
 import { TenantLedger } from '../core/billing/TenantLedger';
 import { McpJsonRpcResponse } from '../core/mcp/McpServerEndpoint';
+import { AppError, codeForStatus, isAppError } from './AppError';
+import { resolveApiKey } from './apiKey';
+import { agentRoutes } from './routes/agent';
+import { browserRoutes } from './routes/browsers';
+import { actionRoutes } from './routes/actions';
+import { computerRoutes } from './routes/computer';
+
+// Re-export sub-routers so existing imports via ApiServer keep working.
+export { agentRoutes } from './routes/agent';
+export { browserRoutes } from './routes/browsers';
+export { actionRoutes } from './routes/actions';
+export { computerRoutes } from './routes/computer';
+export { AppError, codeForStatus, isAppError } from './AppError';
+export { resolveApiKey } from './apiKey';
+export * from './validate';
 
 export interface ApiServerDeps {
   getStatus(): Promise<Record<string, unknown>>;
-  submitTask(description: string, priority?: number): Promise<string>;
+  submitTask(description: string, priority?: number, idempotencyKey?: string): Promise<string>;
   chat(message: string, target?: string): Promise<unknown>;
   getTask(id: string): unknown;
   getActiveTasks(): unknown;
+  /** Get activity feed for a task. */
+  getTaskActivity?(taskId: string): Promise<unknown>;
   /** Cancel an in-flight task (consent-gated on the executing node). */
   cancelTask?(taskId: string): Promise<unknown>;
   /** Retry a failed/cancelled task (consent-gated on the executing node). */
   retryTask?(taskId: string, description?: string): Promise<unknown>;
+  /** Worker lease management for distributed task execution. */
+  workerClaim?(taskId: string, workerId: string): Promise<unknown>;
+  workerHeartbeat?(taskId: string, workerId: string): Promise<unknown>;
+  workerRelease?(taskId: string, workerId: string): Promise<unknown>;
+  workerRecover?(workerId: string): Promise<unknown>;
+  /** Action proposal review flow. */
+  proposeAction?(taskId: string, action: string, args: Record<string, unknown>): Promise<unknown>;
+  reviewAction?(proposalId: string, approved: boolean, hash: string): Promise<unknown>;
+  getProposal?(proposalId: string): Promise<unknown>;
+  listProposals?(taskId: string): Promise<unknown>;
+  /** Input request for waiting_input pause/resume. */
+  requestInput?(taskId: string, question: string, options?: string[]): Promise<unknown>;
+  submitInput?(taskId: string, inputId: string, answer: string): Promise<unknown>;
   executeDesktop2(action: string, params: Record<string, unknown>): Promise<string>;
   executeGhost(action: string, params: Record<string, unknown>): Promise<string>;
   captureGhost(): Promise<string | null>;
@@ -270,34 +300,111 @@ export interface ApiServerDeps {
   shutdown(): void;
 }
 
-type Handler = (url: URL, body: Record<string, unknown>, match?: RegExpMatchArray) => Promise<unknown>;
+type Handler = (url: URL, body: Record<string, unknown>, match?: RegExpMatchArray, req?: http.IncomingMessage) => Promise<unknown>;
 
+// 5MB body cap — enforced in readBody()/readRawBody() via MAX_BODY_BYTES.
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Absolute stop for the overflow drain in collectBody(). A client that keeps
+ * pushing past this gets the socket destroyed — at that point a 413 is not
+ * worth holding the event loop for.
+ */
+const HARD_BODY_CEILING = 4 * MAX_BODY_BYTES;
+
+/** Loopback-only default bind address. See ApiServer.resolveHost(). */
+const DEFAULT_BIND_HOST = '127.0.0.1';
+
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
+/** True for the loopback aliases only — anything else is LAN-exposed. */
+function isLoopbackHost(host: string): boolean {
+  return LOOPBACK_HOSTS.has(host.trim().toLowerCase());
+}
+
+/**
+ * Client-disconnect / write-race socket errors. These mean the reader went
+ * away (or we raced a double-send) — never a backend fault, and never worth
+ * an unhandled 'error' event that takes the whole process down.
+ */
+const NON_FATAL_SOCKET_CODES = new Set([
+  'EPIPE',
+  'ECONNRESET',
+  'ECONNABORTED',
+  'ERR_STREAM_DESTROYED',
+  'ERR_STREAM_CLOSED',
+  'ERR_STREAM_WRITE_AFTER_END',
+]);
 
 export class ApiServer {
   private server: http.Server | null = null;
   private wss: WebSocket.Server | null = null;
   private deps: ApiServerDeps;
   private port: number;
+  private host: string;
   private clients: Set<WebSocket> = new Set();
 
-  constructor(deps: ApiServerDeps, port: number = 8787) {
+  constructor(deps: ApiServerDeps, port: number = 8787, host?: string) {
     this.deps = deps;
     this.port = port;
+    this.host = ApiServer.resolveHost(host);
+  }
+
+  /**
+   * Resolve the bind address. Default is loopback ONLY; a wildcard bind is an
+   * explicit operator decision and must never happen by accident.
+   *
+   * Precedence: constructor arg → UMBRA_BIND_HOST → UMBRA_HOST → 127.0.0.1.
+   * Blank/whitespace values are skipped (an empty env var previously won the
+   * `||` chain and made Node listen on every interface, i.e. 0.0.0.0).
+   */
+  private static resolveHost(explicit?: string): string {
+    for (const candidate of [explicit, process.env['UMBRA_BIND_HOST'], process.env['UMBRA_HOST']]) {
+      const host = typeof candidate === 'string' ? candidate.trim() : '';
+      if (host) return host;
+    }
+    return DEFAULT_BIND_HOST;
   }
 
   start(): void {
     if (this.server) return;
-    this.server = http.createServer((req, res) => this.handleRequest(req, res).catch(err => {
-      this.sendJson(res, 500, { error: err.message || 'Internal error' });
-    }));
+    this.server = http.createServer((req, res) => {
+      // First thing on the request path — before any body read or write.
+      this.guardConnection(req, res);
+      this.handleRequest(req, res).catch(err => {
+        this.sendError(res, err, 'request');
+      });
+    });
+
+    // Guard every accepted socket at connection time (before any request
+    // handler can write). A client that vanishes mid-response makes the
+    // kernel raise EPIPE/ECONNRESET on the raw socket; with no 'error'
+    // listener that is an unhandled 'error' event and kills the process.
+    this.server.on('connection', socket => {
+      // Tests and high-churn clients open/close many sockets; the default
+      // 10-listener cap raises MaxListenersExceededWarning. Zero disables the cap.
+      socket.setMaxListeners(0);
+      socket.on('error', err => ApiServer.onSocketError(err));
+    });
+    // Malformed request / pre-handler socket failure — destroy quietly instead
+    // of letting the default action throw.
+    this.server.on('clientError', (err: NodeJS.ErrnoException, socket) => {
+      ApiServer.onSocketError(err);
+      try { socket.destroy(); } catch { /* already gone */ }
+    });
 
     this.wss = new WebSocket.Server({ server: this.server, path: '/api/ws' });
     this.wss.on('connection', ws => this.handleWsConnection(ws));
 
-    this.server.listen(this.port, '0.0.0.0');
+    this.server.listen(this.port, this.host);
     this.subscribeBus();
-    getLogger().info({ port: this.port }, 'API server listening on 0.0.0.0');
+    if (!isLoopbackHost(this.host)) {
+      getLogger().warn(
+        { host: this.host, port: this.port },
+        'API server bound to a NON-loopback address — the control plane is reachable from the network',
+      );
+    }
+    getLogger().info({ port: this.port, host: this.host }, 'API server listening');
   }
 
   async stop(): Promise<void> {
@@ -323,13 +430,66 @@ export class ApiServer {
     }
   }
 
+  // ── Socket safety ─────────────────────────────────────────
+  //  A client that closes/times out mid-response (Electron reload, killed
+  //  fetch, LAN drop) makes Node emit 'error' on the raw Socket. Without a
+  //  listener that surfaces as an unhandled 'error' event and crashes the
+  //  backend (see backend-err.log: "Error: write EPIPE ... Unhandled
+  //  'error' event"). Every response therefore gets its listeners attached
+  //  BEFORE the first write, and res.end() is always try/caught.
+
+  /** Non-fatal → silent no-op; anything else → warn (never throw). */
+  private static onSocketError(err: any): void {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code && NON_FATAL_SOCKET_CODES.has(String(code))) return;
+    getLogger().warn({ code, err: err?.message }, 'Client socket error');
+  }
+
+  /** Attach non-fatal error handling to this request's raw socket + response. */
+  private guardConnection(req: http.IncomingMessage, res: http.ServerResponse): void {
+    const onError = (err: any) => ApiServer.onSocketError(err);
+    try {
+      // The raw socket write path — the actual EPIPE emitter. `on` (not
+      // `once`) so a second error on the same socket is still handled.
+      const socket = req.socket;
+      if (socket && socket.listenerCount('error') === 0) socket.on('error', onError);
+      if (res.socket && res.socket !== socket && res.socket.listenerCount('error') === 0) {
+        res.socket.on('error', onError);
+      }
+    } catch { /* socket already gone */ }
+    try { res.on('error', onError); } catch { /* ignore */ }
+    try { req.on('error', onError); } catch { /* ignore */ }
+  }
+
+  /** res.end() is the raw socket write: guard it and treat a dead peer as a no-op. */
+  private endResponse(res: http.ServerResponse, text?: string, req?: http.IncomingMessage): void {
+    try {
+      if (res.destroyed || res.writableEnded) return;
+      if (req?.socket?.destroyed) return;
+      const resSocket = (res as unknown as { socket?: { destroyed?: boolean } }).socket;
+      if (resSocket?.destroyed) return;
+      if (text === undefined) res.end();
+      else res.end(text);
+    } catch (err) {
+      ApiServer.onSocketError(err);
+      try { res.destroy(); } catch { /* already destroyed */ }
+    }
+  }
+
   // ── HTTP ──────────────────────────────────────────────────
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    this.setCors(res);
+    this.guardConnection(req, res);
+    this.setCors(res, req);
+    if (req.socket.destroyed) return;
     if (req.method === 'OPTIONS') {
-      res.writeHead(204);
-      res.end();
+      try {
+        res.writeHead(204);
+      } catch (err) {
+        ApiServer.onSocketError(err);
+        return;
+      }
+      this.endResponse(res, undefined, req);
       return;
     }
 
@@ -342,10 +502,10 @@ export class ApiServer {
       const rawBody = await this.readRawBody(req);
       try {
         const result = await this.deps.billingHandleWebhook(rawBody, String(req.headers['stripe-signature'] || ''));
-        this.sendJson(res, 200, result);
+        this.sendJson(res, 200, result, req);
       } catch (err: any) {
         getLogger().warn({ err: err.message }, 'Billing webhook failed');
-        this.sendJson(res, 400, { error: err.message || 'Webhook failed' });
+        this.sendJson(res, 400, { error: err.message || 'Webhook failed' }, req);
       }
       return;
     }
@@ -357,10 +517,10 @@ export class ApiServer {
         // Prefer JIT handler if available, else fallback to billing
         const handler: any = (this.deps as any).handleStripeWebhook || this.deps.billingHandleWebhook;
         const result = await handler(rawBody, sig);
-        this.sendJson(res, 200, result);
+        this.sendJson(res, 200, result, req);
       } catch (err: any) {
         getLogger().warn({ err: err.message }, 'Stripe JIT webhook failed');
-        this.sendJson(res, 400, { error: err.message || 'Webhook failed' });
+        this.sendJson(res, 400, { error: err.message || 'Webhook failed' }, req);
       }
       return;
     }
@@ -373,52 +533,117 @@ export class ApiServer {
     // MCP (Model Context Protocol) endpoint — JSON-RPC over HTTP for the
     // built-in reasoning engine to call Umbra's connectors.
     if (route === 'POST /mcp') {
-      await this.handleMcp(body, res);
+      await this.handleMcp(body, res, req);
       return;
     }
 
-    const handler = this.routeHandler(route);
+    const handler = this.routeHandler(route, req);
     if (!handler) {
-      this.sendJson(res, 404, { error: `No route: ${route}` });
+      this.sendJson(res, 404, { error: `No route: ${route}` }, req);
       return;
     }
 
     // Multi-tenant: bind the caller's X-Umbra-Tenant header to the whole
     // async chain, so every LLM call this request spawns meters against that
     // tenant's own $5/$10 budget (TenantLedger.current()).
+    // NOTE: route uses url.pathname only (never logs query → ?key= never hits logs).
     const tenantId = String(req.headers['x-umbra-tenant'] || '').trim() || undefined;
     try {
-      const result = await TenantLedger.run(tenantId, () => handler(url, body));
-      this.sendJson(res, 200, result);
+      const result = await TenantLedger.run(tenantId, () => handler(url, body, undefined, req));
+      this.sendJson(res, 200, result, req);
     } catch (err: any) {
-      const msg = err.message || 'Internal error';
-      const isDisabled = /not configured|disabled|unavailable|not enabled|unreachable/i.test(msg);
-      const status = isDisabled ? 503 : 500;
-      getLogger().warn({ route, err: msg, status }, 'API route failed');
-      this.sendJson(res, status, { error: msg, code: isDisabled ? 'SERVICE_DISABLED' : 'INTERNAL_ERROR' });
+      this.sendError(res, err, route, req);
     }
   }
 
-  private async handleMcp(body: Record<string, unknown>, res: http.ServerResponse): Promise<void> {
+  /**
+   * Map a thrown error to a structured HTTP error response.
+   *
+   * Precedence:
+   *   1. `AppError` (and the `validate.ts` helpers, which throw it) carries its
+   *      own status — 400/404/413/422/501/503 — and is honoured verbatim. This
+   *      used to be dropped on the floor, which turned every zod validation
+   *      failure into a 500 "Internal error".
+   *   2. An optional dependency missing on this node (cancelTask, workerClaim,
+   *      …) is 501 Not Implemented, not an internal fault.
+   *   3. A feature that is configured-but-off (voice, telco, docker, social)
+   *      is 503 Service Unavailable, so clients can retry later.
+   *   4. Everything else stays 500.
+   */
+  private sendError(res: http.ServerResponse, err: any, route: string, req?: http.IncomingMessage): void {
+    const msg = err?.message || 'Internal error';
+
+    let status: number;
+    let code: string;
+    if (isAppError(err)) {
+      status = err.status;
+      code = codeForStatus(err.status);
+    } else if (/not available on this node/i.test(msg)) {
+      status = 501;
+      code = 'NOT_IMPLEMENTED';
+    } else if (/not configured|disabled|unavailable|not enabled|unreachable/i.test(msg)) {
+      status = 503;
+      code = 'SERVICE_DISABLED';
+    } else {
+      status = 500;
+      code = 'INTERNAL_ERROR';
+    }
+
+    if (status === 413) {
+      // The request body was refused mid-stream; the unread remainder must not
+      // be interpreted as the next pipelined request.
+      try { res.setHeader('Connection', 'close'); } catch { /* client gone */ }
+    }
+    // 4xx/5xx that are the caller's fault are not worth a stack-trace log line.
+    if (status >= 500) {
+      getLogger().warn({ route, err: msg, status, code }, 'API route failed');
+    } else {
+      getLogger().debug({ route, err: msg, status, code }, 'API request rejected');
+    }
+    this.sendJson(res, status, { error: msg, code }, req);
+  }
+
+  private async handleMcp(body: Record<string, unknown>, res: http.ServerResponse, req?: http.IncomingMessage): Promise<void> {
     try {
       const response = await this.deps.mcpHandle(body);
       if (response === null) {
-        res.writeHead(202);
-        res.end();
+        try {
+          res.writeHead(202);
+        } catch { /* client gone */ }
+        this.endResponse(res, undefined, req);
         return;
       }
-      this.sendJson(res, 200, response);
+      this.sendJson(res, 200, response, req);
     } catch (err: any) {
       getLogger().warn({ err: err.message }, 'MCP endpoint failed');
       this.sendJson(res, 500, {
         jsonrpc: '2.0',
         id: body && typeof body === 'object' ? body['id'] ?? null : null,
         error: { code: -32603, message: err?.message || 'Internal error' },
-      });
+      }, req);
     }
   }
 
-  private routeHandler(route: string): Handler | null {
+  private routeHandler(route: string, req?: http.IncomingMessage): Handler | null {
+    // Skeleton refactor: sub-routers own their domains; ApiServer composes them.
+    // Order preserves original precedence for overlapping patterns.
+    const composed: Array<[RegExp, Handler]> = [
+      ...agentRoutes(this.deps),
+      ...browserRoutes(this.deps),
+      ...actionRoutes(this.deps),
+      ...computerRoutes(this.deps),
+    ];
+    for (const [pattern, handler] of composed) {
+      const match = route.match(pattern);
+      if (match) {
+        return (url, body, _m, reqOverride) => handler(url, body, match, reqOverride ?? req);
+      }
+    }
+    // Fallback to legacy map during migration (covers any route not yet extracted).
+    return this.legacyRouteHandler(route, req);
+  }
+
+  private legacyRouteHandler(route: string, req?: http.IncomingMessage): Handler | null {
     const map: Array<[RegExp, Handler]> = [
       [/^GET \/api\/health$/, async () => ({ ok: true, uptimeMs: process.uptime() * 1000 })],
       [/^GET \/api\/status$/, async () => this.deps.getStatus()],
@@ -432,17 +657,18 @@ export class ApiServer {
         const description = String(body.description || '').trim();
         if (!description) throw new Error('description is required');
         const priority = Number(body.priority || 0);
-        const taskId = await this.deps.submitTask(description, priority);
+        const idempotencyKey = body.idempotencyKey ? String(body.idempotencyKey) : undefined;
+        const taskId = await this.deps.submitTask(description, priority, idempotencyKey);
         return { taskId };
       }],
       [/^POST \/api\/task\/([\w-]+)\/cancel$/, async (_url, _body, match) => {
-        if (!this.deps.cancelTask) throw new Error('cancelTask is not available on this node');
+        if (!this.deps.cancelTask) throw new AppError('cancelTask is not available on this node', 501);
         const taskId = match![1];
         await this.deps.cancelTask(taskId);
         return { cancelled: taskId };
       }],
       [/^POST \/api\/task\/([\w-]+)\/retry$/, async (_url, body, match) => {
-        if (!this.deps.retryTask) throw new Error('retryTask is not available on this node');
+        if (!this.deps.retryTask) throw new AppError('retryTask is not available on this node', 501);
         const taskId = match![1];
         const description = body.description !== undefined ? String(body.description) : undefined;
         const retried = await this.deps.retryTask(taskId, description);
@@ -468,7 +694,7 @@ export class ApiServer {
       }],
       [/^GET \/api\/ghost\/capture$/, async () => {
         const png = await this.deps.captureGhost();
-        if (!png) throw new Error('No capture available — open Chrome or an app on Desktop 2 first');
+        if (!png) throw new AppError('No capture available — open Chrome or an app on Desktop 2 first', 404);
         return { image: png };
       }],
       [/^GET \/api\/consent$/, async () => ({
@@ -486,6 +712,7 @@ export class ApiServer {
           return { result: 'armed' };
         }
         if (action === 'disarm') {
+          if (body.confirm !== true) throw new Error('Emergency stop disarm requires explicit confirmation (body.confirm === true)');
           this.deps.disarmEmergencyStop();
           return { result: 'disarmed' };
         }
@@ -1036,6 +1263,8 @@ export class ApiServer {
         return { carousel: await this.deps.carruselCreate({ name, aspectRatio: body.aspectRatio !== undefined ? String(body.aspectRatio) : undefined }) };
       }],
       [/^GET \/api\/carrusel\/list$/, async () => ({ carousels: await this.deps.carruselList() })],
+      // Must stay above GET /api/carrusel/:id — see routes/computer.ts.
+      [/^GET \/api\/carrusel\/brand$/, async () => ({ brand: await this.deps.carruselBrand() })],
       [/^GET \/api\/carrusel\/([\w-]+)$/, async (_url, _body, match) => ({
         carousel: await this.deps.carruselGet(match![1]),
       })],
@@ -1058,7 +1287,6 @@ export class ApiServer {
       [/^DELETE \/api\/carrusel\/([\w-]+)$/, async (_url, _body, match) => ({
         deleted: await this.deps.carruselDelete(match![1]),
       })],
-      [/^GET \/api\/carrusel\/brand$/, async () => ({ brand: await this.deps.carruselBrand() })],
       [/^POST \/api\/carrusel\/([\w-]+)\/duplicate$/, async (_url, _body, match) => ({
         carousel: await this.deps.carruselDuplicate(match![1]),
       })],
@@ -1091,45 +1319,58 @@ export class ApiServer {
         if (!email || !password) throw new Error('email and password are required');
         return { user: await this.deps.authLogin(email, password) };
       }],
-      [/^POST \/api\/auth\/login-key$/, async (_url, body) => {
-        const apiKey = String(body.apiKey || body.api_key || '').trim();
+      [/^POST \/api\/auth\/login-key$/, async (url, body, _match, req) => {
+        const apiKey = req
+          ? this.resolveApiKey(req, url, body).key
+          : String((body as any).apiKey || (body as any).api_key || '').trim();
         if (!apiKey) throw new Error('apiKey is required');
         return { user: await this.deps.authLoginWithKey(apiKey) };
       }],
-      [/^GET \/api\/auth\/me$/, async (url) => {
-        const apiKey = String(url.searchParams.get('key') || '').trim();
+      [/^GET \/api\/auth\/me$/, async (url, body, _match, req) => {
+        const apiKey = req
+          ? this.resolveApiKey(req, url, body).key
+          : String(url.searchParams.get('key') || '').trim();
         if (!apiKey) throw new Error('API key required');
         return { user: await this.deps.authLoginWithKey(apiKey) };
       }],
 
       // ── Devices (pairing for web app) ──────────────────────────
-      [/^GET \/api\/auth\/devices$/, async (url, body) => {
-        const apiKey = String(url.searchParams.get('key') || (body as any).apiKey || (body as any).api_key || '').trim();
+      [/^GET \/api\/auth\/devices$/, async (url, body, _match, req) => {
+        const apiKey = req
+          ? this.resolveApiKey(req, url, body).key
+          : String(url.searchParams.get('key') || (body as any).apiKey || (body as any).api_key || '').trim();
         if (!apiKey) throw new Error('API key required');
         return { devices: await this.deps.authListDevices(apiKey) };
       }],
-      [/^POST \/api\/auth\/devices\/pair$/, async (_url, body) => {
-        const apiKey = String(body.apiKey || body.api_key || '').trim();
+      [/^POST \/api\/auth\/devices\/pair$/, async (url, body, _match, req) => {
+        const resolved = req ? this.resolveApiKey(req, url, body).key : '';
+        const apiKey = resolved || String((body as any).apiKey || (body as any).api_key || '').trim();
         const name = String(body.name || '').trim();
         const type = String(body.type || 'desktop');
         if (!apiKey || !name) throw new Error('apiKey and name are required');
         return { device: await this.deps.authPairDevice(apiKey, name, type) };
       }],
-      [/^DELETE \/api\/auth\/devices\/([\w-]+)$/, async (url, body, match) => {
-        const apiKey = String(url.searchParams.get('key') || (body as any).apiKey || (body as any).api_key || '').trim();
+      [/^DELETE \/api\/auth\/devices\/([\w-]+)$/, async (url, body, match, req) => {
+        const apiKey = req
+          ? this.resolveApiKey(req, url, body).key
+          : String(url.searchParams.get('key') || (body as any).apiKey || (body as any).api_key || '').trim();
         if (!apiKey) throw new Error('API key required');
         return { removed: await this.deps.authRemoveDevice(apiKey, match![1]) };
       }],
 
       // ── Plan (web app) ─────────────────────────────────────────
-      [/^GET \/api\/auth\/plan$/, async (url, body) => {
-        const apiKey = String(url.searchParams.get('key') || (body as any).apiKey || (body as any).api_key || '').trim();
+      [/^GET \/api\/auth\/plan$/, async (url, body, _match, req) => {
+        const apiKey = req
+          ? this.resolveApiKey(req, url, body).key
+          : String(url.searchParams.get('key') || (body as any).apiKey || (body as any).api_key || '').trim();
         if (!apiKey) throw new Error('API key required');
         return { plan: await this.deps.authGetPlan(apiKey) };
       }],
       // Backwards compat: old paths still work but map to auth namespace
-      [/^GET \/api\/plan$/, async (url, body) => {
-        const apiKey = String(url.searchParams.get('key') || (body as any).apiKey || (body as any).api_key || '').trim();
+      [/^GET \/api\/plan$/, async (url, body, _match, req) => {
+        const apiKey = req
+          ? this.resolveApiKey(req, url, body).key
+          : String(url.searchParams.get('key') || (body as any).apiKey || (body as any).api_key || '').trim();
         if (!apiKey) throw new Error('API key required');
         return { plan: await this.deps.authGetPlan(apiKey) };
       }],
@@ -1138,59 +1379,141 @@ export class ApiServer {
     for (const [pattern, handler] of map) {
       const match = route.match(pattern);
       if (match) {
-        return (url, body) => handler(url, body, match);
+        return (url, body, _m, reqOverride) => handler(url, body, match, reqOverride ?? req);
       }
     }
     return null;
   }
 
+  /**
+   * Read a body as text (webhook signature verification needs the exact bytes).
+   *
+   * On overflow we do NOT `req.destroy()`: destroying the socket means the
+   * client never sees the response, and closing a socket that still has unread
+   * data in its receive buffer makes the kernel send RST — which also throws
+   * away the 413 we just wrote. Instead we keep reading and discarding, then
+   * answer 413 once the client has finished sending. `HARD_BODY_CEILING` bounds
+   * that drain so an abusive client cannot stream forever.
+   */
   private readRawBody(req: http.IncomingMessage): Promise<string> {
-    return new Promise((resolve, reject) => {
-      let data = '';
-      req.on('data', chunk => {
-        data += chunk;
-        if (data.length > MAX_BODY_BYTES) {
-          reject(new Error('Request body too large'));
-          req.destroy();
-        }
-      });
-      req.on('end', () => resolve(data));
-      req.on('error', reject);
-    });
+    return this.collectBody(req, true);
   }
 
   private readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+    return this.collectBody(req, false);
+  }
+
+  /** Shared body reader — see readRawBody() for the overflow strategy. */
+  private collectBody(req: http.IncomingMessage, raw: boolean): Promise<any> {
     return new Promise((resolve, reject) => {
       let data = '';
+      let overflow = false;
+      const tooLarge = (): AppError =>
+        new AppError(`Request body too large (max ${MAX_BODY_BYTES} bytes)`, 413);
+
       req.on('data', chunk => {
+        if (overflow) {
+          // Already over the cap — just count, so we know when to give up.
+          if (data.length > HARD_BODY_CEILING) req.destroy();
+          return;
+        }
         data += chunk;
         if (data.length > MAX_BODY_BYTES) {
-          reject(new Error('Request body too large'));
-          req.destroy();
+          overflow = true;
+          data = ''; // stop holding the rejected payload in memory
+          req.resume(); // drain the remainder so the 413 is not lost to a RST
         }
       });
       req.on('end', () => {
+        if (overflow) { reject(tooLarge()); return; }
+        if (raw) { resolve(data); return; }
         if (!data.trim()) { resolve({}); return; }
+        let parsed: unknown;
         try {
-          resolve(JSON.parse(data));
+          parsed = JSON.parse(data);
         } catch {
-          reject(new Error('Invalid JSON body'));
+          reject(new AppError('Invalid JSON body', 400));
+          return;
         }
+        // Every route reads named fields off a plain object; an array or a
+        // scalar is a client mistake, not a body we can dispatch on.
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          reject(new AppError('Invalid JSON body: expected a JSON object', 400));
+          return;
+        }
+        resolve(parsed as Record<string, unknown>);
       });
       req.on('error', reject);
     });
   }
 
-  private setCors(res: http.ServerResponse): void {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+  private setCors(res: http.ServerResponse, req?: http.IncomingMessage): void {
+    // Allowlist only — never '*'. Local UI origins by default; extend via
+    // UMBRA_ALLOWED_ORIGINS="https://a,https://b" (comma-separated).
+    const defaults = [
+      'http://localhost:5173',
+      'http://127.0.0.1:5173',
+      'http://localhost:8787',
+      'http://127.0.0.1:8787',
+    ];
+    const extra = (process.env['UMBRA_ALLOWED_ORIGINS'] || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    const allowlist = new Set([...defaults, ...extra]);
+    const origin = String(req?.headers?.origin || '').trim();
+    if (origin && allowlist.has(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+    }
+    // No ACAO header for non-allowlisted origins (browser blocks the read).
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Umbra-Tenant, X-Voicebox-Client-Id');
   }
 
-  private sendJson(res: http.ServerResponse, status: number, payload: unknown): void {
-    const text = JSON.stringify(payload);
-    res.writeHead(status, { 'Content-Type': 'application/json' });
-    res.end(text);
+  /**
+   * Resolve the caller API key. Preferred: `Authorization: Bearer <key>`.
+   * Compat: `?key=` query param and `body.apiKey/api_key/key` (kept, but the
+   * query path emits a deprecation warning). Never logs the key value.
+   *
+   * Thin wrapper over the shared `resolveApiKey()` in `./apiKey` — the auth
+   * sub-router in `routes/computer.ts` is matched ahead of the legacy map
+   * below and calls the shared helper directly, so both paths must agree.
+   */
+  private resolveApiKey(
+    req: http.IncomingMessage,
+    url: URL,
+    body?: Record<string, unknown>,
+  ): { key: string; via: 'header' | 'query' | 'body' | 'none'; usedDeprecatedQuery: boolean } {
+    return resolveApiKey(req, url, body);
+  }
+
+  private sendJson(res: http.ServerResponse, status: number, payload: unknown, req?: http.IncomingMessage): void {
+    // Belt-and-braces: the listeners are attached in guardConnection(), but a
+    // caller may hold a res that never went through the request path.
+    try { res.on('error', err => ApiServer.onSocketError(err)); } catch {}
+    let text: string;
+    try {
+      text = JSON.stringify(payload);
+    } catch (err) {
+      getLogger().error({ err: (err as Error).message }, 'Response serialization failed');
+      try { res.writeHead(500, { 'Content-Type': 'application/json' }); } catch { /* ignore */ }
+      this.endResponse(res, JSON.stringify({ error: 'Internal error' }), req);
+      return;
+    }
+    try {
+      // Client already gone — writing would raise EPIPE/ECONNRESET on Node 24.
+      if (res.destroyed || res.writableEnded) return;
+      if (req?.socket?.destroyed) return;
+      const resSocket = (res as unknown as { socket?: { destroyed?: boolean } }).socket;
+      if (resSocket?.destroyed) return;
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+    } catch (err) {
+      ApiServer.onSocketError(err);
+      try { res.destroy(); } catch {}
+      return;
+    }
+    this.endResponse(res, text, req);
   }
 
   // ── WebSocket ─────────────────────────────────────────────
@@ -1200,7 +1523,7 @@ export class ApiServer {
 
     this.deps.getStatus().then(status => {
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'snapshot', status }));
+        try { ws.send(JSON.stringify({ type: 'snapshot', status })); } catch { /* client gone */ }
       }
     }).catch(() => { });
 
@@ -1210,10 +1533,51 @@ export class ApiServer {
 
   private broadcast(payload: Record<string, unknown>): void {
     const text = JSON.stringify(payload);
-    for (const client of this.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        try { client.send(text); } catch { }
+    // Snapshot the set: the loop prunes dead clients out of `this.clients`.
+    for (const client of Array.from(this.clients)) {
+      if (client.readyState !== WebSocket.OPEN) {
+        // Prune dead sockets so a leaked client can't accumulate.
+        try { this.clients.delete(client); } catch {}
+        continue;
       }
+      try { client.send(text); } catch {
+        try { this.clients.delete(client); } catch {}
+      }
+    }
+  }
+
+  /** 1s coalesce window for high-frequency screen events (watch ticks + cursor). */
+  private readonly SCREEN_COALESCE_MS = 1000;
+  private lastScreenAt = 0;
+  private pendingScreen: Record<string, unknown> | null = null;
+  private pendingScreenTimer: NodeJS.Timeout | null = null;
+
+  private broadcastThrottled(payload: Record<string, unknown>): void {
+    const name = (payload as { name?: unknown }).name;
+    if (name !== 'screen:update' && name !== 'screen:cursor') {
+      this.broadcast(payload);
+      return;
+    }
+    const now = Date.now();
+    if (now - this.lastScreenAt >= this.SCREEN_COALESCE_MS) {
+      this.lastScreenAt = now;
+      this.broadcast(payload);
+      return;
+    }
+    // Inside the window — keep only the latest, flush once the window ends.
+    this.pendingScreen = payload;
+    if (!this.pendingScreenTimer) {
+      const delay = this.SCREEN_COALESCE_MS - (now - this.lastScreenAt);
+      this.pendingScreenTimer = setTimeout(() => {
+        this.pendingScreenTimer = null;
+        const next = this.pendingScreen;
+        this.pendingScreen = null;
+        if (next) {
+          this.lastScreenAt = Date.now();
+          this.broadcast(next);
+        }
+      }, Math.max(0, delay));
+      try { (this.pendingScreenTimer as unknown as { unref?: () => void }).unref?.(); } catch {}
     }
   }
 
@@ -1239,7 +1603,7 @@ export class ApiServer {
   private subscribeBus(): void {
     for (const name of this.eventNames) {
       const fn = (...args: unknown[]): void => {
-        this.broadcast({ type: 'event', name, payload: args.length === 1 ? args[0] : args });
+        this.broadcastThrottled({ type: 'event', name, payload: args.length === 1 ? args[0] : args });
       };
       const list = this.busHandlers.get(name) || [];
       list.push(fn);
@@ -1256,6 +1620,13 @@ export class ApiServer {
       }
     }
     this.busHandlers.clear();
+    // Drop any coalesced screen frame — a stale cursor must not leak into
+    // the next start() and confuse the first subscriber.
+    if (this.pendingScreenTimer) {
+      try { clearTimeout(this.pendingScreenTimer); } catch {}
+      this.pendingScreenTimer = null;
+    }
+    this.pendingScreen = null;
   }
 }
 

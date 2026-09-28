@@ -37,14 +37,29 @@ export class BrowserUseBridge {
     private scriptPath: string,
   ) {}
 
+  /** Whether the Python interpreter and bridge script are both present on disk. */
+  isAvailable(): boolean {
+    return fs.existsSync(this.pythonPath) && fs.existsSync(this.scriptPath);
+  }
+
+  /** Convenience alias for `isAvailable()` — used by the UI status endpoint. */
+  get available(): boolean {
+    return this.isAvailable();
+  }
+
   isReady(): boolean {
     return !!this.process && !this.process.killed;
   }
 
   async start(): Promise<boolean> {
     if (this.process && !this.process.killed) return true;
-    if (!fs.existsSync(this.pythonPath) || !fs.existsSync(this.scriptPath)) {
-      getLogger().warn('BrowserUseBridge: python or bridge script missing — fast engine disabled');
+    if (!this.isAvailable()) {
+      getLogger().warn(
+        { python: this.pythonPath, script: this.scriptPath },
+        'BrowserUseBridge: python or bridge script missing — fast engine disabled. ' +
+          'Falling back to the Desktop2 / Chrome CDP loop (AgentDesktop). ' +
+          'Install with: cd backend && python -m venv .venv && .venv\\Scripts\\pip install browser-use && .venv\\Scripts\\python -m playwright install chromium',
+      );
       return false;
     }
 
@@ -76,6 +91,18 @@ export class BrowserUseBridge {
   }
 
   submit(options: BridgeSubmitOptions): Promise<BridgeResult> {
+    if (!this.isReady()) {
+      // Graceful degradation: the fast engine (browser-use) is not running.
+      // Return a structured error so callers can fall back to the Desktop2
+      // / Chrome CDP loop instead of silently dropping the request.
+      getLogger().warn('BrowserUseBridge.submit: bridge not running — caller should fall back to Desktop2/CDP loop');
+      return Promise.resolve({
+        ok: false,
+        aborted: true,
+        error: 'BrowserUseBridge not running — falling back to Desktop2 / Chrome CDP loop (AgentDesktop). Install with: cd backend && python -m venv .venv && .venv\\Scripts\\pip install browser-use',
+      });
+    }
+
     return new Promise(resolve => {
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const timer = setTimeout(() => {

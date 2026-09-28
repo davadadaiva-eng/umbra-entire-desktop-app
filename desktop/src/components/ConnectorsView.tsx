@@ -81,13 +81,18 @@ export function ConnectorsView() {
     return () => ctx.revert();
   }, []);
 
-  // Fetch connected connectors
+  // Fetch connected connectors — getMcpConnectors() unwraps the backend
+  // { connectors: { entries } } nesting to a flat Array, but handle both
+  // shapes defensively.
   const loadConnected = useCallback(async () => {
     try {
       const data = await getMcpConnectors();
-      const conns = data.connectors as unknown as { entries: Array<{ id: string; name: string; kind: string; connected: boolean; tools: number }> };
-      if (conns?.entries?.length) {
-        setConnected(conns.entries.map((c) => ({
+      const raw = data.connectors as unknown;
+      const entries = Array.isArray(raw)
+        ? (raw as Array<{ id: string; name: string; kind: string; connected: boolean; tools: number }>)
+        : (raw as { entries?: Array<{ id: string; name: string; kind: string; connected: boolean; tools: number }> })?.entries ?? [];
+      if (entries.length) {
+        setConnected(entries.map((c) => ({
           id: c.id, name: c.name, category: c.kind || 'Other',
           connected: c.connected, tools: c.tools,
         })));
@@ -174,32 +179,35 @@ export function ConnectorsView() {
     setSyncing(false);
   };
 
-  // Discover connectors for agent
+  // Discover connectors for agent — connectorDiscover() sends { query } and
+  // maps the backend { tools } payload onto { connectors }.
   const handleAgentDiscover = async () => {
     if (!agentQuery.trim()) return;
     setAgentSearching(true);
     setError('');
     try {
       const result = await connectorDiscover(agentQuery.trim());
-      setAgentResults(result.connectors ?? []);
+      const list = result.connectors ?? (result as unknown as { tools?: ConnectorDiscoverResult['connectors'] }).tools ?? [];
+      setAgentResults(list);
     } catch (e) {
       setError(`Discovery failed: ${(e as Error).message}`);
     }
     setAgentSearching(false);
   };
 
-  // Execute a connector from agent tools
+  // Execute a connector from agent tools — backend canonical is { payload, userId },
+  // not { body, headers }.
   const handleAgentExecute = async () => {
     if (!agentExecuteModal) return;
     setAgentExecuting(true);
     setAgentExecuteResult(null);
     try {
-      const body = agentExecuteModal.body ? JSON.parse(agentExecuteModal.body) : undefined;
+      const payload = agentExecuteModal.body ? (JSON.parse(agentExecuteModal.body) as Record<string, unknown>) : undefined;
       const result = await connectorExecute({
         connectorId: agentExecuteModal.connectorId,
         endpoint: agentExecuteModal.endpoint,
         method: agentExecuteModal.method,
-        body,
+        ...(payload !== undefined ? { payload } : {}),
       });
       setAgentExecuteResult({ status: result.status, data: result.data });
     } catch (e) {

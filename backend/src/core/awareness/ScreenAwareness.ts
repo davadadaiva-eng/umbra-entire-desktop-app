@@ -149,10 +149,18 @@ export class ScreenAwareness {
     const window = this.safeWindow();
     const cursor = this.safeCursor();
     let ocrText = '';
-    try {
-      ocrText = (await this.screenReader.ocrImage(shot.buffer)).slice(0, 8000);
-    } catch (err: any) {
-      getLogger().debug({ err: err.message }, 'Screen awareness OCR failed');
+    if (this.screenReader.isOcrReady()) {
+      try {
+        ocrText = (await Promise.race([
+          this.screenReader.ocrImage(shot.buffer),
+          new Promise<string>((_, reject) =>
+            setTimeout(() => reject(new Error('OCR call timed out')), 10000)),
+        ])).slice(0, 8000);
+      } catch (err: any) {
+        getLogger().debug({ err: err.message }, 'Screen awareness OCR failed');
+      }
+    } else {
+      getLogger().debug('OCR not ready — snapshot proceeding without OCR text');
     }
 
     const snapshot: ScreenSnapshot = {

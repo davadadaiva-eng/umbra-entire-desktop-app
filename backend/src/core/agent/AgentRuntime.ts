@@ -1,4 +1,4 @@
-import { Task, TaskStep, TaskResult, PlanTier } from '../../types';
+import { Task, TaskStep, TaskResult, PlanTier, ActivityEntry, ActionProposal, InputRequest, TaskStatus } from '../../types';
 import { TaskStore } from './TaskStore';
 import * as path from 'path';
 import { LLMConnector, LLMMessage } from './LLMConnector';
@@ -32,6 +32,7 @@ import { eventBus } from '../EventBus';
 import { getLogger } from '../Logger';
 import { InjectionGuard } from './InjectionGuard';
 import { validatePlanDag, groupPlanWaves } from './planDag';
+import { LostLeaseError, TaskLeaseManager } from './TaskLease';
 export class AgentRuntime {
   private llm: LLMConnector;
   private planner: TaskPlanner;
@@ -73,6 +74,8 @@ export class AgentRuntime {
   private nodeRole: 'desktop' | 'cloud' = 'desktop';
   /** Quarantines prompt-injection attempts in untrusted observations before they reach an LLM. */
   private injectionGuard = new InjectionGuard();
+  /** Task leases: heartbeat/guard/checkpoint (OpenMuse worker.ts port). */
+  private readonly leases = new TaskLeaseManager();
 
   constructor(
     llm: LLMConnector,
@@ -145,7 +148,21 @@ export class AgentRuntime {
     if (subsystems.maxParallelSteps !== undefined) this.maxParallelSteps = subsystems.maxParallelSteps;
   }
 
-  async submitTask(description: string, priority: number = 0): Promise<Task> {
+  async submitTask(description: string, priority: number = 0, idempotencyKey?: string): Promise<Task> {
+    // Generate idempotency key if not provided
+    const key = idempotencyKey ?? TaskStore.generateIdempotencyKey(description);
+    
+    // Check for existing task with same idempotency key
+    if (this.store) {
+      const existing = this.store.getTaskByIdempotencyKey(key);
+      if (existing) {
+        getLogger().info({ taskId: existing.id, idempotencyKey: key }, 'Returning existing task (idempotent)');
+        this.activeTasks.set(existing.id, existing);
+        eventBus.emit('task:created', existing.id);
+        return existing;
+      }
+    }
+
     const task: Task = {
       id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
       description,
@@ -153,12 +170,15 @@ export class AgentRuntime {
       priority,
       createdAt: new Date(),
       resumeNode: this.nodeRole,
+      version: 0,
+      idempotencyKey: key,
     };
 
     this.activeTasks.set(task.id, task);
     this.persist(task);
+    this.logActivity(task.id, 'Task created', task.description);
     eventBus.emit('task:created', task.id);
-    getLogger().info({ taskId: task.id, description }, 'Task submitted');
+    getLogger().info({ taskId: task.id, description, idempotencyKey: key }, 'Task submitted');
 
     this.executeTask(task).catch(err => {
       getLogger().error({ taskId: task.id, err }, 'Task execution failed');
@@ -169,6 +189,17 @@ export class AgentRuntime {
 
   private async executeTask(task: Task): Promise<void> {
     let sessionHeld = false;
+    // Lease/heartbeat: one owner per task; stale leases are resumed from checkpoint.
+    let lease;
+    try {
+      lease = this.leases.acquire(task.id);
+    } catch {
+      getLogger().debug({ taskId: task.id }, 'Task already leased elsewhere — skipping');
+      return;
+    }
+    lease.startHeartbeat(() => {
+      getLogger().warn({ taskId: task.id }, 'Task lease lost — aborting step loop');
+    });
 
     try {
       if (this.metering) {
@@ -186,6 +217,7 @@ export class AgentRuntime {
       // ── Resume path: a previous node already planned (and possibly partially
       //    ran) this task. Continue from the checkpoint instead of re-planning.
       if (task.plan && task.plan.length > 0) {
+        this.logActivity(task.id, 'Task resumed', `Resuming from step ${task.completedStepCount ?? 0}`);
         eventBus.emit('task:started', task.id);
         await this.runPlanSteps(task);
         return;
@@ -195,6 +227,7 @@ export class AgentRuntime {
       task.startedAt = new Date();
       task.resumeNode = this.nodeRole;
       this.persist(task);
+      this.logActivity(task.id, 'Planning started', 'Generating execution plan');
       eventBus.emit('task:started', task.id);
 
       if (!task.consentGranted && this.consent) {
@@ -202,12 +235,14 @@ export class AgentRuntime {
         if (result !== 'granted') {
           task.status = 'failed';
           task.error = 'Consent denied by user';
+          this.logActivity(task.id, 'Consent denied', 'User denied permission to execute task', 'error');
           eventBus.emit('task:failed', task.id, task.error);
           getLogger().warn({ taskId: task.id }, 'Task blocked by consent gate');
           return;
         }
         task.consentGranted = true;
         this.persist(task);
+        this.logActivity(task.id, 'Consent granted', 'User approved task execution', 'success');
       }
 
       if (await this.tryFastEngine(task)) return;
@@ -222,6 +257,7 @@ export class AgentRuntime {
       if (plan.needsClarification) {
         task.status = 'pending';
         this.persist(task);
+        this.logActivity(task.id, 'Clarification needed', plan.clarificationQuestion ?? 'Task needs clarification', 'warning');
         getLogger().info({ taskId: task.id, question: plan.clarificationQuestion }, 'Task needs clarification');
         return;
       }
@@ -231,22 +267,44 @@ export class AgentRuntime {
       task.completedStepCount = 0;
       task.status = 'executing';
       this.persist(task);
+      this.logActivity(task.id, 'Execution started', `Plan has ${plan.steps.length} steps`, 'info');
 
       await this.runPlanSteps(task);
 
     } catch (err: any) {
-      task.status = 'failed';
-      task.error = err.message;
-      getLogger().error({ taskId: task.id, err: err.message }, 'Task execution failed');
-      eventBus.emit('task:failed', task.id, err.message);
+      if (err instanceof LostLeaseError) {
+        // Another worker took over (or heartbeat expired): requeue from the
+        // last checkpoint so resume picks it up instead of failing it.
+        task.status = 'pending';
+        this.persist(task);
+        getLogger().warn({ taskId: task.id }, 'Task lease lost — requeued from checkpoint');
+        eventBus.emit('task:failed', task.id, err.message);
+      } else {
+        task.status = 'failed';
+        task.error = err.message;
+        this.logActivity(task.id, 'Task failed', err.message, 'error');
+        getLogger().error({ taskId: task.id, err: err.message }, 'Task execution failed');
+        eventBus.emit('task:failed', task.id, err.message);
+      }
     } finally {
+      lease.release();
+      this.leases.release(task.id, lease.leaseId);
       if (sessionHeld) this.metering?.closeSession();
       // Persist the terminal state so the durable queue holds an accurate
       // record. Keep failed/cancelled tasks archived so retryTask can resume
       // the plan after a restart — only completed tasks leave the queue (they
       // live on in recall/memory).
-      if (this.isTerminal(task)) this.persist(task);
-      if (task.status === 'completed') this.store?.remove(task.id);
+      if (this.isTerminal(task)) {
+        this.persist(task);
+        if (task.status === 'completed') {
+          this.logActivity(task.id, 'Task completed', task.result?.summary ?? 'Task completed successfully', 'success');
+          this.store?.remove(task.id);
+        } else if (task.status === 'failed') {
+          this.logActivity(task.id, 'Task failed', task.error ?? 'Unknown error', 'error');
+        } else if (task.status === 'cancelled') {
+          this.logActivity(task.id, 'Task cancelled', task.error ?? 'Cancelled by user', 'warning');
+        }
+      }
     }
   }
 
@@ -268,6 +326,8 @@ export class AgentRuntime {
     }
 
     for (let i = start; i < plan.length; i++) {
+      // Lease guard: abort when another worker owns the task now.
+      this.leases.get(task.id)?.guard();
       if (steps.length >= this.maxSteps) {
         getLogger().warn({ taskId: task.id, maxSteps: this.maxSteps }, 'Task step budget exhausted');
         break;
@@ -276,6 +336,7 @@ export class AgentRuntime {
       if (this.consent && (await this.consent.checkEmergencyStop())) {
         task.status = 'cancelled';
         task.error = 'Emergency stop armed';
+        this.logActivity(task.id, 'Emergency stop', 'Task cancelled via emergency stop', 'warning');
         eventBus.emit('task:cancelled', task.id);
         this.persist(task);
         return;
@@ -283,19 +344,31 @@ export class AgentRuntime {
 
       const step = await this.executeStep(task, plan[i], i);
       steps.push(step);
-      task.completedStepCount = i + 1;
+      // Checkpoint on step (lease-guarded + durable persist for resume on boot).
+      const lease = this.leases.get(task.id);
+      if (lease) lease.checkpoint(task, { completedStepCount: i + 1 } as Partial<Task>);
+      else task.completedStepCount = i + 1;
       this.persist(task); // checkpoint after every step
+
+      // Check if task is waiting for input — pause execution
+      if ((task.status as TaskStatus) === 'waiting_input') {
+        this.logActivity(task.id, 'Paused for input', 'Task paused waiting for user input', 'warning');
+        return; // Exit runPlanSteps, will resume when input is submitted
+      }
 
       if (step.error) {
         task.status = 'healing';
         this.persist(task);
+        this.logActivity(task.id, 'Healing', `Step failed: ${step.error}. Attempting recovery...`, 'warning');
         const healed = await this.attemptHealing(task, plan[i]);
         if (!healed) {
           task.status = 'failed';
           task.error = step.error;
+          this.logActivity(task.id, 'Healing failed', `Could not recover from: ${step.error}`, 'error');
           eventBus.emit('task:failed', task.id, step.error);
           return;
         }
+        this.logActivity(task.id, 'Healing succeeded', 'Recovery successful, continuing execution', 'success');
         task.status = 'executing';
       }
     }
@@ -367,6 +440,12 @@ export class AgentRuntime {
         for (let j = 0; j < plan.length; j++) if (results[j]) steps.push(results[j]!);
         task.completedStepCount = executedCount;
         this.persist(task);
+
+        // Check if task is waiting for input — pause execution
+        if ((task.status as TaskStatus) === 'waiting_input') {
+          this.logActivity(task.id, 'Paused for input', 'Task paused waiting for user input', 'warning');
+          return true; // Exit runPlanWaves, will resume when input is submitted
+        }
       }
 
       // Heal failed steps (plan order) before dependent waves start.
@@ -407,7 +486,31 @@ export class AgentRuntime {
   }
 
   private persist(task: Task): void {
-    this.store?.save(task);
+    // Use CAS if task has a version (i.e., it's been loaded from store)
+    if (this.store && task.version !== undefined && task.version > 0) {
+      const updated = this.store.compareAndSwap(task.id, task.version, task);
+      if (updated) {
+        // Update local copy with new version
+        task.version = updated.version;
+        this.activeTasks.set(task.id, task);
+      } else {
+        // Concurrent modification - reload from store
+        getLogger().warn({ taskId: task.id }, 'CAS failed — concurrent modification, reloading');
+        const reloaded = this.store.loadAll().find(t => t.id === task.id);
+        if (reloaded) {
+          this.activeTasks.set(reloaded.id, reloaded);
+          Object.assign(task, reloaded);
+        }
+      }
+    } else {
+      // First save - no version yet
+      this.store?.save(task);
+    }
+  }
+
+  private logActivity(taskId: string, title: string, detail: string, status: 'info' | 'success' | 'warning' | 'error' = 'info'): void {
+    this.store?.logActivity(taskId, title, detail, status);
+    eventBus.emit('task:activity', taskId, { title, detail, status, timestamp: new Date() });
   }
 
   private isTerminal(task: Task): boolean {
@@ -433,6 +536,11 @@ export class AgentRuntime {
         getLogger().warn({ taskId: task.id }, 'Cloud resume skipped — free plan does not include cloud continuation');
         continue;
       }
+      // Resume on boot: skip tasks leased elsewhere, resume stale checkpoints.
+      if (!this.leases.recoverIfStale(task.id)) {
+        getLogger().debug({ taskId: task.id }, 'Resume skipped — task leased by a live worker');
+        continue;
+      }
       task.resumeNode = nodeRole;
       this.activeTasks.set(task.id, task);
       eventBus.emit('task:created', task.id);
@@ -456,6 +564,31 @@ export class AgentRuntime {
       startedAt: new Date(),
       completedAt: new Date(),
     };
+
+    // Check if task is waiting for input — if so, pause execution
+    if ((task.status as TaskStatus) === 'waiting_input') {
+      const pending = this.store?.getPendingInputRequest(task.id);
+      if (pending) {
+        // Wait for input to be provided (polling with timeout)
+        const startWait = Date.now();
+        const maxWaitMs = 5 * 60 * 1000; // 5 minutes max wait
+        while ((task.status as TaskStatus) === 'waiting_input' && Date.now() - startWait < maxWaitMs) {
+          await new Promise(r => setTimeout(r, 1000));
+          // Reload task to check status
+          const reloaded = this.store?.loadAll().find(t => t.id === task.id);
+          if (reloaded) {
+            Object.assign(task, reloaded);
+          }
+        }
+        // After wait, check if input was received
+        if ((task.status as TaskStatus) === 'waiting_input') {
+          step.error = 'Input request timed out';
+          step.completedAt = new Date();
+          return step;
+        }
+        // Input received, continue execution
+      }
+    }
 
     getLogger().info({ taskId: task.id, step: index, action: plannedStep.action }, 'Executing step');
 
@@ -932,6 +1065,13 @@ export class AgentRuntime {
             return { success: r.success, status: r.status, data: r.data, error: r.error };
           }
         : undefined,
+      askUser: async (question: string, options?: string[]) => {
+        if (!this.store) return { paused: false, inputId: '' };
+        const task = this.activeTasks.values().next().value; // Get current task (simplified)
+        if (!task) return { paused: false, inputId: '' };
+        const request = await this.requestInput(task.id, question, options);
+        return { paused: true, inputId: request.id };
+      },
     };
     this.inProcess = new InProcessAgent({ llm: this.llm, tools, timeoutMs, injectionGuard: this.injectionGuard });
     return this.inProcess;
@@ -1386,7 +1526,177 @@ Relevant knowledge: ${contextBlock}` },
     return this.submitTask(desc, priority);
   }
 
+  /**
+   * Attempt to claim a task lease for this worker.
+   * Returns the task if claim succeeded, undefined if another worker owns it.
+   */
+  async workerClaim(taskId: string, workerId: string): Promise<Task | undefined> {
+    if (!this.store) return undefined;
+
+    const task = this.store.loadAll().find(t => t.id === taskId);
+    if (!task) return undefined;
+
+    // Check if task is in a claimable state
+    const claimableStates = ['pending', 'planning', 'executing', 'healing', 'waiting_input', 'paused'];
+    if (!claimableStates.includes(task.status)) {
+      return undefined;
+    }
+
+    // Try to acquire lease via CAS
+    const now = new Date().toISOString();
+    const deadline = new Date(Date.now() + 60000).toISOString(); // 60s lease
+    const updated = this.store.compareAndSwap(taskId, task.version ?? 0, {
+      leaseOwner: workerId,
+      leaseDeadline: deadline,
+      status: task.status === 'pending' ? 'executing' : task.status,
+    });
+
+    if (updated) {
+      this.logActivity(taskId, 'Lease acquired', `Worker ${workerId} claimed task`, 'info');
+      this.activeTasks.set(updated.id, updated);
+      eventBus.emit('task:started', taskId);
+      return updated;
+    }
+    return undefined;
+  }
+
+  /**
+   * Extend the lease deadline for a task this worker owns.
+   * Returns true if extension succeeded, false if lease was lost.
+   */
+  async workerHeartbeat(taskId: string, workerId: string): Promise<boolean> {
+    if (!this.store) return false;
+
+    const task = this.activeTasks.get(taskId) ?? this.store.loadAll().find(t => t.id === taskId);
+    if (!task || task.leaseOwner !== workerId) return false;
+
+    const deadline = new Date(Date.now() + 60000).toISOString(); // 60s lease
+    const updated = this.store.compareAndSwap(taskId, task.version ?? 0, {
+      leaseDeadline: deadline,
+    });
+
+    if (updated) {
+      this.activeTasks.set(updated.id, updated);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Release a task lease (called on completion/failure/cancellation).
+   */
+  async workerRelease(taskId: string, workerId: string): Promise<void> {
+    if (!this.store) return;
+
+    const task = this.activeTasks.get(taskId) ?? this.store.loadAll().find(t => t.id === taskId);
+    if (!task || task.leaseOwner !== workerId) return;
+
+    const updated = this.store.compareAndSwap(taskId, task.version ?? 0, {
+      leaseOwner: undefined,
+      leaseDeadline: undefined,
+    });
+
+    if (updated) {
+      this.activeTasks.set(updated.id, updated);
+    }
+  }
+
+  /**
+   * On startup, find tasks with expired leases and reclaim them for this worker.
+   * Returns the number of tasks reclaimed.
+   */
+  async workerRecover(workerId: string): Promise<number> {
+    if (!this.store) return 0;
+
+    const now = new Date();
+    let reclaimed = 0;
+
+    for (const task of this.store.loadUnfinished()) {
+      if (!task.leaseDeadline) continue;
+      const deadline = new Date(task.leaseDeadline);
+      if (deadline <= now) {
+        // Lease expired — try to reclaim
+        const reclaimedTask = await this.workerClaim(task.id, workerId);
+        if (reclaimedTask) {
+          reclaimed++;
+          getLogger().info({ taskId: task.id, workerId }, 'Reclaimed task with expired lease');
+        }
+      }
+    }
+
+    if (reclaimed > 0) {
+      getLogger().info({ reclaimed, workerId }, 'Worker recovery complete');
+    }
+    return reclaimed;
+  }
+
   getTask(taskId: string): Task | undefined {
     return this.activeTasks.get(taskId);
+  }
+
+  getTaskActivity(taskId: string): ActivityEntry[] {
+    return this.store?.getActivity(taskId) ?? [];
+  }
+
+  // Action proposal review flow (delegates to ConsentGate)
+  async proposeAction(taskId: string, action: string, args: Record<string, unknown>): Promise<ActionProposal> {
+    if (!this.consent) throw new Error('ConsentGate not configured');
+    return this.consent.proposeAction(taskId, action, args);
+  }
+
+  async reviewAction(proposalId: string, approved: boolean, hash: string): Promise<{ success: boolean; proposal?: ActionProposal; error?: string }> {
+    if (!this.consent) throw new Error('ConsentGate not configured');
+    return this.consent.reviewAction(proposalId, { approved, hash });
+  }
+
+  async getProposal(proposalId: string): Promise<ActionProposal | undefined> {
+    if (!this.consent) throw new Error('ConsentGate not configured');
+    return this.consent.getProposal(proposalId);
+  }
+
+  async listProposals(taskId: string): Promise<ActionProposal[]> {
+    if (!this.consent) throw new Error('ConsentGate not configured');
+    return this.consent.listProposals(taskId);
+  }
+
+  // waiting_input pause/resume
+  async requestInput(taskId: string, question: string, options?: string[]): Promise<InputRequest> {
+    if (!this.store) throw new Error('TaskStore not configured');
+    const task = this.activeTasks.get(taskId) ?? this.store.loadAll().find(t => t.id === taskId);
+    if (!task) throw new Error('Task not found');
+
+    // Set task status to waiting_input
+    task.status = 'waiting_input';
+    this.persist(task);
+    this.logActivity(taskId, 'Input requested', question, 'warning');
+
+    const request = this.store.createInputRequest(taskId, question, options);
+    eventBus.emit('task:input_requested', taskId, { question, options, inputId: request.id });
+    return request;
+  }
+
+  async submitInput(taskId: string, inputId: string, answer: string): Promise<{ success: boolean; task?: Task; error?: string }> {
+    if (!this.store) throw new Error('TaskStore not configured');
+
+    const answered = this.store.answerInputRequest(taskId, inputId, answer);
+    if (!answered) {
+      return { success: false, error: 'Input request not found' };
+    }
+
+    // Check if all input requests for this task are answered
+    const pending = this.store.getPendingInputRequest(taskId);
+    const task = this.activeTasks.get(taskId) ?? this.store.loadAll().find(t => t.id === taskId);
+    if (!task) return { success: false, error: 'Task not found' };
+
+    if (!pending) {
+      // All inputs answered — resume execution
+      task.status = 'executing';
+      this.persist(task);
+      this.logActivity(taskId, 'Input received', `Resuming execution with answer: ${answer}`, 'info');
+      eventBus.emit('task:input_received', taskId, { inputId, answer });
+      // Note: The actual resumption of execution happens in the main loop
+    }
+
+    return { success: true, task };
   }
 }

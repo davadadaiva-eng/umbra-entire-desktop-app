@@ -1,10 +1,13 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import type { SignedUrl } from '../../mobile/SignedUrl';
 
 const MAX_FILE_SIZE = 1024 * 1024;
 
 export class WorkspaceFiles {
   private root: string;
+  /** Optional 15m signed-URL guard for file reads/writes (OpenMuse auth.ts port). */
+  private signer: SignedUrl | null = null;
 
   constructor(root: string) {
     this.root = path.resolve(root);
@@ -12,6 +15,17 @@ export class WorkspaceFiles {
 
   getRoot(): string {
     return this.root;
+  }
+
+  /** Require signed URLs for the *_signed helpers below. Null = open (legacy). */
+  setSigner(signer: SignedUrl | null): void {
+    this.signer = signer;
+  }
+
+  /** Verify a signed file URL string and return its owner. Throws when invalid. */
+  verifyFileUrl(signedUrl: string): string {
+    if (!this.signer) return 'local';
+    return this.signer.verify(new URL(signedUrl, 'http://localhost'));
   }
 
   resolve(relPath: string): string {
@@ -44,5 +58,17 @@ export class WorkspaceFiles {
     const abs = this.resolve(relPath);
     const entries = await fs.readdir(abs, { withFileTypes: true });
     return entries.map(e => (e.isDirectory() ? `${e.name}/` : e.name));
+  }
+
+  /** Signed read: verify the 15m HMAC URL before touching disk. */
+  async readSigned(relPath: string, signedUrl: string): Promise<string> {
+    this.verifyFileUrl(signedUrl);
+    return this.read(relPath);
+  }
+
+  /** Signed write: verify the 15m HMAC URL before touching disk. */
+  async writeSigned(relPath: string, content: string, signedUrl: string): Promise<{ path: string; bytes: number }> {
+    this.verifyFileUrl(signedUrl);
+    return this.write(relPath, content);
   }
 }

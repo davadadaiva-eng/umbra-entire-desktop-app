@@ -35,6 +35,8 @@ export interface InProcessAgentTools {
   connectorExecute?: (connectorId: string, endpoint: string, method: string, payload: Record<string, unknown>) => Promise<{ success: boolean; status: number; data: unknown; error?: string }>;
   /** Discover relevant connectors for a user query. */
   connectorDiscover?: (query: string, limit?: number) => Promise<Array<{ name: string; connectorId: string; description: string; authType: string }>>;
+  /** Request user input mid-execution (pauses task). */
+  askUser?: (question: string, options?: string[]) => Promise<{ paused: boolean; inputId: string }>;
 }
 
 export interface InProcessAgentOptions {
@@ -104,6 +106,7 @@ export function buildSystemPrompt(tools: InProcessAgentTools): string {
     repoRun: 'repoRun: run a shell command inside the workspace. Input: {command, cwd?}',
     connectorDiscover: 'connectorDiscover: find available connectors for a task. Input: {query, limit?} — returns matching connectors with their IDs. Use this FIRST to find the right connector before executing.',
     connectorExecute: 'connectorExecute: execute an API call on a connected service (Gmail, Spotify, Stripe, Discord, etc). Input: {connectorId, endpoint, method, payload} — method is GET|POST|PUT|DELETE. The connectorId comes from connectorDiscover or from the catalog (e.g. "gmail", "spotify", "stripe").',
+    askUser: 'askUser: pause execution and ask the user a question. Input: {question, options?} — returns {paused: true, inputId} when the task is paused waiting for user response. Use when you need clarification or approval mid-task.',
   };
   const available = names.map(n => toolDocs[n] ?? `${n}: available tool`).join('\n');
   return `You are Umbra, an autonomous agent. Complete the user's task by choosing actions yourself.
@@ -266,6 +269,14 @@ export class InProcessAgent {
           const r = await tools.connectorExecute(connectorId, endpoint, method, payload);
           if (r.success) return `OK (${r.status}): ${typeof r.data === 'string' ? r.data : JSON.stringify(r.data).slice(0, 3000)}`;
           return `ERROR (${r.status}): ${r.error || 'execution failed'}`;
+        }
+        case 'askUser': {
+          if (!tools.askUser) return `Tool unavailable: ${action}`;
+          const question = String(input.question || '');
+          const options = Array.isArray(input.options) ? input.options.map(String) : undefined;
+          if (!question) return 'askUser requires action_input.question';
+          const result = await tools.askUser(question, options);
+          return JSON.stringify(result);
         }
         default:
           return `Unknown action: ${action}`;

@@ -1,0 +1,417 @@
+# Umbra OS
+
+> Invisible AI computer assistant for Windows. Local-first Node.js/TypeScript backend with a React + Electron desktop client. Controls a real or virtual Windows desktop via CDP, runs an LLM agent loop (plan → act → observe → verify), and exposes a REST + WebSocket API on port 8787.
+
+## Core Documentation
+
+- [README.md](/README.md) — Project overview, quick start, project structure
+- [Backend README](backend/README.md) — Detailed architecture, ports, scripts, docs
+- [Desktop README](desktop/README.md) — Desktop app setup, features, important file notes
+- [UI Contract](backend/docs/ui-contract.md) — REST API + WebSocket contract for the read-only UI
+- [Cloud Setup](backend/docs/cloud-setup.md) — Zero-cost cloud provisioning with Hetzner + Stripe
+- [Cloud Deployment](backend/docs/cloud-deploy.md) — Headless mode, device mesh, billing, connectors
+- [Virtual Display](backend/docs/virtual-display.md) — IDDCX kernel driver for virtual monitors
+- [Voicebox Setup](backend/docs/voicebox-setup.md) — Local cloned-voice TTS setup guide
+
+## Architecture
+
+```
+umbra-os/
+├── backend/          # Node.js/TypeScript backend (API server, AI, voice, P2P, MCP, etc.)
+│   ├── src/
+│   │   ├── index.ts        # UmbraOS composition root
+│   │   ├── api/            # REST + WebSocket API (port 8787)
+│   │   ├── core/           # Agent, browser, voice, memory, vault, privacy, audio...
+│   │   ├── native/         # Windows native modules (input, screen capture, HWID)
+│   │   ├── knowledge/      # Knowledge graph, journal, recall
+│   │   ├── mobile/         # PWA server, preview streamer
+│   │   ├── overlay/        # Command HUD, global hotkeys
+│   │   ├── p2p/            # Mesh, pairing, WebRTC
+│   │   └── config/         # ConfigManager + config schema
+│   └── mesh/               # Rust P2P core (zero-knowledge, encrypted)
+├── desktop/            # React 19 + Vite 8 + Electron 43 desktop app
+└── package.json        # Root workspace scripts
+```
+
+## Key Features
+
+- **AI Agent Loop** — Submit tasks via `POST /api/task`; the agent plans (LLM), acts on Desktop 2 via CDP, observes (DOM snapshot + screenshot), verifies (VLM), and self-heals on failure.
+- **Screen Reading & Recall** — OCR of the active screen via Tesseract, activity sessions, privacy-filtered before storage into a vector memory.
+- **Knowledge Brain** — Recall events bridged into a knowledge graph every 15 minutes; hourly auto-journaling + topic indexing.
+- **Virtual Desktop Infrastructure** — Dedicated Windows virtual desktop for the agent; optional Docker worker containers with resource limits.
+- **Consent Gate** — Session-grant for input actions; `~/.umbra/emergency-stop` file aborts tasks and blocks all actions.
+- **Voice Stack** — Local STT/TTS/ASR via VibeVoice, whisper.cpp, Piper TTS, Voicebox; push-to-talk hotkey, meeting transcription with speaker diatomization.
+- **Meeting Companion** — Attend meetings end-to-end: agenda planning, live digest, action items, mute/raise-hand/share controls.
+- **MCP Registry** — Model Context Protocol dispatch for 1000+ connectors over HTTP, native bindings, or prompts; vault-backed credentials.
+- **P2P Mesh & Device Pairing** — Encrypted Rust mesh daemon + WebSocket device hub; QR-code pairing, WebRTC streaming, bundled PWA for phone control.
+- **Skill Stack & Context Compression** — 20 domains × 5 skills (100 skills); Graphify/Caveman pipeline compresses ~10K tokens → ~300.
+- **Metering & Prompt Caching** — Every LLM call gated behind plan tier, circuit breaker, token accounting; prompt caching to cut repeat costs.
+- **Billing & Cloud Provisioning** — Stripe checkout + webhook auto-activates Pro/Ultimate plans; Hetzner VPS provisioned on payment, destroyed on cancel.
+- **Telco (SMS & Calls)** — Send SMS or initiate voice calls via Telnyx from the REST API.
+
+## Tech Stack
+
+- **Runtime**: Node.js, TypeScript (CommonJS)
+- **API**: Native `http` module, REST + WebSocket (`/api/ws`), JSON-RPC (`/mcp`)
+- **Validation**: Zod
+- **LLM**: Ollama (local default), OpenAI, Anthropic, OpenRouter (cloud)
+- **Database**: SQLite (`better-sqlite3`), `sql.js`, vector search (`sqlite-vec`)
+- **Auth**: Supabase (web app), CredentialVault (AES-256-GCM, HWID+DPAPI bound)
+- **Desktop**: React 19, Vite 8, Electron 43, Tailwind CSS, Zustand
+- **P2P**: WebRTC, Rust mesh daemon (MeshBridge)
+- **Voice**: VibeVoice, whisper.cpp, Piper TTS, Voicebox, faster-whisper
+- **Testing**: Jest (backend, 562 tests / 62 suites), Vitest (desktop)
+- **Lint**: oxlint
+- **Container**: Docker + docker compose (cloud deployment, whisper STT)
+- **Cloud**: Hetzner VPS provisioning, Caddy (TLS), coturn (TURN relay)
+- **Billing**: Stripe
+- **Telco**: Telnyx
+- **Mesh**: Rust (Cargo workspace), zero-knowledge identity
+
+## API Endpoints
+
+Base URL: `http://127.0.0.1:8787` (bound to loopback only by default). CORS: `*` on every response.
+
+### Status & Health
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/api/health` | Liveness: `{ ok: true, uptimeMs }` |
+| GET | `/api/status` | Full snapshot: consent, desktop2, agent, swarm, models, memory, vault |
+
+### Tasks
+| Method | Path | Body | Description |
+| --- | --- | --- | --- |
+| POST | `/api/task` | `{ description, priority?, idempotencyKey? }` | Submit a task → `{ taskId }` |
+| GET | `/api/task/:id` | — | Full task incl. status, steps, result |
+| GET | `/api/tasks` | — | Active tasks |
+| POST | `/api/agent/delegate` | `{ description, provider?, model?, timeoutMs? }` | Delegate a task to Hermes |
+| GET | `/api/task-queue/export` | — | Export task queue JSON |
+| POST | `/api/task-queue/import` | `{ files? }` | Import + resume task queue |
+| POST | `/api/shutdown` | — | Graceful shutdown |
+
+### Desktop 2 Control (consent-gated)
+| Method | Path | Body | Description |
+| --- | --- | --- | --- |
+| POST | `/api/desktop2/action` | `{ action, params? }` | Execute a Desktop 2 action |
+| POST | `/api/ghost/action` | `{ action, params? }` | Execute a ghost (real desktop) action |
+| GET | `/api/ghost/capture` | — | Capture a screenshot from Desktop 2 |
+| GET | `/api/screen/state` | — | Current screen state |
+| GET | `/api/screen/live` | — | Live screen frame |
+| POST | `/api/screen/watch` | `{ enabled }` | Start/stop screen watching |
+| POST | `/api/screen/ask` | `{ question, intent? }` | Ask about the screen |
+
+### Consent & Emergency Stop
+| Method | Path | Body | Description |
+| --- | --- | --- | --- |
+| GET | `/api/consent` | — | Consent + emergency-stop state |
+| POST | `/api/consent` | `{ action: "request", reason }` | Request consent (y/n prompt) |
+| POST | `/api/consent` | `{ action: "arm" }` | Arm emergency stop |
+| POST | `/api/consent` | `{ action: "disarm" }` | Disarm emergency stop |
+
+### Knowledge & Memory
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/api/knowledge/search?q=` | Knowledge graph search |
+| GET | `/api/memory/recall?q=` | Vector memory recall |
+| POST | `/api/memory/remember` | `{ text }` | Store text in memory |
+| GET | `/api/macros` | Detected macros |
+| GET | `/api/sessions` | Activity sessions |
+| GET | `/api/privacy/stats` | Privacy stats |
+| GET | `/api/activity/summary` | Recall activity summary |
+| GET | `/api/swarm` | Swarm status |
+| GET | `/api/vault/stats` | Audit vault stats |
+| GET | `/api/repos` | Repository list |
+| POST | `/api/journal/generate` | Force journal generation |
+
+### Worker Management (actions requiring review)
+| Method | Path | Body | Description |
+| --- | --- | --- | --- |
+| POST | `/api/actions/propose` | `{ taskId, action, args }` | Propose an action for review |
+| POST | `/api/actions/review` | `{ proposalId, approved, hash }` | Review a proposal |
+| GET | `/api/actions/proposal/:id` | — | Get a proposal |
+| GET | `/api/task/:id/proposals` | — | List proposals for a task |
+| POST | `/api/task/:id/input` | `{ question, options? }` | Request input from user |
+| POST | `/api/input/:inputId/answer` | `{ taskId, answer }` | Submit input answer |
+
+### Worker Leasing (distributed execution)
+| Method | Path | Body | Description |
+| --- | --- | --- | --- |
+| POST | `/api/worker/claim` | `{ taskId, workerId }` | Claim a task lease |
+| POST | `/api/worker/heartbeat` | `{ taskId, workerId }` | Heartbeat |
+| POST | `/api/worker/release` | `{ taskId, workerId }` | Release lease |
+| POST | `/api/worker/recover` | `{ workerId }` | Recover orphaned leases |
+
+### MCP & Connector Marketplace
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/api/mcp/catalog?q=&category=&enabled=&limit=&offset=` | MCP connector catalog |
+| GET | `/api/mcp/connectors` | Enabled connectors |
+| POST | `/api/mcp/connect` | `{ id, baseUrl?, apiKey?, enabled? }` | Connect MCP connector |
+| POST | `/api/mcp/disconnect` | `{ id }` | Disconnect MCP connector |
+| POST | `/api/mcp/import-registry` | `{ maxPerSource? }` | Sync external registry |
+| POST | `/api/mcp/sync` | `{ maxPerSource? }` | Sync external connectors |
+| POST | `/mcp` | JSON-RPC | MCP JSON-RPC endpoint |
+| GET | `/api/mcp/oauth/callback?code=&state=` | OAuth callback |
+| GET | `/api/mcp/oauth/status?id=` | OAuth status |
+| POST | `/api/mcp/oauth/start` | `{ id, redirectUri? }` | Start OAuth |
+| POST | `/api/mcp/oauth/refresh` | `{ id }` | Refresh OAuth token |
+| GET | `/api/connectors` | List connectors |
+| GET | `/api/connectors/categories` | Connector categories |
+| GET | `/api/connectors/search?q=` | Search connectors |
+| GET | `/api/connectors/:id` | Get connector |
+| POST | `/api/connectors/:id/connect` | `{ apiKey?, redirectUri? }` | Connect |
+| GET | `/api/connectors/:id/status` | Connection status |
+| POST | `/api/connectors/:id/disconnect` | Disconnect |
+| POST | `/api/connectors/execute` | `{ connectorId, endpoint, method, payload?, userId? }` | Execute action |
+| POST | `/api/connectors/tools` | `{ query, limit? }` | Relevant tools for query |
+| POST | `/api/connectors/sync` | Sync catalog |
+| POST | `/api/connectors/credential` | `{ slug, clientId, clientSecret, scopes }` | Save dev credentials |
+
+### LLM & Plan
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/api/llm/models` | Model status |
+| GET | `/api/plan/usage?tenant=` | Plan usage |
+| POST | `/api/llm/test` | Test LLM |
+| GET | `/api/config/provider` | Provider config |
+| POST | `/api/plan/activate` | `{ tier, tenant? }` | Activate plan |
+
+### Billing & Tenants
+| Method | Path | Body | Description |
+| --- | --- | --- | --- |
+| GET | `/api/billing/checkout?tier=&tenant?` | — | Stripe checkout session |
+| POST | `/api/billing/webhook` | raw body | Stripe webhook |
+| POST | `/api/stripe-webhook` | raw body | Stripe JIT webhook |
+| GET | `/api/tenants` | — | List tenants |
+| POST | `/api/tenants/register` | `{ id, name?, tier? }` | Register tenant |
+| POST | `/api/tenants/activate` | `{ id, tier }` | Activate tenant plan |
+| POST | `/api/tenants/disable` | `{ id }` | Disable tenant |
+
+### Auth (Web App)
+| Method | Path | Body | Description |
+| --- | --- | --- | --- |
+| POST | `/api/auth/signup` | `{ email, password, name }` | Create account |
+| POST | `/api/auth/login` | `{ email, password }` | Login |
+| POST | `/api/auth/login-key` | `{ apiKey }` | Login with API key |
+| GET | `/api/auth/me?key=` | — | Get user info |
+| GET | `/api/auth/devices?key=` | — | List paired devices |
+| POST | `/api/auth/devices/pair` | `{ apiKey, name, type }` | Pair device |
+| DELETE | `/api/auth/devices/:id?key=` | — | Remove device |
+| GET | `/api/auth/plan?key=` | — | Get plan info |
+
+### Voice & Audio
+| Method | Path | Body | Description |
+| --- | --- | --- | --- |
+| GET | `/api/voice/status` | — | Voice status |
+| GET | `/api/voice/health?refresh=1` | — | Voice stack health |
+| GET | `/api/voice/tts/voices` | — | List TTS voices |
+| POST | `/api/voice/speak` | `{ text, voice?, language?, provider?, engine? }` | Speak text |
+| POST | `/api/voice/transcribe` | `{ audio, format?, language? }` | Transcribe audio |
+| POST | `/api/voice/command` | `{ audio, format?, language?, target? }` | Voice command → task |
+| GET | `/api/audio/devices` | — | List audio devices |
+| POST | `/api/audio/set-default` | `{ flow?, deviceId }` | Set default device |
+| POST | `/api/audio/loopback/start` | `{ seconds? }` | Start loopback recording |
+| POST | `/api/audio/loopback/stop` | `{ id }` | Stop recording |
+| GET | `/api/audio/recordings` | — | List recordings |
+
+### Meetings & Meeting Bot
+| Method | Path | Body | Description |
+| --- | --- | --- | --- |
+| POST | `/api/meeting/join` | `{ url, title?, topics? }` | Join a meeting |
+| POST | `/api/meeting/listen` | — | Start listening |
+| GET | `/api/meeting/status` | — | Meeting status |
+| POST | `/api/meeting/leave` | — | Leave meeting |
+| POST | `/api/meeting/execute` | `{ action, params? }` | Meeting action |
+| POST | `/api/meeting/audio` | `{ audio, format? }` | Feed audio to meeting |
+| POST | `/api/meeting/share?target=` | — | Share screen |
+| POST | `/api/meeting/stop-share` | — | Stop sharing |
+| GET | `/api/meeting/orders` | — | Pending orders |
+| POST | `/api/meeting/speak` | `{ text, voice?, language? }` | Speak in meeting |
+| POST | `/api/meeting/mute` | `{ muted }` | Mute/unmute |
+| POST | `/api/meeting/raise-hand` | `{ raised }` | Raise/lower hand |
+| POST | `/api/meeting/chat` | `{ message }` | Send chat |
+| POST | `/api/meeting-bot/join` | `{ meeting_url, platform, bot_name? }` | Join via bot |
+| POST | `/api/meeting-bot/leave` | — | Bot leave |
+| GET | `/api/meeting-bot/status` | — | Bot status |
+| GET | `/api/meeting-bot/transcript` | — | Bot transcript |
+| POST | `/api/meeting-bot/command` | `{ command, args? }` | Bot command |
+| GET | `/api/meetings` | — | List meetings |
+| GET | `/api/meetings/:id` | — | Get meeting |
+
+### Smart Home (SmartThings)
+| Method | Path | Body | Description |
+| --- | --- | --- | --- |
+| GET | `/api/smart/status` | — | SmartThings status |
+| POST | `/api/smart/token` | `{ token }` | Save PAT |
+| DELETE | `/api/smart/token` | — | Clear PAT |
+| GET | `/api/smart/devices` | — | List devices |
+| POST | `/api/smart/command` | `{ deviceId, command }` | Control device |
+| POST | `/api/smart/control` | `{ name, command }` | Control by name |
+| GET | `/api/smart/schedules` | — | List schedules |
+| POST | `/api/smart/schedules` | `{ deviceId, deviceName, command, kind, ... }` | Add schedule |
+| POST | `/api/smart/schedules/cancel` | `{ id }` | Cancel schedule |
+
+### Vault (Credential Store)
+| Method | Path | Body | Description |
+| --- | --- | --- | --- |
+| GET | `/api/vault/entries` | — | List entries |
+| POST | `/api/vault/entry` | `{ service, username?, secret, id? }` | Add entry |
+| DELETE | `/api/vault/entry/:id` | — | Delete entry |
+
+### Devices & Mesh (P2P)
+| Method | Path | Body | Description |
+| --- | --- | --- | --- |
+| GET | `/api/devices` | — | List paired devices |
+| POST | `/api/devices/invite` | `{ name }` | Create invite |
+| POST | `/api/devices/join` | `{ code, name, role?, capabilities? }` | Join device mesh |
+| POST | `/api/devices/revoke` | `{ deviceId }` | Revoke device |
+| POST | `/api/devices/send` | `{ deviceId, msg }` | Send message to device |
+| GET | `/api/mesh/status` | — | Mesh status |
+| POST | `/api/mesh/pair` | `{ ttl? }` | Pair mesh |
+| POST | `/api/mesh/pair-demo` | — | Demo pairing |
+| POST | `/api/mesh/revoke` | `{ deviceId }` | Revoke mesh device |
+
+### Docker Workers
+| Method | Path | Body | Description |
+| --- | --- | --- | --- |
+| GET | `/api/docker/list` | — | List worker containers |
+| POST | `/api/docker/run` | `{ name, image, command?, env?, memoryLimitMb?, cpuQuotaPct? }` | Run container |
+| POST | `/api/docker/stop` | `{ name }` | Stop container |
+| POST | `/api/docker/remove` | `{ name }` | Remove container |
+
+### Media & Integration
+| Method | Path | Body | Description |
+| --- | --- | --- | --- |
+| GET | `/api/openmontage/tools` | — | OpenMontage tools |
+| POST | `/api/image/generate` | `{ prompt, width?, height?, steps? }` | Generate image |
+| POST | `/api/social/post` | `{ platform, action, email, password, ... }` | Post immediately |
+| POST | `/api/social/schedule` | `{ platform, scheduledAt, ... }` | Schedule post |
+| GET | `/api/social/schedule` | — | List scheduled |
+| POST | `/api/social/cancel` | `{ id }` | Cancel scheduled |
+| GET | `/api/social/status` | — | Social automation status |
+| POST | `/api/carrusel/start` | — | Start Carrusel server |
+| POST | `/api/carrusel/stop` | — | Stop Carrusel server |
+| GET | `/api/carrusel/status` | — | Carrusel status |
+| POST | `/api/carrusel/create` | `{ name, aspectRatio? }` | Create carousel |
+| GET | `/api/carrusel/list` | — | List carousels |
+| GET | `/api/carrusel/:id` | — | Get carousel |
+| POST | `/api/carrusel/:id/slides` | `{ html, note? }` | Add slide |
+| POST | `/api/carrusel/chat` | `{ message, carouselId? }` | Chat about carousel |
+| POST | `/api/carrusel/:id/export` | — | Export as PNG ZIP |
+| DELETE | `/api/carrusel/:id` | — | Delete carousel |
+| GET | `/api/carrusel/brand` | — | Get brand config |
+| POST | `/api/carrusel/:id/duplicate` | — | Duplicate carousel |
+| POST | `/api/twenty/start` | — | Start Twenty CRM stack |
+| POST | `/api/twenty/stop` | — | Stop Twenty CRM stack |
+| GET | `/api/twenty/status` | — | Twenty CRM status |
+| POST | `/api/twenty/graphql` | `{ query, variables? }` | Run GraphQL query |
+
+### WebSocket API
+- `ws://127.0.0.1:8787/api/ws` — Subscribe to status snapshots and live events (task lifecycle, swarm, recall, audio, overlay, etc.)
+- `ws://127.0.0.1:9090` — Live preview stream of Desktop 2 (frames + commands, consent-gated)
+
+## Configuration
+
+Configuration lives in `~/.umbra/config.json` (created on first boot with defaults). Key sections:
+
+| Section | Description |
+| --- | --- |
+| `provider` | LLM provider: `ollama` \| `openai` \| `anthropic` \| `openai-compatible` |
+| `models` | Model slots: `provider`, `reasoning`, `vision`, `fast`, `embedding?` |
+| `paths` | Data dir, knowledge dir, recall DB, vault dir, logs dir |
+| `plan` | `tier` (free/pro/ultimate), token budgets, routing config |
+| `workspace` | Max virtual displays, dimensions, FPS, CPU/GPU limits |
+| `p2p` | Web/signaling ports, STUN/TURN servers, mesh daemon toggle |
+| `devices` | Device hub port, remote hub URL, device name and role |
+| `mcp` | MCP registry toggles, connector configs, OAuth clients |
+| `voice` | STT/TTS/ASR provider settings (VibeVoice, whisper, Piper, Voicebox) |
+| `meeting` | Meeting STT/TTS, loopback, audio cable, native app control |
+| `billing` | Stripe keys, webhook secret, price IDs (git-ignored) |
+| `cloud` | Hetzner API token, SSH key, VPS image, public URL |
+| `telco` | Telnyx provider, from-number, messaging profile |
+| `docker` | Docker socket path, default CPU/memory limits |
+| `image` | Image generation provider (HuggingFace/Replicate) |
+| `graphify` | Context compression settings (max tokens, chunk size, summary tokens) |
+| `compiler` | Skill compilation backend (node/tcc/clang) |
+| `shadow` | Live shadow recording (DXGI/GDI, FPS) |
+| `hermes` | External agent engine config (binary path, timeout, auto-delegate) |
+| `smartthings` | Samsung SmartThings PAT and API URL |
+| `hotkeys` | Overlay, pause, toggle-preview key combos |
+| `hotkeys` | Overlay, pause, toggle-preview key combos |
+| `realDesktop` | Chrome path, CDP port, window dimensions for real desktop control |
+| `audio` | Audio enabled, gesture cooldown |
+| `logging` | Log level, pretty-print |
+| `repos` | Repository configs for the GitHub issue watcher |
+| `github` | GitHub watcher: repos, poll interval, labels, consent |
+
+### Environment Variables
+| Variable | Description |
+| --- | --- |
+| `UMBRA_ROLE` | `desktop` (default) or `cloud` — cloud disables Windows-native subsystems |
+| `UMBRA_HEADLESS` | `1` — disables screen reader, preview streamer, HUD, P2P/PWA |
+| `UMBRA_BIND_HOST` / `UMBRA_HOST` | Override API bind address (default `127.0.0.1`) |
+| `UMBRA_LLM_PROVIDER` | Boot override for LLM provider (`ollama`/`openai`/`anthropic`/`openai-compatible`/`none`) |
+| `UMBRA_CONSENT_AUTOGRANT` | `1` — skip all consent prompts |
+| `UMBRA_SMARTTHINGS_TOKEN` | SmartThings PAT |
+| `UMBRA_STRIPE_SECRET_KEY` | Stripe secret key |
+| `UMBRA_STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret |
+| `UMBRA_PUBLIC_URL` | Public base URL for QR/join links |
+| `HERMES_BIN` | Path to Hermes CLI binary |
+| `HERMES_HOME` | Hermes home directory |
+| `HERMES_ACCEPT_HOOKS` | Accept hooks from Hermes |
+| `OPENROUTER_API_KEY` | OpenRouter API key |
+
+## Ports (all loopback by default)
+
+| Port | Service |
+| --- | --- |
+| 8787 | REST API + event WebSocket (`/api/ws`) |
+| 8788 | DeviceHub WebSocket (device mesh) |
+| 9090 | Live preview stream of Desktop 2 |
+| 9222 | Edge/Chrome CDP (Desktop 2 browser) |
+| 9224 | Real Chrome CDP (human desktop) |
+
+## Contributing
+
+1. Read [llms-full.txt](llms-full.txt) — full project documentation
+2. Clone the repo and install:
+   ```bash
+   cd backend && npm install
+   cd ../desktop && npm install
+   ```
+3. Run in development:
+   ```bash
+   cd .. && npm run dev
+   ```
+4. Run linting:
+   ```bash
+   npm run lint
+   ```
+5. Run tests:
+   ```bash
+   npm test              # backend Jest (562 tests / 62 suites)
+   cd desktop && npm run test   # desktop Vitest
+   ```
+6. Build for production:
+   ```bash
+   npm run build
+   ```
+
+## Running Locally
+
+- **Backend dev mode**: `cd backend && npm run dev` (ts-node, port 8787)
+- **Backend production**: `cd backend && npm run build && npm start`
+- **Desktop dev**: `cd desktop && npm run desktop` (Vite + Electron)
+- **Desktop production**: `cd desktop && npm run build && npm run desktop:pack`
+- **Docker (cloud)**: `docker compose up -d`
+- **Docker (cloud + edge)**: `UMBRA_DOMAIN=umbra.example.com docker compose --profile edge up -d`
+
+## Links
+
+- GitHub: `https://github.com/umbra-os/umbra-os`
+- License: MIT (see LICENSE file)
+- Desktop README: [desktop/README.md](desktop/README.md)
+- Backend README: [backend/README.md](backend/README.md)
+- AGENTS.md: [AGENTS.md](AGENTS.md)
+- robots.txt: [robots.txt](robots.txt)
+- ai.txt: [.well-known/ai.txt](.well-known/ai.txt)

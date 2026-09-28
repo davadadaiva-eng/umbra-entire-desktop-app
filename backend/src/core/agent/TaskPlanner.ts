@@ -3,6 +3,7 @@ import { LLMConnector, LLMMessage } from './LLMConnector';
 import { VectorMemory } from '../memory/VectorMemory';
 import { getLogger } from '../Logger';
 import { normalizePlanSteps } from './planDag';
+import { createHash } from 'crypto';
 
 export interface PlannedStep {
   /** Stable id other steps can reference in dependsOn (defaults to `step-<n>`). */
@@ -34,6 +35,8 @@ export interface TaskPlan {
   needsClarification: boolean;
   clarificationQuestion?: string;
   estimatedTimeMs: number;
+  /** SHA-256 hash of description + context for idempotent task creation. */
+  idempotencyKey?: string;
 }
 
 export class TaskPlanner {
@@ -45,6 +48,12 @@ export class TaskPlanner {
     this.knowledge = knowledge;
     this.llm = llm;
     this.memory = memory;
+  }
+
+  /** Generate SHA-256 idempotency key from task description and optional context. */
+  static generateIdempotencyKey(description: string, context?: string): string {
+    const payload = JSON.stringify({ description, context });
+    return createHash('sha256').update(payload).digest('hex');
   }
 
   /** Attach persistent session memory so the planner recalls past tasks. */
@@ -148,6 +157,7 @@ Respond with a JSON object:
         needsClarification: parsed.needsClarification || false,
         clarificationQuestion: parsed.clarificationQuestion,
         estimatedTimeMs: parsed.estimatedTimeMs || 30000,
+        idempotencyKey: TaskPlanner.generateIdempotencyKey(description, context),
       };
     } catch {
       return {
@@ -158,6 +168,7 @@ Respond with a JSON object:
         needsClarification: true,
         clarificationQuestion: `I couldn't plan "${description}" precisely. Can you provide more detail?`,
         estimatedTimeMs: 10000,
+        idempotencyKey: TaskPlanner.generateIdempotencyKey(description, context),
       };
     }
   }
@@ -173,7 +184,12 @@ Respond with a JSON object:
     const result = await this.llm.complete(messages, 'reasoning', { temperature: 0.3 });
     try {
       const refined = JSON.parse(this.extractJSON(result.content));
-      return { ...plan, steps: refined.steps || plan.steps, confidence: refined.confidence || plan.confidence };
+      return { 
+        ...plan, 
+        steps: refined.steps || plan.steps, 
+        confidence: refined.confidence || plan.confidence,
+        idempotencyKey: plan.idempotencyKey || TaskPlanner.generateIdempotencyKey(plan.description),
+      };
     } catch {
       return plan;
     }

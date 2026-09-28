@@ -84,16 +84,44 @@ export function LoginScreen() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: false, preserveDrawingBuffer: true });
-    renderer.setPixelRatio(window.devicePixelRatio);
+    // Perf: cap DPR (mobile/low-end → 1, desktop → 1.5) instead of raw
+    // devicePixelRatio (3x phones = 9x pixels). No preserveDrawingBuffer.
+    const isLowEndLogin = (() => {
+      try {
+        const nav = navigator as Navigator & { deviceMemory?: number; hardwareConcurrency?: number };
+        if (typeof nav.deviceMemory === 'number' && nav.deviceMemory <= 4) return true;
+        if (typeof nav.hardwareConcurrency === 'number' && nav.hardwareConcurrency <= 4) return true;
+        if (/Android|iPhone|iPad|Mobile/i.test(nav.userAgent || '')) return true;
+        return false;
+      } catch {
+        return false;
+      }
+    })();
+    const loginDpr = () => {
+      try {
+        return Math.min(window.devicePixelRatio || 1, isLowEndLogin ? 1 : 1.5);
+      } catch {
+        return 1;
+      }
+    };
+
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: false, preserveDrawingBuffer: false, stencil: false, powerPreference: 'high-performance' });
+    } catch {
+      return;
+    }
+    renderer.setPixelRatio(loginDpr());
     renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setClearColor(0x000000, 0);
 
     const scene = new THREE.Scene();
     const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
+    const dpr0 = loginDpr();
     const uniforms = {
       u_time: { value: 0 },
-      u_resolution: { value: new THREE.Vector2(window.innerWidth * 2, window.innerHeight * 2) },
+      u_resolution: { value: new THREE.Vector2(window.innerWidth * dpr0, window.innerHeight * dpr0) },
       u_opacities: { value: [0.3, 0.3, 0.3, 0.5, 0.5, 0.5, 0.8, 0.8, 0.8, 1.0] },
       u_colors: {
         value: [
@@ -127,25 +155,106 @@ export function LoginScreen() {
 
     const startTime = performance.now();
     let animationId = 0;
+    let lastFrame = performance.now();
     const animate = () => {
+      // Pause when tab hidden — clock keeps running via wall-time on resume.
+      if (document.visibilityState === 'hidden') {
+        animationId = 0;
+        return;
+      }
       animationId = requestAnimationFrame(animate);
-      uniforms.u_time.value = (performance.now() - startTime) / 1000.0;
-      renderer.render(scene, camera);
+      lastFrame = performance.now();
+      uniforms.u_time.value = (lastFrame - startTime) / 1000.0;
+      try {
+        renderer.render(scene, camera);
+      } catch {
+        // ignore one-off errors (context lost during resize/hide)
+      }
     };
     animate();
 
-    const handleResize = () => {
-      renderer.setSize(window.innerWidth, window.innerHeight);
-      uniforms.u_resolution.value.set(window.innerWidth * 2, window.innerHeight * 2);
+    const restartIfNeeded = () => {
+      if (animationId === 0 && document.visibilityState !== 'hidden') {
+        lastFrame = performance.now();
+        animationId = requestAnimationFrame(animate);
+      }
     };
-    window.addEventListener('resize', handleResize);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        if (animationId) {
+          cancelAnimationFrame(animationId);
+          animationId = 0;
+        }
+      } else {
+        restartIfNeeded();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    // Pause when login card scrolled offscreen (e.g. devtools / embed).
+    let loginIO: IntersectionObserver | null = null;
+    try {
+      if (typeof IntersectionObserver !== 'undefined') {
+        loginIO = new IntersectionObserver(
+          (entries) => {
+            const vis = entries[0]?.isIntersecting ?? true;
+            if (!vis) {
+              if (animationId) {
+                cancelAnimationFrame(animationId);
+                animationId = 0;
+              }
+            } else {
+              restartIfNeeded();
+            }
+          },
+          { threshold: 0 }
+        );
+        loginIO.observe(canvas);
+      }
+    } catch {
+      loginIO = null;
+    }
+
+    let resizeQueued = false;
+    const handleResize = () => {
+      const dpr = loginDpr();
+      renderer.setPixelRatio(dpr);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      uniforms.u_resolution.value.set(window.innerWidth * dpr, window.innerHeight * dpr);
+    };
+    const queueResize = () => {
+      if (resizeQueued) return;
+      resizeQueued = true;
+      requestAnimationFrame(() => {
+        resizeQueued = false;
+        handleResize();
+      });
+    };
+    window.addEventListener('resize', queueResize);
 
     return () => {
-      cancelAnimationFrame(animationId);
-      window.removeEventListener('resize', handleResize);
+      if (animationId) cancelAnimationFrame(animationId);
+      animationId = 0;
+      window.removeEventListener('resize', queueResize);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      try {
+        loginIO?.disconnect();
+      } catch {
+        // ignore
+      }
+      try {
+        scene.remove(mesh);
+      } catch {
+        // ignore
+      }
       geometry.dispose();
       material.dispose();
-      renderer.dispose();
+      try {
+        renderer.dispose();
+        (renderer as unknown as { forceContextLoss?: () => void }).forceContextLoss?.();
+      } catch {
+        // ignore
+      }
     };
   }, []);
 

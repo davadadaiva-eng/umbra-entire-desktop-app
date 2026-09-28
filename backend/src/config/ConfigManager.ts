@@ -5,6 +5,16 @@ import { getLogger } from '../core/Logger';
 import { MCP_CATALOG, McpCatalogEntry } from '../core/mcp/McpCatalog';
 import { DEFAULT_ROUTING } from '../core/metering/ModelRouter';
 
+/** Accepted UMBRA_LLM_PROVIDER values → ModelProvider. */
+const ENV_PROVIDER_ALIASES: Record<string, ModelProvider> = {
+  ollama: 'ollama',
+  openai: 'openai',
+  anthropic: 'anthropic',
+  'openai-compatible': 'openai-compatible',
+  openai_compatible: 'openai-compatible',
+  openrouter: 'openai-compatible',
+};
+
 const DEFAULT_CONFIG: UmbraConfig = {
   provider: 'ollama',
   models: {
@@ -185,9 +195,13 @@ const DEFAULT_CONFIG: UmbraConfig = {
   },
   hermes: {
     enabled: true,
-    bin: '',
+    // Empty = auto-detect (see HermesAgentBridge.detectBin: %LOCALAPPDATA%\hermes
+    // first, then `hermes` on PATH). HERMES_BIN wins when set.
+    bin: process.env['HERMES_BIN'] || '',
     taskTimeoutMs: 300_000,
-    autoDelegate: true,
+    // Delegating whole tasks to an EXTERNAL agent process is opt-in: an
+    // unattended install must not hand its work to a third-party CLI.
+    autoDelegate: /^(1|true|yes|on)$/i.test(process.env['UMBRA_HERMES_AUTO_DELEGATE'] || ''),
   },
   cloud: {
     enabled: false,
@@ -242,7 +256,49 @@ export class ConfigManager {
     } catch (e) {
       getLogger().warn({ err: (e as Error).message }, 'Config file invalid — using defaults (file NOT overwritten)');
     }
+    // Applied AFTER the first write so a boot-time env override never lands
+    // in config.json.
+    this.applyEnvOverrides();
     return this.config;
+  }
+
+  /**
+   * `UMBRA_LLM_PROVIDER` boot override — switch the LLM without editing
+   * config.json (or restarting the provider the UI is configured for):
+   *
+   *   ollama | openai | anthropic | openai-compatible  → switch provider
+   *   none | off | disabled                            → disable the LLM
+   *
+   * Env-only and never persisted, so the saved configuration is untouched.
+   */
+  private applyEnvOverrides(): void {
+    const raw = (process.env['UMBRA_LLM_PROVIDER'] || '').trim().toLowerCase();
+    if (!raw) return;
+
+    if (raw === 'none' || raw === 'off' || raw === 'disabled') {
+      this.config.llm = {
+        ...this.config.llm,
+        disabled: true,
+        provider: 'none',
+        reason: 'LLM disabled at boot via UMBRA_LLM_PROVIDER=none — AI tasks are unavailable until it is re-enabled.',
+      };
+      getLogger().warn('UMBRA_LLM_PROVIDER=none — LLM disabled for this run');
+      return;
+    }
+
+    const provider = ENV_PROVIDER_ALIASES[raw];
+    if (!provider) {
+      getLogger().warn(
+        { value: raw, supported: Object.keys(ENV_PROVIDER_ALIASES) },
+        'UMBRA_LLM_PROVIDER is not a known provider — ignored (config.json value kept)',
+      );
+      return;
+    }
+    this.config.provider = provider;
+    this.config.models.provider = provider;
+    // Re-probe at boot: the health check in index.ts reads this flag.
+    this.config.llm = { ...this.config.llm, disabled: false, provider, reason: undefined };
+    getLogger().info({ provider }, 'LLM provider overridden by UMBRA_LLM_PROVIDER');
   }
 
   async saveConfig(): Promise<void> {

@@ -1,8 +1,8 @@
-import { useMemo, useRef, useEffect, useState, type JSX } from 'react';
+import { useMemo, useRef, useEffect, useState, useCallback, type JSX } from 'react';
 import gsap from 'gsap';
 import { useAppStore } from '../stores/appStore';
-import { isBackendAvailable, getMcpCatalog, type McpCatalogEntry } from '../lib/backend';
-import { Search, Cpu, Hammer, Play, Layout, TrendingUp, Share2, Megaphone, Handshake, Clapperboard, Phone, Scale, LifeBuoy, BarChart3, ShieldCheck, Route, Users, Cloud, Newspaper, Languages, Rocket, Truck, Lightbulb, Sparkles, Wrench } from 'lucide-react';
+import { isBackendAvailable, getMcpCatalog, connectMcp, type McpCatalogEntry } from '../lib/backend';
+import { Search, Cpu, Hammer, Play, Layout, TrendingUp, Share2, Megaphone, Handshake, Clapperboard, Phone, Scale, LifeBuoy, BarChart3, ShieldCheck, Route, Users, Cloud, Newspaper, Languages, Rocket, Truck, Lightbulb, Sparkles, Wrench, CheckCircle2, XCircle } from 'lucide-react';
 
 interface McpCatalogEntryExtended extends McpCatalogEntry {
   description?: string;
@@ -169,6 +169,54 @@ export function SkillsView() {
   const listRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState('');
   const [openDomains, setOpenDomains] = useState<Set<number>>(() => new Set([1, 2, 3]));
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [routing, setRouting] = useState(false);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showToast = useCallback((type: 'success' | 'error', text: string) => {
+    setToast({ type, text });
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 3000);
+  }, []);
+
+  const handleRouter = useCallback(async () => {
+    if (routing) return;
+    setRouting(true);
+    try {
+      if (!(await isBackendAvailable())) {
+        showToast('error', 'Backend offline — showing local catalog');
+        return;
+      }
+      const q = query.trim();
+      const { entries, total } = await getMcpCatalog({ limit: 200, ...(q ? { q } : {}) });
+      showToast('success', q ? `Router — ${entries.length} match${entries.length === 1 ? '' : 'es'} for “${q}”` : `Router ready — ${entries.length}${total ? ` of ${total}` : ''} skills`);
+    } catch {
+      showToast('error', 'Router unavailable — try again');
+    } finally {
+      setRouting(false);
+    }
+  }, [query, routing, showToast]);
+
+  const handleCompileWorkflow = useCallback(() => {
+    showToast('error', 'Workflow compiler coming soon');
+  }, [showToast]);
+
+  const handleRunSkill = useCallback(async (id: string) => {
+    try {
+      if (!(await isBackendAvailable())) {
+        showToast('error', 'Backend offline — cannot run skill yet');
+        return;
+      }
+      await connectMcp(id);
+      showToast('success', `Connected — ${id}`);
+    } catch {
+      showToast('error', 'Connect failed — try again');
+    }
+  }, [showToast]);
+
+  const handleCompileSkill = useCallback((_id: string) => {
+    showToast('error', 'Native compile coming soon');
+  }, [showToast]);
 
   useEffect(() => {
     const ctx = gsap.context(() => {
@@ -260,8 +308,14 @@ export function SkillsView() {
               style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }}
             />
           </div>
-          <button className="flex items-center gap-1.5 px-3.5 rounded-xl" style={{ height: 34, background: avatar.accent, color: '#fff', border: 'none', fontFamily: 'var(--font)', fontSize: 12 }}>
-            <Cpu size={13} /> Router
+          <button
+            onClick={() => void handleRouter()}
+            disabled={routing}
+            title="Route via MCP catalog"
+            className="flex items-center gap-1.5 px-3.5 rounded-xl disabled:opacity-60"
+            style={{ height: 34, background: avatar.accent, color: '#fff', border: 'none', fontFamily: 'var(--font)', fontSize: 12 }}
+          >
+            <Cpu size={13} /> {routing ? 'Routing…' : 'Router'}
           </button>
         </div>
       </div>
@@ -274,7 +328,11 @@ export function SkillsView() {
           <p className="text-xs font-light leading-relaxed" style={{ color: 'var(--text-dim)' }}>
             Every domain is a self-contained skill pack the router invokes on demand — the agent selects the narrowest relevant skill instead of loading the whole matrix, keeping every call fast and cheap under the Graphify-Caveman protocol.
           </p>
-          <button className="btn-ghost flex-shrink-0 flex items-center gap-1.5" style={{ height: 30, fontSize: 11 }}>
+          <button
+            onClick={handleCompileWorkflow}
+            title="Coming soon"
+            className="btn-ghost flex-shrink-0 flex items-center gap-1.5" style={{ height: 30, fontSize: 11 }}
+          >
             <Hammer size={12} /> Compile workflow
           </button>
         </div>
@@ -308,16 +366,18 @@ export function SkillsView() {
                           {s.id}
                         </span>
                         <button
+                          onClick={() => void handleRunSkill(s.id)}
                           className="flex items-center justify-center rounded-md transition-colors opacity-60 group-hover:opacity-100"
                           style={{ width: 24, height: 24, background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: avatar.accent }}
-                          title="Run skill"
+                          title="Connect skill via backend"
                         >
                           <Play size={11} />
                         </button>
                         <button
+                          onClick={() => handleCompileSkill(s.id)}
                           className="flex items-center justify-center rounded-md transition-colors opacity-60 group-hover:opacity-100"
                           style={{ width: 24, height: 24, background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-faint)' }}
-                          title="Compile into a native .exe"
+                          title="Coming soon"
                         >
                           <Hammer size={11} />
                         </button>
@@ -334,6 +394,23 @@ export function SkillsView() {
           <p className="text-sm font-light text-center py-16" style={{ color: 'var(--text-faint)' }}>No skills match “{query}”.</p>
         )}
       </div>
+
+      {toast && (
+        <div
+          className="fixed bottom-6 left-1/2 z-50 flex items-center gap-2 px-4 py-2.5 rounded-xl"
+          style={{
+            transform: 'translateX(-50%)',
+            background: 'var(--surface-3)',
+            border: `1px solid ${toast.type === 'success' ? 'rgba(34,197,94,0.4)' : 'rgba(239,68,68,0.4)'}`,
+            boxShadow: '0 8px 30px rgba(0,0,0,0.5)',
+          }}
+        >
+          {toast.type === 'success'
+            ? <CheckCircle2 size={13} style={{ color: '#22c55e' }} />
+            : <XCircle size={13} style={{ color: '#ef4444' }} />}
+          <span className="text-xs font-medium" style={{ color: 'var(--text-primary)' }}>{toast.text}</span>
+        </div>
+      )}
     </div>
   );
 }
