@@ -11,7 +11,7 @@
  * budget is exhausted.
  */
 
-import { LLMMessage, LLMCompletionResult } from './LLMConnector';
+import { LLMMessage, LLMCompletionResult, LLMToolDeclaration, LLMToolCall } from './LLMConnector';
 import { InjectionGuard } from './InjectionGuard';
 
 export interface InProcessAgentTools {
@@ -44,7 +44,13 @@ export interface InProcessAgentOptions {
     complete(
       messages: LLMMessage[],
       role?: 'reasoning' | 'vision' | 'fast',
-      options?: { model?: string; temperature?: number; maxTokens?: number },
+      options?: {
+        model?: string;
+        temperature?: number;
+        maxTokens?: number;
+        tools?: LLMToolDeclaration[];
+        toolChoice?: 'auto' | 'none' | 'required';
+      },
     ): Promise<LLMCompletionResult>;
   };
   tools?: InProcessAgentTools;
@@ -55,11 +61,27 @@ export interface InProcessAgentOptions {
   /** Optional model override for the reasoning calls. */
   model?: string;
   /**
+   * Native tool-calling mode (dual-mode execution). When set, declarations
+   * ride along on every completion call and `tool_calls` in the response are
+   * executed through `execute`. Providers/models without native support
+   * ignore the declarations and fall back to the JSON contract below —
+   * both paths coexist in the same loop.
+   */
+  nativeTools?: NativeToolSpec;
+  /**
    * Injection guard for untrusted tool results (webSearch page text, MCP
    * outputs). When set, results are scrubbed before they become LLM messages
    * and hits are recorded (optionally into the audit vault).
    */
   injectionGuard?: InjectionGuard;
+}
+
+/** Native function-calling surface (dual-mode execution). */
+export interface NativeToolSpec {
+  /** Build the tool declarations for this run (JIT retrieval per prompt). */
+  getDeclarations(prompt: string): Promise<LLMToolDeclaration[]>;
+  /** Execute one parsed tool call; returns the text fed back to the LLM. */
+  execute: (call: LLMToolCall) => Promise<string>;
 }
 
 export interface InProcessAgentResult {
@@ -145,6 +167,17 @@ export class InProcessAgent {
       { role: 'user', content: prompt },
     ];
 
+    // JIT tool retrieval for native function calling (per prompt).
+    let nativeDecls: LLMToolDeclaration[] | undefined;
+    if (this.options.nativeTools) {
+      try {
+        const decls = await this.options.nativeTools.getDeclarations(prompt);
+        nativeDecls = decls.length > 0 ? decls : undefined;
+      } catch {
+        nativeDecls = undefined; // retrieval failure → JSON-contract mode
+      }
+    }
+
     const deadline = Date.now() + this.timeoutMs;
     let turns = 0;
 
@@ -157,8 +190,32 @@ export class InProcessAgent {
         model: this.options.model,
         temperature: 0.2,
         maxTokens: 1200,
+        ...(nativeDecls
+          ? { tools: nativeDecls, toolChoice: 'auto' as const }
+          : {}),
       });
       const reply = res.content.trim();
+
+      // ── Native tool-call path (providers with function calling) ──
+      const nativeCall = res.toolCalls?.[0];
+      if (nativeCall && nativeDecls && this.options.nativeTools) {
+        let toolText: string;
+        try {
+          toolText = await this.options.nativeTools.execute(nativeCall);
+        } catch (err: any) {
+          toolText = `ERROR: ${err?.message || 'tool execution failed'}`;
+        }
+        // Tool results are untrusted — scrub before they reach the LLM.
+        const scrubbedNative = this.options.injectionGuard
+          ? this.options.injectionGuard.scrub(toolText, `tool:${nativeCall.name}`).text
+          : toolText;
+        messages.push({ role: 'assistant', content: reply || JSON.stringify({ tool_call: nativeCall.name }) });
+        messages.push({
+          role: 'user',
+          content: `Tool result for ${nativeCall.name} (call ${nativeCall.id}):\n${truncate(scrubbedNative, 3000)}\n\nContinue: call another tool or give the final answer.`,
+        });
+        continue;
+      }
 
       const parsed = extractJsonObject(reply);
       if (!parsed) {
@@ -174,7 +231,7 @@ export class InProcessAgent {
         return { ok: true, output: truncate(reply, 4000), turns: turns + 1, durationMs: Date.now() - started };
       }
 
-      const toolResult = await this.runTool(tools, action, input, deadline);
+      const toolResult = await runBuiltinTool(tools, action, input, deadline);
       // Tool results are untrusted (web page text, external MCP output) —
       // quarantine any prompt-injection content before it reaches the LLM.
       const scrubbed = this.options.injectionGuard
@@ -190,7 +247,18 @@ export class InProcessAgent {
     return { ok: false, output: '', turns, durationMs: Date.now() - started, error: `Agent loop exceeded ${this.maxTurns} turns — giving up` };
   }
 
+  /** Back-compat dispatch for in-class callers. */
   private async runTool(tools: InProcessAgentTools, action: string, input: Record<string, unknown>, deadline: number): Promise<string> {
+    return runBuiltinTool(tools, action, input, deadline);
+  }
+}
+
+/**
+ * Execute one built-in (non-connector) tool. Exported so the native
+ * function-calling path can dispatch to the exact same implementations as
+ * the JSON-contract loop — full tool parity between the two modes.
+ */
+export async function runBuiltinTool(tools: InProcessAgentTools, action: string, input: Record<string, unknown>, deadline: number): Promise<string> {
     if (Date.now() > deadline) return 'TIMED_OUT';
     try {
       switch (action) {
@@ -285,4 +353,3 @@ export class InProcessAgent {
       return `ERROR: ${err.message}`;
     }
   }
-}

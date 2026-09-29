@@ -7,7 +7,7 @@
 
 import { ConnectorStore, UserConnection } from './ConnectorStore';
 import { ToolRetriever, ConnectorTool } from './ToolRetriever';
-import { ToolExecutor, ToolResult } from './ToolExecutor';
+import { ToolExecutor, ToolResult, ToolExecutorOptions } from './ToolExecutor';
 import { AgentConnectorBridge, ConnectorAction, AgentConnectorResult } from '../agent/AgentConnectorBridge';
 import { OAuthConnector, OAuthClient } from './OAuthConnector';
 import { MCP_CATALOG, findCatalogEntry, catalogByCategory, catalogCount, McpCatalogEntry } from './McpCatalog';
@@ -51,11 +51,18 @@ export class ConnectorApi {
   private bridge: AgentConnectorBridge;
   private oauth: OAuthConnector;
 
-  constructor(store: ConnectorStore, oauth?: OAuthConnector) {
+  constructor(
+    store: ConnectorStore,
+    oauth?: OAuthConnector,
+    /** Executor wiring (definition store, injection guard, MCP router). */
+    executorOptions?: ToolExecutorOptions,
+  ) {
     this.store = store;
     this.retriever = new ToolRetriever();
-    this.executor = new ToolExecutor(store);
-    this.bridge = new AgentConnectorBridge(store);
+    this.executor = new ToolExecutor(store, executorOptions);
+    this.bridge = new AgentConnectorBridge(store, {
+      executeToolDefinition: (def, args, userId) => this.executor.executeTool(def, args, userId),
+    });
     this.oauth = oauth || new OAuthConnector();
   }
 

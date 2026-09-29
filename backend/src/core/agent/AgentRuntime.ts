@@ -25,7 +25,9 @@ import { McpRouter } from '../mcp/McpRouter';
 import { MeteringService } from '../metering/MeteringService';
 import { GraphifyContextEngine } from '../graphify/GraphifyContextEngine';
 import { HermesAgentBridge } from './HermesAgent';
-import { InProcessAgent } from './InProcessAgent';
+import { InProcessAgent, NativeToolSpec } from './InProcessAgent';
+import { ToolDefinition, toolFunctionName } from '../mcp/ToolDefinition';
+import { LLMToolDeclaration } from './LLMConnector';
 import { SmartThingsService, type SwitchCommand } from '../smart/SmartThingsService';
 import { SmartHomeScheduler } from '../smart/SmartHomeScheduler';
 import { eventBus } from '../EventBus';
@@ -33,6 +35,7 @@ import { getLogger } from '../Logger';
 import { InjectionGuard } from './InjectionGuard';
 import { validatePlanDag, groupPlanWaves } from './planDag';
 import { LostLeaseError, TaskLeaseManager } from './TaskLease';
+import { runBuiltinTool } from './InProcessAgent';
 export class AgentRuntime {
   private llm: LLMConnector;
   private planner: TaskPlanner;
@@ -69,6 +72,10 @@ export class AgentRuntime {
   private maxSteps: number = 15;
   /** Cap on how many independent plan steps may execute in parallel. */
   private maxParallelSteps: number = 4;
+  /** JIT connector-tool retrieval (see registerSubsystems). */
+  private connectorToolRetrieval?: (prompt: string, k?: number) => Promise<ToolDefinition[]>;
+  /** Per-run cache of native tool declarations (prompt → declarations). */
+  private nativeToolCache: { prompt: string; decls: LLMToolDeclaration[]; defs: ToolDefinition[] } | null = null;
   /** Durable task queue — enables cross-restart (and cross-node) resume. */
   private store?: TaskStore;
   private nodeRole: 'desktop' | 'cloud' = 'desktop';
@@ -120,7 +127,15 @@ export class AgentRuntime {
     injectionGuard?: InjectionGuard;
     /** Cap on concurrent plan steps in a parallel wave (default 4). */
     maxParallelSteps?: number;
+    /**
+     * JIT connector-tool retrieval for native function calling: given the
+     * user prompt, returns the top-K relevant ToolDefinitions. When wired,
+     * the built-in reasoning engine uses native tool calls on capable models
+     * and falls back to the JSON contract automatically (dual-mode).
+     */
+    connectorToolRetrieval?: (prompt: string, k?: number) => Promise<ToolDefinition[]>;
   }): void {
+    if (subsystems.connectorToolRetrieval) this.connectorToolRetrieval = subsystems.connectorToolRetrieval;
     if (subsystems.swarm) this.swarm = subsystems.swarm;
     if (subsystems.healer) this.healer = subsystems.healer;
     if (subsystems.memory) this.memory = subsystems.memory;
@@ -1073,7 +1088,59 @@ export class AgentRuntime {
         return { paused: true, inputId: request.id };
       },
     };
-    this.inProcess = new InProcessAgent({ llm: this.llm, tools, timeoutMs, injectionGuard: this.injectionGuard });
+    const nativeTools: NativeToolSpec | undefined = this.connectorToolRetrieval
+      ? {
+          getDeclarations: async (prompt: string) => {
+            if (this.nativeToolCache?.prompt === prompt) return this.nativeToolCache.decls;
+            const k = 6;
+            let defs: ToolDefinition[] = [];
+            try { defs = await this.connectorToolRetrieval!(prompt, k); } catch { defs = []; }
+            const decls: LLMToolDeclaration[] = defs.map(d => ({
+              type: 'function' as const,
+              function: {
+                name: toolFunctionName(d),
+                description: `${d.natural_language_description} [connector: ${d.connector_id}]`,
+                parameters: d.parameters_schema as unknown as Record<string, unknown>,
+              },
+            }));
+            // Parity for built-in actions so native-capable models never lose
+            // the JSON-contract surface when declarations are present.
+            for (const key of Object.keys(tools).filter(name => typeof (tools as Record<string, unknown>)[name] === 'function')) {
+              decls.push({
+                type: 'function',
+                function: {
+                  name: `umbra_${key}`,
+                  description: `Built-in Umbra action: ${key}. "input" holds the action payload.`,
+                  parameters: { type: 'object', properties: { input: { type: 'object', description: 'Action payload (see tool docs).' } }, required: ['input'] },
+                },
+              });
+            }
+            this.nativeToolCache = { prompt, decls, defs };
+            return decls;
+          },
+          execute: async call => {
+            const name = call.name;
+            if (name.startsWith('umbra_')) {
+              const action = name.slice('umbra_'.length);
+              const input = (call.arguments.input && typeof call.arguments.input === 'object'
+                ? call.arguments.input
+                : call.arguments) as Record<string, unknown>;
+              return runBuiltinTool(tools, action, input, Number.MAX_SAFE_INTEGER);
+            }
+            // Connector tool: find its definition among the retrieved set.
+            const defs = this.nativeToolCache?.defs ?? [];
+            const def = defs.find(d => toolFunctionName(d) === name);
+            if (!def) return `ERROR: unknown tool "${name}" — call connectorDiscover first`;
+            const r = await this.agentConnectorBridge!.executeToolDefinition(def, call.arguments, 'default');
+            if (r.validationErrors) return `VALIDATION_ERROR: ${r.validationErrors.join('; ')} — fix the arguments and retry once.`;
+            return r.success
+              ? `OK (${r.status}): ${typeof r.data === 'string' ? r.data : JSON.stringify(r.data).slice(0, 3000)}`
+              : `ERROR (${r.status}): ${r.error || 'execution failed'}`;
+          },
+        }
+      : undefined;
+
+    this.inProcess = new InProcessAgent({ llm: this.llm, tools, timeoutMs, injectionGuard: this.injectionGuard, nativeTools });
     return this.inProcess;
   }
 

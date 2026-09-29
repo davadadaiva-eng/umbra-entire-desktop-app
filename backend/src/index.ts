@@ -101,6 +101,9 @@ import { OAuthConnector, OAuthTokenSet } from './core/mcp/OAuthConnector';
 import { MCP_CATALOG } from './core/mcp/McpCatalog';
 import { ConnectorStore } from './core/mcp/ConnectorStore';
 import { ConnectorApi } from './core/mcp/ConnectorApi';
+import { ToolIngestion } from './core/mcp/ToolIngestion';
+import { VectorToolRegistry } from './core/mcp/VectorToolRegistry';
+import { ToolDefinition } from './core/mcp/ToolDefinition';
 import { CredentialVault } from './core/vault/CredentialVault';
 import { getStableHwid } from './native/win32/HardwareId';
 import { LiveShadowEngine } from './core/shadow/LiveShadowEngine';
@@ -132,6 +135,40 @@ import { VirtualWallet } from './core/billing/VirtualWallet';
 import { SmartRoutingMatrix, buildStickySystemPrompt } from './core/metering/SmartRoutingMatrix';
 import Stripe from 'stripe';
 import * as crypto from 'crypto';
+
+/**
+ * Bridge a legacy ConnectorTool (keyword retrieval shape) into a
+ * ToolDefinition so ingested + legacy catalogs share one retrieval contract.
+ */
+function toolDefFromConnectorTool(t: {
+  name: string;
+  description: string;
+  connectorId: string;
+  authType: string;
+}): ToolDefinition {
+  return {
+    tool_id: `${t.connectorId}.execute_action`,
+    connector_id: t.connectorId,
+    name: 'execute_action',
+    natural_language_description: t.description,
+    category: 'Catalog',
+    parameters_schema: {
+      type: 'object',
+      properties: {
+        endpoint: { type: 'string', description: 'API endpoint route to hit.' },
+        method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'], description: 'HTTP method.' },
+        payload: { type: 'object', description: 'JSON payload for body (POST/PUT/PATCH) or query (GET).' },
+        endpointTemplate: { type: 'string', description: 'Optional connector-internal route hint.' },
+      },
+      required: ['endpoint', 'method'],
+      additionalProperties: true,
+    },
+    auth_type: (['none', 'apiKey', 'bearer', 'oauth'].includes(t.authType) ? t.authType : 'none') as ToolDefinition['auth_type'],
+    transport: 'rest',
+    schema_quality: 'generic',
+    source: 'catalog',
+  };
+}
 
 /** Engine selector: only these three values are valid; anything else falls back to 'browseruse'. */
 export type UmbraEngine = 'browseruse' | 'desktop2' | 'ghost';
@@ -255,6 +292,12 @@ export class UmbraOS {
   public credVaultLocked: boolean = false;
   /** Cached at boot so /api/status does not stat the filesystem per poll. */
   private hermesAvailable: boolean = false;
+  /** Tool framework: schema ingestion (curated + OpenAPI + MCP). */
+  private toolIngestion?: ToolIngestion;
+  /** Tool framework: semantic tool retrieval with keyword fallback. */
+  private toolVectorRegistry?: VectorToolRegistry;
+  /** Number of tool definitions available for JIT retrieval. */
+  public toolsIndexed: number = 0;
   /** LLM boot health (see checkLlmHealth) — never throws, never blocks boot. */
   private llmHealth: {
     provider: string;
@@ -566,6 +609,14 @@ export class UmbraOS {
       // untrusted observations (OCR, page text, tool results) are recorded in
       // the tamper-evident audit log, not just logged to the console.
       injectionGuard: new InjectionGuard({ vault: this.vault }),
+      // JIT connector-tool retrieval for native function calling (M3): the
+      // built-in reasoning engine gets top-K ToolDefinitions per prompt.
+      connectorToolRetrieval: async (prompt, k = 6) => {
+        if (this.toolVectorRegistry) {
+          return (await this.toolVectorRegistry.search(prompt, k)).map(r => r.def);
+        }
+        return (await this.connectorApi.getRelevantTools(prompt, k)).map(toolDefFromConnectorTool);
+      },
     });
 
     // ── Deep Understanding (LLM-powered research & expansion) ─
@@ -911,7 +962,45 @@ export class UmbraOS {
     this.connectorStore = new ConnectorStore(
       path.join(config.paths.dataDir, 'connectors.db'),
     );
-    this.connectorApi = new ConnectorApi(this.connectorStore, this.oauth);
+
+    // ── Tool framework: ingestion + vector registry (RAG for tools) ──
+    try {
+      this.toolIngestion = new ToolIngestion(path.join(config.paths.dataDir, 'connectors.db'));
+      this.toolIngestion.loadCurated();
+      this.toolVectorRegistry = new VectorToolRegistry(
+        path.join(config.paths.dataDir, 'tool-vectors.db'),
+      );
+      const allDefs = this.toolIngestion.listAll();
+      this.toolVectorRegistry.registerDefinitions(allDefs);
+      this.toolVectorRegistry.setKeywordSearch((query, limit) =>
+        // Keyword fallback bridges the legacy catalog (3,893 entries) into the
+        // definition world: same ranking as before, ToolDefinition shape out.
+        this.connectorApi.getRelevantTools(query, limit).then(tools => tools.map(toolDefFromConnectorTool)),
+      );
+      // Semantic mode uses the configured embedder; when unreachable,
+      // search() automatically falls back to the keyword path above.
+      this.toolVectorRegistry.setEmbedder(text => this.llm.createEmbedding(text));
+      // Boot-time indexing is fire-and-forget: unchanged tools are cached by
+      // text hash, so restarts after the first run cost nothing.
+      void this.toolVectorRegistry.index(allDefs).then(n => {
+        this.toolsIndexed = this.toolVectorRegistry!.status().indexed;
+        getLogger().info({ embedded: n, status: this.toolVectorRegistry!.status() }, 'Tool vector registry ready');
+      }).catch(() => {});
+    } catch (err) {
+      getLogger().warn({ err: (err as Error).message }, 'Tool framework init failed — connectors fall back to generic mode');
+    }
+
+    this.connectorApi = new ConnectorApi(this.connectorStore, this.oauth, {
+      ingestion: this.toolIngestion,
+      injectionGuard: new InjectionGuard({ vault: this.vault }),
+      mcpCall: async (connectorId, tool, input) => {
+        if (!this.mcpRouter) throw new Error('MCP router not initialized');
+        const r = await this.mcpRouter.call(connectorId, tool, input);
+        if (!r.ok) throw new Error(r.error || 'MCP call failed');
+        return r.output;
+      },
+      maxAttempts: 3,
+    });
 
     // ── P2P: pairing + signaling + PWA control plane — desktop only ──
     if (config.p2p.enabled && !this.headless) {
@@ -1618,6 +1707,11 @@ export class UmbraOS {
         available: !!this.credVault?.isUnlocked,
         message: this.credVaultLocked ? 'Vault locked — unlock in Settings' : 'Vault unlocked',
       },
+      // Tool framework status — retrieval mode + definition counts for the
+      // connectors UI / health dashboards.
+      tools: this.toolVectorRegistry
+        ? { ...this.toolVectorRegistry.status(), definitions: this.toolIngestion?.count() ?? 0 }
+        : { mode: 'keyword', indexed: 0, dimension: null, vecExtension: false, embedder: false, definitions: this.toolIngestion?.count() ?? 0 },
       hermes: {
         configured: this.hermesAvailable,
         autoDelegate: this.configManager.raw.hermes?.autoDelegate === true,

@@ -17,6 +17,16 @@ export interface LLMCompletionOptions {
   stream?: boolean;
   /** Task category hint for tiered model routing. */
   task?: 'general' | 'frontend' | 'difficult';
+  /**
+   * Native tool declarations (OpenAI function-calling format). When provided
+   * AND the provider supports native tools, they are sent in the request body
+   * and any `tool_calls` in the response are parsed into `result.toolCalls`.
+   * Providers/models without support silently ignore them — callers must
+   * keep the JSON-mode fallback ready (dual-mode execution).
+   */
+  tools?: LLMToolDeclaration[];
+  /** 'auto' (default) | 'required' (force a tool call) | 'none'. */
+  toolChoice?: 'auto' | 'none' | 'required';
 }
 
 export interface LLMCompletionResult {
@@ -28,6 +38,77 @@ export interface LLMCompletionResult {
   inputTokens?: number;
   /** Output (completion) tokens, when the provider reports them. */
   outputTokens?: number;
+  /** Parsed native tool calls, when the model chose to call tools. */
+  toolCalls?: LLMToolCall[];
+  /** True when the request carried native tools and the provider accepted them. */
+  nativeToolsSupported?: boolean;
+}
+
+/** OpenAI function-calling declaration shape (native `tools` parameter). */
+export interface LLMToolDeclaration {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+}
+
+/** A normalized tool call extracted from any provider's native response. */
+export interface LLMToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+function parseOpenAiToolCalls(message: any): LLMToolCall[] | undefined {
+  const raw = message?.tool_calls;
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const calls: LLMToolCall[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const tc = raw[i];
+    const name = String(tc?.function?.name ?? '');
+    if (!name) continue;
+    let args: Record<string, unknown> = {};
+    if (typeof tc?.function?.arguments === 'string') {
+      try { args = JSON.parse(tc.function.arguments); } catch { args = {}; }
+    } else if (tc?.function?.arguments && typeof tc.function.arguments === 'object') {
+      args = tc.function.arguments;
+    }
+    calls.push({ id: String(tc?.id ?? `call_${i}`), name, arguments: args });
+  }
+  return calls.length > 0 ? calls : undefined;
+}
+
+function parseOllamaToolCalls(message: any): LLMToolCall[] | undefined {
+  const raw = message?.tool_calls;
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const calls: LLMToolCall[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const tc = raw[i];
+    const name = String(tc?.function?.name ?? '');
+    if (!name) continue;
+    const args = tc?.function?.arguments && typeof tc.function.arguments === 'object'
+      ? tc.function.arguments
+      : {};
+    calls.push({ id: String(tc?.id ?? `call_${i}`), name, arguments: args });
+  }
+  return calls.length > 0 ? calls : undefined;
+}
+
+function parseAnthropicToolCalls(content: any): LLMToolCall[] | undefined {
+  if (!Array.isArray(content)) return undefined;
+  const calls: LLMToolCall[] = [];
+  for (let i = 0; i < content.length; i++) {
+    const b = content[i];
+    if (b?.type !== 'tool_use') continue;
+    calls.push({
+      id: String(b.id ?? `call_${i}`),
+      name: String(b.name ?? ''),
+      arguments: b.input && typeof b.input === 'object' ? b.input : {},
+    });
+  }
+  return calls.length > 0 ? calls : undefined;
 }
 
 export class LLMConnector {
@@ -87,8 +168,15 @@ export class LLMConnector {
         num_predict: Math.min(options.maxTokens ?? 1024, 1024),
       },
     };
+    // Ollama (≥0.8) native tool calling — ignored gracefully by older versions.
+    if (options.tools && options.tools.length > 0) {
+      (body as any).tools = options.tools;
+    }
 
-    const res = await this.httpsPost(url, body, {}, 120000);
+    // Local inference is CPU-bound and prompt-size-sensitive — a cold 2B
+    // thinking model can take minutes on a planning-sized prompt. Give it
+    // room (120s timed out in the field); there is no per-call cost to cap.
+    const res = await this.httpsPost(url, body, {}, 300000);
 
     if (res.status < 200 || res.status >= 300) {
       throw new Error(`Ollama error: ${res.status} ${res.text}`);
@@ -105,6 +193,8 @@ export class LLMConnector {
       inputTokens: res.data.prompt_eval_count || 0,
       outputTokens: res.data.eval_count || 0,
       finishReason: res.data.done_reason || 'stop',
+      toolCalls: parseOllamaToolCalls(res.data.message),
+      nativeToolsSupported: !!(options.tools && options.tools.length > 0),
     };
   }
 
@@ -132,6 +222,11 @@ export class LLMConnector {
       max_tokens: options.maxTokens ?? 4096,
     };
 
+    if (options.tools && options.tools.length > 0) {
+      (body as any).tools = options.tools;
+      if (options.toolChoice) (body as any).tool_choice = options.toolChoice;
+    }
+
     // Local OpenAI-compatible servers (llama.cpp, etc.) run without a key —
     // only attach Authorization when one is configured.
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -148,6 +243,8 @@ export class LLMConnector {
       inputTokens: res.data.usage?.prompt_tokens || 0,
       outputTokens: res.data.usage?.completion_tokens || 0,
       finishReason: res.data.choices?.[0]?.finish_reason || 'stop',
+      toolCalls: parseOpenAiToolCalls(res.data.choices?.[0]?.message),
+      nativeToolsSupported: !!(options.tools && options.tools.length > 0),
     };
   }
 
@@ -186,6 +283,16 @@ export class LLMConnector {
       })),
     };
 
+    if (options.tools && options.tools.length > 0) {
+      (body as any).tools = options.tools.map(t => ({
+        name: t.function.name,
+        description: t.function.description,
+        input_schema: t.function.parameters,
+      }));
+      if (options.toolChoice === 'required') (body as any).tool_choice = { type: 'any' };
+      else if (options.toolChoice === 'none') (body as any).tool_choice = { type: 'none' };
+    }
+
     const res = await this.httpsPost('https://api.anthropic.com/v1/messages', body, {
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
@@ -194,12 +301,16 @@ export class LLMConnector {
     if (res.status < 200 || res.status >= 300) throw new Error(`Anthropic error: ${res.status} ${res.text}`);
 
     return {
-      content: res.data.content?.[0]?.text || '',
+      content: Array.isArray(res.data.content)
+        ? res.data.content.filter((b: any) => b?.type === 'text').map((b: any) => String(b.text ?? '')).join('')
+        : (res.data.content?.[0]?.text || ''),
       modelUsed: res.data.model || model,
       totalTokens: (res.data.usage?.input_tokens || 0) + (res.data.usage?.output_tokens || 0),
       inputTokens: res.data.usage?.input_tokens || 0,
       outputTokens: res.data.usage?.output_tokens || 0,
-      finishReason: res.data.stop_reason || 'stop',
+      finishReason: res.data.stop_reason === 'tool_use' ? 'tool_calls' : (res.data.stop_reason || 'stop'),
+      toolCalls: parseAnthropicToolCalls(res.data.content),
+      nativeToolsSupported: !!(options.tools && options.tools.length > 0),
     };
   }
 
@@ -228,6 +339,11 @@ export class LLMConnector {
       max_tokens: options.maxTokens ?? 4096,
     };
 
+    if (options.tools && options.tools.length > 0) {
+      (body as any).tools = options.tools;
+      if (options.toolChoice) (body as any).tool_choice = options.toolChoice;
+    }
+
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
@@ -242,6 +358,8 @@ export class LLMConnector {
       inputTokens: res.data.usage?.prompt_tokens || 0,
       outputTokens: res.data.usage?.completion_tokens || 0,
       finishReason: res.data.choices?.[0]?.finish_reason || 'stop',
+      toolCalls: parseOpenAiToolCalls(res.data.choices?.[0]?.message),
+      nativeToolsSupported: !!(options.tools && options.tools.length > 0),
     };
   }
 

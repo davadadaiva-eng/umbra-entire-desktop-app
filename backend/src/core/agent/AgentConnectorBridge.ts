@@ -9,6 +9,7 @@
 import { ToolRetriever, ConnectorTool, RetrievalOptions } from '../mcp/ToolRetriever';
 import { ToolExecutor, ToolResult, ExecuteOptions } from '../mcp/ToolExecutor';
 import { ConnectorStore } from '../mcp/ConnectorStore';
+import { ToolDefinition } from '../mcp/ToolDefinition';
 import { getLogger } from '../Logger';
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -36,6 +37,11 @@ export interface AgentConnectorBridgeOptions {
   maxSteps?: number;
   /** Default timeout per action (default: 30_000). */
   timeoutMs?: number;
+  /**
+   * Executes ToolDefinition-based tools (schema-validated, curated/OpenAPI/MCP).
+   * Wired at boot; when absent, definition-based execution is unavailable.
+   */
+  executeToolDefinition?: (def: ToolDefinition, args: Record<string, unknown>, userId: string) => Promise<ToolResult>;
 }
 
 // ── AgentConnectorBridge ────────────────────────────────────────────
@@ -54,7 +60,32 @@ export class AgentConnectorBridge {
     this.options = {
       maxSteps: options.maxSteps ?? 5,
       timeoutMs: options.timeoutMs ?? 30_000,
+      executeToolDefinition: options.executeToolDefinition,
     };
+  }
+
+  /**
+   * Execute a schema-validated ToolDefinition tool (curated/OpenAPI/MCP).
+   * Falls back to an explicit error when no definition executor is wired.
+   */
+  async executeToolDefinition(
+    def: ToolDefinition,
+    args: Record<string, unknown>,
+    userId: string,
+  ): Promise<ToolResult> {
+    if (!this.options.executeToolDefinition) {
+      return {
+        success: false,
+        connector: def.connector_id,
+        endpoint: def.endpoint_template ?? def.name,
+        method: def.http_method ?? 'POST',
+        status: 0,
+        latencyMs: 0,
+        data: null,
+        error: 'ToolDefinition executor not wired — connect the connector store ingestion at boot',
+      };
+    }
+    return this.options.executeToolDefinition(def, args, userId);
   }
 
   /**
