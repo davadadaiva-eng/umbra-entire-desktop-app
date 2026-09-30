@@ -30,14 +30,14 @@ describe('VirtualWallet', () => {
   it('initializes wallet with correct budget for enterprise', () => {
     const user = store.signup('ent-wallet@test.com', 'pass', 'Ent')!;
     wallet.init(user.id, 'enterprise');
-    expect(wallet.balance(user.id)).toBe(20.0);
+    expect(wallet.balance(user.id)).toBe(30.0);
   });
 
   it('returns correct budget breakdowns per tier', () => {
-    expect(wallet.getBudgets('pro')).toEqual({ models: 5, cloud: 6, telco: 0 });
-    expect(wallet.getBudgets('ultimate')).toEqual({ models: 10, cloud: 8, telco: 0 });
-    expect(wallet.getBudgets('advanced')).toEqual({ models: 10, cloud: 8, telco: 0 });
-    expect(wallet.getBudgets('enterprise')).toEqual({ models: 20, cloud: 25, telco: 15 });
+    expect(wallet.getBudgets('pro')).toEqual({ models: 5, cloud: 6.7, telco: 0 });
+    expect(wallet.getBudgets('ultimate')).toEqual({ models: 10, cloud: 10, telco: 0 });
+    expect(wallet.getBudgets('advanced')).toEqual({ models: 10, cloud: 10, telco: 0 });
+    expect(wallet.getBudgets('enterprise')).toEqual({ models: 30, cloud: 29.99, telco: 15 });
     expect(wallet.getBudgets('free')).toEqual({ models: 0, cloud: 0, telco: 0 });
   });
 

@@ -1,51 +1,49 @@
 /**
  * SmartRoutingMatrix — JIT multi-model routing with Prompt Caching (Sticky Routing)
  *
- * Spec Model IDs (OpenRouter):
- *   VISION_PRIMARY    = 'openai/gpt-5.6-luna'   // flagship vision, ultra-low cache_read rates
- *   VISION_ALTERNATIVE= 'minimax/m3'           // Chinese vision, UI localization
- *   REASONING_CORE    = 'deepseek/deepseek-r1'        // complex orchestration
- *   CODING_FRONTIER   = 'deepseek/v4-pro'       // heavy codebase editing
- *   CODING_FAST       = 'deepseek/v4-flash'     // instant script generation
- *   ROUTINE_LIGHT     = 'qwen/qwen-2.5-flash'         // hyper-budget background
- *   ROUTINE_FALLBACK  = 'openrouter/free'       // $0 strict ceiling
+ * Umbra lineup (OpenRouter IDs — see pricing.ts, the single source of truth):
+ *   FRONTEND       = 'google/gemini-2.5-flash'      // frontend + fast tools
+ *   VISION         = 'google/gemini-2.5-pro'        // screenshots, computer/mobile
+ *   REASONING      = 'moonshotai/kimi-k3'           // flagship reasoning (Advanced/Enterprise)
+ *   REASONING_PRO  = 'moonshotai/kimi-k2-thinking'  // pro reasoning (K3 costs $5.85/session)
+ *   BACKEND        = 'z-ai/glm-5-long'              // backend + large repos
+ *   AGENTIC        = 'muse/muse-spark-1.3'          // agentic code
+ *   AGENTIC_ALT    = 'qwen/qwen3-max'               // agentic-code alternative
+ *   FRONTIER       = 'anthropic/claude-sonnet-5'    // difficult/rare, heavy architecture
+ *   FREE           = 'meta-llama/llama-3.1-8b-instruct:free' // $0 safety ceiling
  *
  * Prompt caching: we keep the system prompt + OCR frame prefix IDENTICAL
- * across consecutive loops (sticky routing) so OpenRouter can hit cache_read
+ * across consecutive loops (sticky routing) so providers can hit cache_read
  * on repeating desktop frames. See buildStickySystemPrompt().
  */
 
+import { MODELS as CATALOG, PLAN_ROUTES, type TaskKind } from './pricing';
+
 export const MODELS = {
-  VISION_PRIMARY: 'openai/gpt-5.6-luna',
-  VISION_ALTERNATIVE: 'minimax/m3',
-  REASONING_CORE: 'deepseek/deepseek-r1',
-  CODING_FRONTIER: 'deepseek/v4-pro',
-  CODING_FAST: 'deepseek/v4-flash',
-  ROUTINE_LIGHT: 'qwen/qwen-2.5-flash',
-  ROUTINE_FALLBACK: 'openrouter/free',
+  FREE: CATALOG.free.id,
+  FLASH: CATALOG.geminiFlash.id,
+  VISION: CATALOG.geminiPro.id,
+  REASONING: CATALOG.kimiK3.id,
+  REASONING_PRO: CATALOG.kimiThinking.id,
+  BACKEND: CATALOG.glmLong.id,
+  AGENTIC: CATALOG.spark.id,
+  AGENTIC_ALT: CATALOG.qwenMax.id,
+  FRONTIER: CATALOG.claudeSonnet.id,
 } as const;
 
-export type TaskType = 'vision_ocr' | 'reasoning' | 'coding_heavy' | 'coding_fast' | 'routine' ;
+export type TaskType = TaskKind;
 export type Plan = 'pro' | 'advanced' | 'ultimate' | 'enterprise' | 'free' | 'byok';
 
 export interface Pricing {
   input: number;        // $/1M input
-  cacheRead: number;    // $/1M cache_read (ultra-low for Luna)
+  cacheRead: number;    // $/1M cache_read
   output: number;       // $/1M output
 }
 
-// Spec pricing placeholder (€ mirrors $ for wallet): real rates should be
-// synced from https://openrouter.ai/models — these defaults keep wallet
-// arithmetic deterministic for tests.
-export const PRICING: Record<string, Pricing> = {
-  [MODELS.VISION_PRIMARY]:     { input: 3.0,  cacheRead: 0.3,  output: 12.0 },
-  [MODELS.VISION_ALTERNATIVE]: { input: 1.0,  cacheRead: 0.2, output: 4.0  },
-  [MODELS.REASONING_CORE]:     { input: 0.55, cacheRead: 0.14, output: 2.19 },
-  [MODELS.CODING_FRONTIER]:    { input: 0.7,  cacheRead: 0.15, output: 2.8  },
-  [MODELS.CODING_FAST]:        { input: 0.14, cacheRead: 0.03, output: 0.28 },
-  [MODELS.ROUTINE_LIGHT]:      { input: 0.05, cacheRead: 0.01, output: 0.2  },
-  [MODELS.ROUTINE_FALLBACK]:   { input: 0.0,  cacheRead: 0.0,  output: 0.0  },
-};
+// Built from pricing.ts — never duplicate a rate here.
+export const PRICING: Record<string, Pricing> = Object.fromEntries(
+  Object.values(CATALOG).map(m => [m.id, { input: m.inputPerM, cacheRead: m.cacheReadPerM, output: m.outputPerM }]),
+);
 
 /** Pre-built sticky prefix — identical across loops to trigger cache hits */
 export const STICKY_PREFIX = `You are Umbra OS — screen-aware desktop agent.
@@ -67,70 +65,30 @@ export interface RouteDecision {
 export class SmartRoutingMatrix {
   /**
    * Tier + taskType → model.
-   * When walletDepleted=true, everything collapses to ROUTINE_FALLBACK ($0).
+   * When walletDepleted=true, everything collapses to FREE ($0).
    */
   route(plan: Plan, taskType: TaskType, opts: { walletDepleted?: boolean; preferAltVision?: boolean } = {}): RouteDecision {
     if (opts.walletDepleted) {
-      return { model: MODELS.ROUTINE_FALLBACK, reason: 'wallet depleted → free fallback (safety ceiling)', blocked: false };
+      return { model: MODELS.FREE, reason: 'wallet depleted → free fallback (safety ceiling)', blocked: false };
     }
     const p = plan === 'ultimate' ? 'advanced' : plan;
-
-    if (p === 'enterprise') {
-      switch (taskType) {
-        case 'vision_ocr':
-          return { model: opts.preferAltVision ? MODELS.VISION_ALTERNATIVE : MODELS.VISION_PRIMARY, reason: 'ENTERPRISE vision → Luna/M3 cached frames', blocked: false };
-        case 'coding_heavy':
-          return { model: MODELS.CODING_FRONTIER, reason: 'ENTERPRISE heavy → v4-pro', blocked: false };
-        case 'coding_fast':
-          return { model: MODELS.CODING_FAST, reason: 'ENTERPRISE iterative → v4-flash', blocked: false };
-        case 'reasoning':
-          return { model: MODELS.REASONING_CORE, reason: 'ENTERPRISE planning → R1 thought block', blocked: false };
-        case 'routine':
-        default:
-          return { model: MODELS.ROUTINE_LIGHT, reason: 'ENTERPRISE routine → qwen-flash', blocked: false };
-      }
+    if (p !== 'pro' && p !== 'advanced' && p !== 'enterprise') {
+      return { model: MODELS.FREE, reason: 'free/byok → free fallback', blocked: false };
     }
-
-    if (p === 'pro') {
-      // PRO wallet €5 — block R1 + v4-pro completely
-      switch (taskType) {
-        case 'vision_ocr':
-          return { model: opts.preferAltVision ? MODELS.VISION_ALTERNATIVE : MODELS.VISION_PRIMARY, reason: 'PRO vision → Luna/M3 for cache discount', blocked: false };
-        case 'coding_fast':
-          return { model: MODELS.CODING_FAST, reason: 'PRO scripting → v4-flash rock bottom', blocked: false };
-        case 'coding_heavy':
-          return { model: MODELS.CODING_FAST, reason: 'PRO heavy coding downgraded to flash (R1/Pro blocked)', blocked: true };
-        case 'reasoning':
-          return { model: MODELS.CODING_FAST, reason: 'PRO reasoning downgraded to flash (R1 blocked)', blocked: true };
-        case 'routine':
-        default:
-          return { model: MODELS.ROUTINE_LIGHT, reason: 'PRO routine → qwen-flash / free ($0 base)', blocked: false };
-      }
+    const entry = PLAN_ROUTES[p][taskType] ?? PLAN_ROUTES[p].routine;
+    // Resolve the ModelKey → OpenRouter ID.
+    const catalogEntry = (CATALOG as Record<string, { id: string }>)[entry.model as string];
+    const modelId = catalogEntry ? catalogEntry.id : MODELS.FLASH;
+    // Cheap-vision alternative for OCR loops.
+    if (taskType === 'vision_ocr' && opts.preferAltVision) {
+      return { model: MODELS.FLASH, reason: `${p.toUpperCase()} vision (alt) → Gemini Flash for cache discount`, blocked: false };
     }
-
-    if ((p as string) === 'advanced') {
-      switch (taskType) {
-        case 'reasoning':
-          return { model: MODELS.REASONING_CORE, reason: 'ADVANCED planning → R1 thought block', blocked: false };
-        case 'coding_heavy':
-          return { model: MODELS.CODING_FRONTIER, reason: 'ADVANCED heavy → v4-pro', blocked: false };
-        case 'coding_fast':
-          return { model: MODELS.CODING_FAST, reason: 'ADVANCED iterative → v4-flash', blocked: false };
-        case 'vision_ocr':
-          return { model: opts.preferAltVision ? MODELS.VISION_ALTERNATIVE : MODELS.VISION_PRIMARY, reason: 'ADVANCED vision → Luna/M3 cached frames', blocked: false };
-        case 'routine':
-        default:
-          return { model: MODELS.ROUTINE_LIGHT, reason: 'ADVANCED routine → qwen-flash', blocked: false };
-      }
-    }
-
-    // free/byok
-    return { model: MODELS.ROUTINE_FALLBACK, reason: 'free/byok → free fallback', blocked: false };
+    return { model: modelId, reason: entry.reason, blocked: entry.blocked };
   }
 
   /** Calculate cost from OpenRouter usage block (incl. cache_read). */
   calculateCost(model: string, usage: { prompt_tokens?: number; completion_tokens?: number; cached_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } }): number {
-    const pricing = PRICING[model] || PRICING[MODELS.ROUTINE_FALLBACK];
+    const pricing = PRICING[model] || PRICING[MODELS.FREE];
     const cached = usage.cached_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? 0;
     const prompt = usage.prompt_tokens ?? 0;
     const completion = usage.completion_tokens ?? 0;
@@ -146,10 +104,12 @@ export class SmartRoutingMatrix {
     const a = (action || '').toLowerCase();
     const d = (description || '').toLowerCase();
     const blob = `${a} ${d}`;
-    if (blob.match(/ocr|vision|screenshot|capture|read_screen|snapshot/)) return 'vision_ocr';
-    if (blob.match(/reasoning|plan|orchestrat|architecture|thought/)) return 'reasoning';
-    if (blob.match(/heavy|multi.*file|codebase|refactor|frontend|coding_frontier/)) return 'coding_heavy';
-    if (blob.match(/script|automation|flash|type|click|scroll|press/)) return 'coding_fast';
+    if (blob.match(/ocr|vision|screenshot|capture|read_screen|snapshot|computer|mobile|phone|click|tap|swipe/)) return 'vision_ocr';
+    if (blob.match(/agentic|autonomous|spark|multi_step|multistep|tool_loop/)) return 'agentic_code';
+    if (blob.match(/backend|monorepo|large_repo|largerepo|codebase|refactor_arch/)) return 'backend_heavy';
+    if (blob.match(/reasoning|plan|orchestrat|architecture|thought|debug/)) return 'reasoning';
+    if (blob.match(/codemod|migrate|scaffold|implement_feature|refactor/)) return 'coding_heavy';
+    if (blob.match(/script|snippet|frontend|component|style|css|button|type_text/)) return 'coding_fast';
     return 'routine';
   }
 }

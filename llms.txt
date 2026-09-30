@@ -238,15 +238,18 @@ Base URL: `http://127.0.0.1:8787` (bound to loopback only by default). CORS: `*`
 | GET | `/api/meetings` | — | List meetings |
 | GET | `/api/meetings/:id` | — | Get meeting |
 
-### Smart Home (SmartThings)
+### Smart Home (multi-platform hub)
 | Method | Path | Body | Description |
 | --- | --- | --- | --- |
-| GET | `/api/smart/status` | — | SmartThings status |
-| POST | `/api/smart/token` | `{ token }` | Save PAT |
-| DELETE | `/api/smart/token` | — | Clear PAT |
-| GET | `/api/smart/devices` | — | List devices |
-| POST | `/api/smart/command` | `{ deviceId, command }` | Control device |
-| POST | `/api/smart/control` | `{ name, command }` | Control by name |
+| GET | `/api/smart/status` | — | Legacy SmartThings status |
+| GET | `/api/smart/platforms` | — | Platform catalog (10 platforms: SmartThings, Home Assistant, Hubitat, openHAB, Tuya/Smart Life, Hive, Homey, Apple Home, Alexa, Google Home) |
+| POST | `/api/smart/platforms/:key/connect` | `{ token, url? }` | Connect a platform (validated before vault persistence) |
+| POST | `/api/smart/platforms/:key/disconnect` | — | Disconnect a platform |
+| POST | `/api/smart/token` | `{ token }` | Legacy: save SmartThings PAT |
+| DELETE | `/api/smart/token` | — | Legacy: clear PAT |
+| GET | `/api/smart/devices` | — | Devices across all connected platforms |
+| POST | `/api/smart/command` | `{ deviceId, command }` | Control device (`deviceId` namespaced like `smartthings:lamp-1`) |
+| POST | `/api/smart/control` | `{ name, command }` | Control by fuzzy name across all platforms |
 | GET | `/api/smart/schedules` | — | List schedules |
 | POST | `/api/smart/schedules` | `{ deviceId, deviceName, command, kind, ... }` | Add schedule |
 | POST | `/api/smart/schedules/cancel` | `{ id }` | Cancel schedule |
@@ -336,6 +339,7 @@ Configuration lives in `~/.umbra/config.json` (created on first boot with defaul
 | `shadow` | Live shadow recording (DXGI/GDI, FPS) |
 | `hermes` | External agent engine config (binary path, timeout, auto-delegate) |
 | `smartthings` | Samsung SmartThings PAT and API URL |
+| `smartHome` | Per-platform pre-seeded credentials (e.g. `smartHome.homeassistant = { url, token }`) |
 | `hotkeys` | Overlay, pause, toggle-preview key combos |
 | `hotkeys` | Overlay, pause, toggle-preview key combos |
 | `realDesktop` | Chrome path, CDP port, window dimensions for real desktop control |
@@ -353,6 +357,10 @@ Configuration lives in `~/.umbra/config.json` (created on first boot with defaul
 | `UMBRA_LLM_PROVIDER` | Boot override for LLM provider (`ollama`/`openai`/`anthropic`/`openai-compatible`/`none`) |
 | `UMBRA_CONSENT_AUTOGRANT` | `1` — skip all consent prompts |
 | `UMBRA_SMARTTHINGS_TOKEN` | SmartThings PAT |
+| `UMBRA_HA_URL` | Home Assistant server URL |
+| `UMBRA_HUBITAT_URL` / `UMBRA_HUBITAT_APP_ID` | Hubitat hub URL + Maker API app id |
+| `UMBRA_OPENHAB_URL` | openHAB REST server URL |
+| `UMBRA_TUYA_ENDPOINT` | Tuya IoT regional endpoint (e.g. `https://openapi.tuyaus.com`) |
 | `UMBRA_STRIPE_SECRET_KEY` | Stripe secret key |
 | `UMBRA_STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret |
 | `UMBRA_PUBLIC_URL` | Public base URL for QR/join links |

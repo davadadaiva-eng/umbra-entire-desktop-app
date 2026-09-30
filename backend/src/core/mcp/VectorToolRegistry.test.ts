@@ -105,6 +105,41 @@ describe('VectorToolRegistry', () => {
     noEmbed.close();
   });
 
+  it('evictConnector drops vectors+definitions and persists the removal', async () => {
+    const defs = [
+      def('mail', 'send_email', 'Send an email'),
+      def('cal', 'create_event', 'Create an event'),
+    ];
+    await registry.index(defs);
+    expect(registry.status().indexed).toBe(2);
+
+    expect(registry.evictConnector('mail')).toBe(1);
+    expect(registry.status().indexed).toBe(1);
+    // The evicted tool is no longer retrievable even with vectors loaded.
+    const hits = await registry.search('send an email', 5);
+    expect(hits.some(h => h.def.tool_id === 'mail.send_email')).toBe(false);
+    expect(hits.some(h => h.def.tool_id === 'cal.create_event')).toBe(true);
+
+    // Removal persisted: a fresh instance (vectors loaded from sqlite) must
+    // not resurrect the evicted tool's vector.
+    registry.close();
+    const reopened = new VectorToolRegistry(dbPath, { embedder: fakeEmbed });
+    expect(reopened.status().indexed).toBe(1);
+    reopened.registerDefinitions([def('cal', 'create_event', 'Create an event')]);
+    const again = await reopened.search('create an event', 5);
+    expect(again[0].def.tool_id).toBe('cal.create_event');
+    reopened.close();
+  });
+
+  it('index() object form with no defs re-indexes everything registered', async () => {
+    const defs = [def('mail', 'send_email', 'Send an email')];
+    registry.registerDefinitions(defs);
+    const embedded = await registry.index({});
+    expect(embedded).toBe(1);
+    const hits = await registry.search('send an email', 1);
+    expect(hits[0].source).toBe('vector');
+  });
+
   it('filters by connector', async () => {
     const defs = [
       def('mail', 'send_email', 'Send an email'),

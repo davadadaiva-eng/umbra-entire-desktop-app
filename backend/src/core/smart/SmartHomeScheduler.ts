@@ -14,7 +14,17 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from '../Logger';
-import { SmartThingsService, type SwitchCommand } from './SmartThingsService';
+import { type SwitchCommand } from './SmartThingsService';
+
+/**
+ * The only surface the scheduler needs from a home system. Implemented by
+ * `SmartHomeHub` (multi-platform) and structurally by `SmartThingsService`
+ * (legacy, single-platform), so rules written before the hub existed keep
+ * working untouched.
+ */
+export interface SmartHomeCommandTarget {
+  sendCommand(deviceId: string, command: SwitchCommand): Promise<unknown>;
+}
 
 export interface SmartSchedule {
   id: string;
@@ -34,12 +44,12 @@ export interface SmartSchedule {
 const STORE_FILE = 'smart-schedules.json';
 
 export class SmartHomeScheduler {
-  private svc: SmartThingsService;
+  private svc: SmartHomeCommandTarget;
   private dataDir: string;
   private rules: SmartSchedule[] = [];
   private loaded = false;
 
-  constructor(svc: SmartThingsService, dataDir?: string) {
+  constructor(svc: SmartHomeCommandTarget, dataDir?: string) {
     this.svc = svc;
     this.dataDir = dataDir || path.join(process.env['USERPROFILE'] || process.env['HOME'] || '.', '.umbra');
   }

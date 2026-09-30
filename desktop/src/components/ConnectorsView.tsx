@@ -6,12 +6,15 @@ import {
   connectMcp, disconnectMcp, mcpOauthStart, mcpSyncRegistry,
   connectorDiscover, connectorExecute,
   saveConnectorCredential,
+  listToolSchemas, getConnectorTools, getToolsHealth, ingestConnectorOpenApi,
   type McpCatalogEntry, type ConnectorDiscoverResult,
+  type ConnectorToolDefinition, type ApiToolsHealth, type ToolSchemasResult,
+  type IngestOpenApiResult,
 } from '../lib/backend';
 import {
   Search, Plug, Cloud, Database, MessageSquare, CreditCard, Code2, Globe,
   X, Loader2, Check, Key, Shield, Unlock, RefreshCw, WifiOff,
-  Download, Bot, Zap, Send,
+  Download, Bot, Zap, Send, Braces, Activity, ChevronDown, Upload,
 } from 'lucide-react';
 
 const CATEGORY_ICONS: Record<string, JSX.Element> = {
@@ -23,11 +26,12 @@ const CATEGORY_ICONS: Record<string, JSX.Element> = {
 
 const PAGE_SIZE = 80;
 
-type ConnView = 'connected' | 'catalog' | 'agent';
+type ConnView = 'connected' | 'catalog' | 'schemas' | 'agent';
 
 const CONN_TABS: { id: ConnView; label: string; icon: JSX.Element }[] = [
   { id: 'connected', label: 'Connected', icon: <Plug size={12} /> },
   { id: 'catalog', label: 'Catalog', icon: <Cloud size={12} /> },
+  { id: 'schemas', label: 'Tool Schemas', icon: <Braces size={12} /> },
   { id: 'agent', label: 'Agent Tools', icon: <Bot size={12} /> },
 ];
 
@@ -72,6 +76,31 @@ export function ConnectorsView() {
   } | null>(null);
   const [oauthSaving, setOauthSaving] = useState(false);
 
+  // Tool Schemas state (framework definitions + retrieval-mode health)
+  const [toolsHealth, setToolsHealth] = useState<ApiToolsHealth | null>(null);
+  const [schemaTools, setSchemaTools] = useState<ToolSchemasResult | null>(null);
+  const [schemaQuery, setSchemaQuery] = useState('');
+  const [schemaLoading, setSchemaLoading] = useState(false);
+  const [expandedTool, setExpandedTool] = useState<string | null>(null);
+  const [connTools, setConnTools] = useState<Record<string, { tools: ConnectorToolDefinition[]; connected: boolean; status?: string } | 'loading' | undefined>>({});
+  // Bump to reload the schema browser (e.g. after an OpenAPI ingestion).
+  const [schemaRefresh, setSchemaRefresh] = useState(0);
+
+  // OpenAPI ingestion modal state (Tool Schemas tab)
+  const [ingestOpen, setIngestOpen] = useState(false);
+  const [ingestSource, setIngestSource] = useState<'url' | 'inline'>('url');
+  const [ingestConnectorId, setIngestConnectorId] = useState('');
+  const [ingestSpecUrl, setIngestSpecUrl] = useState('');
+  const [ingestSpecText, setIngestSpecText] = useState('');
+  const [ingestBaseUrl, setIngestBaseUrl] = useState('');
+  const [ingestAuthType, setIngestAuthType] = useState('');
+  const [ingestApiKeyHeader, setIngestApiKeyHeader] = useState('');
+  const [ingestReplace, setIngestReplace] = useState(true);
+  const [ingestMaxTools, setIngestMaxTools] = useState('');
+  const [ingesting, setIngesting] = useState(false);
+  const [ingestResult, setIngestResult] = useState<IngestOpenApiResult | null>(null);
+  const [ingestError, setIngestError] = useState('');
+
   interface ConnectedItem { id: string; name: string; category: string; connected: boolean; tools?: number; }
 
   useEffect(() => {
@@ -104,6 +133,25 @@ export function ConnectorsView() {
   useEffect(() => {
     void loadConnected();
   }, [loadConnected]);
+
+  // Tool-framework health (retrieval mode) + initial schema page on mount
+  useEffect(() => {
+    void getToolsHealth().then(setToolsHealth);
+  }, []);
+
+  // Load (or filter) the schema browser when the tab opens or query changes
+  useEffect(() => {
+    if (view !== 'schemas') return;
+    let cancelled = false;
+    setSchemaLoading(true);
+    const t = window.setTimeout(() => {
+      listToolSchemas({ q: schemaQuery.trim() || undefined, limit: 300 })
+        .then((r) => { if (!cancelled) setSchemaTools(r); })
+        .catch(() => { if (!cancelled) setSchemaTools(null); })
+        .finally(() => { if (!cancelled) setSchemaLoading(false); });
+    }, 300);
+    return () => { cancelled = true; window.clearTimeout(t); };
+  }, [view, schemaQuery, schemaRefresh]);
 
   // Load a page of catalog entries
   const loadCatalogPage = useCallback(async (reset: boolean) => {
@@ -259,6 +307,69 @@ export function ConnectorsView() {
 
   const connectedCount = connected.filter((c) => c.connected).length;
 
+  // Per-connector tool schemas, fetched on first expand in the Connected tab
+  const toggleConnTools = async (id: string) => {
+    const cur = connTools[id];
+    if (cur === undefined) {
+      setConnTools((m) => ({ ...m, [id]: 'loading' }));
+      try {
+        const r = await getConnectorTools(id);
+        setConnTools((m) => ({ ...m, [id]: { tools: r.tools ?? [], connected: r.connection?.connected ?? false, status: r.connection?.status } }));
+      } catch {
+        setConnTools((m) => ({ ...m, [id]: { tools: [], connected: false } }));
+      }
+    } else {
+      setConnTools((m) => {
+        const next = { ...m };
+        delete next[id];
+        return next;
+      });
+    }
+  };
+
+  const connectionFor = (connectorId: string): { connected: boolean; status?: string } =>
+    schemaTools?.connection?.[connectorId] ?? { connected: false };
+
+  // Ingest an OpenAPI spec for one connector — grows the tool catalog without
+  // code changes; the backend refreshes the vector registry without a restart.
+  const handleIngest = async () => {
+    const connectorId = ingestConnectorId.trim();
+    if (!connectorId || ingesting) return;
+    setIngesting(true);
+    setIngestError('');
+    setIngestResult(null);
+    try {
+      let spec: unknown;
+      if (ingestSource === 'inline') {
+        try {
+          spec = JSON.parse(ingestSpecText) as unknown;
+        } catch {
+          throw new Error('Spec JSON is not valid JSON — paste the raw OpenAPI/Swagger document');
+        }
+      }
+      const maxTools = ingestMaxTools.trim() ? Number(ingestMaxTools.trim()) : undefined;
+      if (maxTools !== undefined && (!Number.isFinite(maxTools) || maxTools < 1)) {
+        throw new Error('Max tools must be a positive number');
+      }
+      const result = await ingestConnectorOpenApi({
+        connectorId,
+        ...(ingestSource === 'inline' ? { spec } : { specUrl: ingestSpecUrl.trim() }),
+        ...(ingestBaseUrl.trim() ? { baseUrl: ingestBaseUrl.trim() } : {}),
+        ...(ingestAuthType ? { authType: ingestAuthType } : {}),
+        ...(ingestApiKeyHeader.trim() ? { apiKeyHeader: ingestApiKeyHeader.trim() } : {}),
+        replace: ingestReplace,
+        ...(maxTools !== undefined ? { maxTools } : {}),
+      });
+      setIngestResult(result);
+      // Refresh the browser + health strip so the new schemas show immediately.
+      void getToolsHealth().then(setToolsHealth);
+      setSchemaRefresh((n) => n + 1);
+    } catch (e) {
+      setIngestError((e as Error).message);
+    }
+    setIngesting(false);
+  };
+
   // Toggle connected
   const toggleConnect = async (id: string) => {
     const item = connected.find((c) => c.id === id);
@@ -348,7 +459,7 @@ export function ConnectorsView() {
         <div>
           <h1 className="hero-heading font-black uppercase tracking-tight leading-none" style={{ fontSize: 'clamp(1.6rem, 3.5vw, 2.4rem)' }}>Connectors</h1>
           <p className="text-sm mt-1 font-light" style={{ color: 'var(--text-dim)' }}>
-            {view === 'catalog' ? `${catalogTotal} connectors available` : view === 'connected' ? `${connectedCount} of ${connected.length} connected` : 'Agent connector discovery & testing'}
+            {view === 'catalog' ? `${catalogTotal} connectors available` : view === 'connected' ? `${connectedCount} of ${connected.length} connected` : view === 'schemas' ? `${toolsHealth ? `${toolsHealth.indexed ?? 0} tool schemas · ${toolsHealth.mode === 'vector' ? 'semantic' : 'keyword'} retrieval` : 'Tool framework health unavailable'}` : 'Agent connector discovery & testing'}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -421,6 +532,26 @@ export function ConnectorsView() {
 
       {/* Body */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-5" style={{ maxWidth: 1100, width: '100%', margin: '0 auto' }}>
+        {/* Tools retrieval-mode health strip (schemas tab) */}
+        {view === 'schemas' && toolsHealth && (
+          <div className="flex items-center gap-2 mb-5 flex-wrap">
+            <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-medium" style={{ background: toolsHealth.mode === 'vector' ? '#22C55E14' : '#F59E0B14', border: `1px solid ${toolsHealth.mode === 'vector' ? '#22C55E33' : '#F59E0B33'}`, color: toolsHealth.mode === 'vector' ? '#22C55E' : '#F59E0B' }}>
+              <Activity size={10} /> {toolsHealth.mode === 'vector' ? `Semantic retrieval · ${toolsHealth.dimension ?? '?'}-dim` : 'Keyword fallback retrieval'}
+            </span>
+            <span className="px-2.5 py-1 rounded-lg text-[10px] font-medium" style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-dim)' }}>
+              {toolsHealth.indexed ?? 0} indexed
+            </span>
+            <span className="px-2.5 py-1 rounded-lg text-[10px] font-medium" style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-dim)' }}>
+              {toolsHealth.definitions ?? toolsHealth.indexed ?? 0} definitions
+            </span>
+            {toolsHealth.vecExtension !== undefined && (
+              <span className="px-2.5 py-1 rounded-lg text-[10px] font-medium" style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-faint)' }}>
+                sqlite-vec {toolsHealth.vecExtension ? 'on' : 'off'} · embedder {toolsHealth.embedder ? 'on' : 'off'}
+              </span>
+            )}
+          </div>
+        )}
+
         {/* Category pills */}
         <div className="flex gap-2 mb-5 flex-wrap">
           {allCategories.slice(0, 30).map((c) => (
@@ -466,10 +597,161 @@ export function ConnectorsView() {
                         <span className="absolute rounded-full" style={{ width: 12, height: 12, top: 2, left: i.connected ? 16 : 2, background: i.connected ? '#fff' : 'var(--text-faint)', transition: 'left 0.18s ease' }} />
                       </button>
                     </div>
+                    {/* Per-connector tool schemas (expandable) */}
+                    <button onClick={() => void toggleConnTools(i.id)} className="mt-2 flex items-center gap-1 text-[10px] font-medium" style={{ color: 'var(--text-faint)' }}>
+                      <Braces size={10} /> {connTools[i.id] === undefined ? 'Show tool schemas' : connTools[i.id] === 'loading' ? 'Loading…' : 'Hide tool schemas'}
+                    </button>
+                    {connTools[i.id] === 'loading' && (
+                      <div className="mt-2 flex items-center gap-1.5 text-[10px]" style={{ color: 'var(--text-faint)' }}>
+                        <Loader2 size={10} className="animate-spin" /> Loading schemas…
+                      </div>
+                    )}
+                    {connTools[i.id] && connTools[i.id] !== 'loading' && (
+                      <div className="mt-2 space-y-1">
+                        {(connTools[i.id] as { tools: ConnectorToolDefinition[] }).tools.length === 0 ? (
+                          <p className="text-[10px] font-light" style={{ color: 'var(--text-faint)' }}>No schemas ingested for this connector yet.</p>
+                        ) : (
+                          (connTools[i.id] as { tools: ConnectorToolDefinition[] }).tools.map((t) => {
+                            const open = expandedTool === t.tool_id;
+                            const props = t.parameters_schema?.properties ?? {};
+                            const req = t.parameters_schema?.required ?? [];
+                            return (
+                              <div key={t.tool_id} className="rounded-lg" style={{ border: '1px solid var(--hairline)' }}>
+                                <button onClick={() => setExpandedTool(open ? null : t.tool_id)} className="w-full flex items-center gap-2 px-2 py-1.5 text-left">
+                                  <span className="text-[9px] font-bold px-1 py-0.5 rounded" style={{ background: t.http_method === 'GET' ? '#60A5FA14' : '#A78BFA14', color: t.http_method === 'GET' ? '#60A5FA' : '#A78BFA' }}>{t.http_method ?? 'CALL'}</span>
+                                  <span className="text-[10px] font-semibold truncate flex-1" style={{ color: 'var(--text-primary)' }}>{t.name}</span>
+                                  <ChevronDown size={11} className="transition-transform" style={{ transform: open ? 'rotate(180deg)' : 'none', color: 'var(--text-faint)' }} />
+                                </button>
+                                {open && (
+                                  <div className="px-2 pb-2 pt-0.5">
+                                    <p className="text-[9px] font-light mb-1" style={{ color: 'var(--text-faint)' }}>{t.natural_language_description}</p>
+                                    {t.endpoint_template && (
+                                      <p className="text-[9px] mb-1.5 font-mono" style={{ color: 'var(--text-dim)' }}>{t.http_method} {t.base_url ?? ''}{t.endpoint_template}</p>
+                                    )}
+                                    {Object.keys(props).length === 0 ? (
+                                      <p className="text-[9px]" style={{ color: 'var(--text-faint)' }}>No parameters.</p>
+                                    ) : (
+                                      <div className="space-y-0.5">
+                                        {Object.entries(props).map(([k, p]) => (
+                                          <div key={k} className="flex items-center gap-1.5 text-[9px]">
+                                            <code style={{ color: 'var(--text-primary)' }}>{k}</code>
+                                            <span style={{ color: 'var(--text-faint)' }}>{p.type ?? 'any'}</span>
+                                            {req.includes(k) && <span style={{ color: '#F59E0B' }}>required</span>}
+                                            {p.description && <span className="truncate" style={{ color: 'var(--text-faint)' }}>— {p.description}</span>}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
             </div>
+          </>
+        )}
+
+        {/* TOOL SCHEMAS VIEW */}
+        {view === 'schemas' && (
+          <>
+            <div className="flex items-center gap-2 mb-4">
+              <div className="flex-1 flex items-center gap-2 px-3 rounded-xl" style={{ height: 38, background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)' }}>
+                <Braces size={13} style={{ color: 'var(--text-faint)' }} />
+                <input value={schemaQuery} onChange={(e) => setSchemaQuery(e.target.value)}
+                  placeholder="Search tool schemas — e.g. send email, create event, search wikipedia…"
+                  className="bg-transparent outline-none text-sm flex-1" style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }} />
+              </div>
+              <button onClick={() => { setIngestOpen(true); setIngestResult(null); setIngestError(''); }}
+                className="flex items-center gap-1.5 px-4 rounded-xl text-[11px] font-medium transition-all hover:opacity-90 flex-shrink-0"
+                style={{ height: 38, background: avatar.accent, color: '#fff', border: 'none', fontFamily: 'var(--font)' }}>
+                <Upload size={12} /> Ingest OpenAPI
+              </button>
+            </div>
+            {schemaLoading && (
+              <div className="flex items-center justify-center py-12 gap-2">
+                <Loader2 size={15} className="animate-spin" style={{ color: avatar.accent }} />
+                <span className="text-sm" style={{ color: 'var(--text-dim)' }}>Loading schemas…</span>
+              </div>
+            )}
+            {!schemaLoading && schemaTools && schemaTools.tools.length === 0 && (
+              <div className="text-center py-14">
+                <p className="text-sm font-light" style={{ color: 'var(--text-faint)' }}>{schemaQuery ? `No tool schemas match “${schemaQuery}”` : 'No tool schemas stored yet.'}</p>
+                <p className="text-[11px] mt-1.5 font-light" style={{ color: 'var(--text-faint)' }}>
+                  Schemas come from the curated set plus ingested OpenAPI / MCP specs.
+                </p>
+              </div>
+            )}
+            {!schemaLoading && schemaTools && schemaTools.tools.length > 0 && (
+              <>
+                <p className="text-[11px] font-medium mb-2" style={{ color: 'var(--text-dim)' }}>
+                  {schemaTools.tools.length} of {schemaTools.total} schemas · {schemaTools.connectors} connector{schemaTools.connectors === 1 ? '' : 's'}
+                </p>
+                <div className="space-y-2">
+                  {schemaTools.tools.map((t) => {
+                    const open = expandedTool === t.tool_id;
+                    const conn = connectionFor(t.connector_id);
+                    const props = t.parameters_schema?.properties ?? {};
+                    const req = t.parameters_schema?.required ?? [];
+                    const isGet = t.http_method === 'GET';
+                    return (
+                      <div key={t.tool_id} className="rounded-xl overflow-hidden" style={{ background: 'var(--surface-1)', border: '1px solid var(--hairline-strong)' }}>
+                        <button onClick={() => setExpandedTool(open ? null : t.tool_id)} className="w-full flex items-center gap-3 p-3 text-left">
+                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0" style={{ background: isGet ? '#60A5FA14' : '#A78BFA14', color: isGet ? '#60A5FA' : '#A78BFA' }}>{t.http_method ?? (t.transport === 'mcp' ? 'MCP' : 'CALL')}</span>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[12px] font-semibold truncate" style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }}>{t.name}</span>
+                              <span className="text-[9px] px-1.5 py-0.5 rounded-md flex-shrink-0" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid var(--hairline)', color: 'var(--text-faint)' }}>{t.connector_id}</span>
+                              {t.schema_quality && (
+                                <span className="text-[9px] px-1.5 py-0.5 rounded-md flex-shrink-0" style={{ background: t.schema_quality === 'curated' ? '#22C55E14' : 'rgba(255,255,255,0.04)', border: `1px solid ${t.schema_quality === 'curated' ? '#22C55E33' : 'var(--hairline)'}`, color: t.schema_quality === 'curated' ? '#22C55E' : 'var(--text-faint)' }}>{t.schema_quality}</span>
+                              )}
+                            </div>
+                            <p className="text-[10px] mt-0.5 truncate font-light" style={{ color: 'var(--text-faint)' }}>{t.natural_language_description}</p>
+                          </div>
+                          <span title={conn.connected ? `Connected${conn.status ? ` (${conn.status})` : ''}` : 'Not connected'}
+                            style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: conn.connected ? '#22c55e' : 'var(--text-faint)', boxShadow: conn.connected ? '0 0 6px rgba(34,197,94,0.8)' : 'none' }} />
+                          <ChevronDown size={13} className="transition-transform flex-shrink-0" style={{ transform: open ? 'rotate(180deg)' : 'none', color: 'var(--text-faint)' }} />
+                        </button>
+                        {open && (
+                          <div className="px-4 pb-4 pt-2" style={{ borderTop: '1px solid var(--hairline)' }}>
+                            {(t.endpoint_template || t.base_url) && (
+                              <p className="text-[10px] mb-2 font-mono break-all" style={{ color: 'var(--text-dim)' }}>
+                                {t.http_method} {t.base_url ?? ''}{t.endpoint_template ?? ''}
+                              </p>
+                            )}
+                            <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+                              {t.transport && <span className="text-[9px] px-1.5 py-0.5 rounded" style={{ background: 'var(--surface-2)', color: 'var(--text-faint)' }}>transport: {t.transport}</span>}
+                              {t.auth_type && <span className="text-[9px] px-1.5 py-0.5 rounded" style={{ background: 'var(--surface-2)', color: 'var(--text-faint)' }}>auth: {t.auth_type}</span>}
+                              {t.source && <span className="text-[9px] px-1.5 py-0.5 rounded" style={{ background: 'var(--surface-2)', color: 'var(--text-faint)' }}>source: {t.source}</span>}
+                            </div>
+                            {Object.keys(props).length === 0 ? (
+                              <p className="text-[10px] font-light" style={{ color: 'var(--text-faint)' }}>No parameters.</p>
+                            ) : (
+                              <div className="space-y-1">
+                                {Object.entries(props).map(([k, p]) => (
+                                  <div key={k} className="flex items-start gap-2 text-[10px]">
+                                    <code className="flex-shrink-0" style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }}>{k}</code>
+                                    <span className="flex-shrink-0" style={{ color: isGet ? '#60A5FA' : '#A78BFA' }}>{p.type ?? 'any'}</span>
+                                    {req.includes(k) && <span className="flex-shrink-0" style={{ color: '#F59E0B' }}>required</span>}
+                                    {p.enum && <span className="flex-shrink-0" style={{ color: 'var(--text-dim)' }}>enum: {p.enum.join(' | ')}</span>}
+                                    {p.description && <span className="font-light" style={{ color: 'var(--text-faint)' }}>— {p.description}</span>}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
           </>
         )}
 
@@ -766,6 +1048,143 @@ export function ConnectorsView() {
                 style={{ background: avatar.accent, color: '#fff', border: 'none', fontFamily: 'var(--font)' }}>
                 {oauthSaving ? <Loader2 size={13} className="animate-spin" /> : <Shield size={13} />}
                 {oauthSaving ? 'Saving…' : 'Save & Connect'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Ingest OpenAPI Modal */}
+      {ingestOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(6px)' }}>
+          <div className="w-[560px] max-h-[90vh] overflow-y-auto rounded-2xl p-6" style={{ background: 'var(--surface-1)', border: '1px solid var(--hairline-strong)', boxShadow: '0 24px 80px rgba(0,0,0,0.5)' }}>
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <span className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: `${avatar.accent}16`, color: avatar.accent, border: `1px solid ${avatar.accent}44` }}>
+                  <Upload size={18} />
+                </span>
+                <div>
+                  <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }}>Ingest OpenAPI Spec</p>
+                  <p className="text-[11px] font-light" style={{ color: 'var(--text-faint)' }}>Grow the tool catalog without code changes — no restart needed</p>
+                </div>
+              </div>
+              <button onClick={() => setIngestOpen(false)} style={{ color: 'var(--text-faint)' }}><X size={16} /></button>
+            </div>
+            <div className="space-y-3 mb-4">
+              <div>
+                <label className="text-[10px] font-medium uppercase tracking-widest mb-1 block" style={{ color: 'var(--text-faint)' }}>Connector ID</label>
+                <input value={ingestConnectorId} onChange={(e) => setIngestConnectorId(e.target.value)}
+                  placeholder="e.g. toy-store — or a catalog id like search-research-wikipedia"
+                  className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+                  style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-primary)', fontFamily: 'var(--font)' }} />
+                <p className="text-[10px] mt-1 font-light" style={{ color: '#666' }}>Known catalog ids inherit base URL + auth defaults automatically.</p>
+              </div>
+              <div className="flex gap-2">
+                {(['url', 'inline'] as const).map((s) => (
+                  <button key={s} onClick={() => setIngestSource(s)}
+                    className="flex-1 py-1.5 rounded-lg text-[11px] font-medium"
+                    style={{
+                      background: ingestSource === s ? avatar.accent : 'var(--surface-2)',
+                      color: ingestSource === s ? '#fff' : 'var(--text-dim)',
+                      border: `1px solid ${ingestSource === s ? 'transparent' : 'var(--hairline-strong)'}`,
+                      fontFamily: 'var(--font)',
+                    }}>
+                    {s === 'url' ? 'Spec URL' : 'Paste JSON'}
+                  </button>
+                ))}
+              </div>
+              {ingestSource === 'url' ? (
+                <div>
+                  <label className="text-[10px] font-medium uppercase tracking-widest mb-1 block" style={{ color: 'var(--text-faint)' }}>Spec URL (JSON)</label>
+                  <input value={ingestSpecUrl} onChange={(e) => setIngestSpecUrl(e.target.value)}
+                    placeholder="https://example.com/openapi.json"
+                    className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+                    style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-primary)', fontFamily: 'var(--font)' }} />
+                </div>
+              ) : (
+                <div>
+                  <label className="text-[10px] font-medium uppercase tracking-widest mb-1 block" style={{ color: 'var(--text-faint)' }}>Spec JSON</label>
+                  <textarea value={ingestSpecText} onChange={(e) => setIngestSpecText(e.target.value)}
+                    placeholder='{"openapi": "3.0.0", "paths": {…}}'
+                    rows={6}
+                    className="w-full px-3 py-2 rounded-lg text-sm outline-none resize-none font-mono"
+                    style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-primary)' }} />
+                </div>
+              )}
+              <div className="flex gap-2">
+                <div className="flex-1">
+                  <label className="text-[10px] font-medium uppercase tracking-widest mb-1 block" style={{ color: 'var(--text-faint)' }}>Base URL (optional)</label>
+                  <input value={ingestBaseUrl} onChange={(e) => setIngestBaseUrl(e.target.value)}
+                    placeholder="https://api.example.com"
+                    className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+                    style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-primary)', fontFamily: 'var(--font)' }} />
+                </div>
+                <div className="w-32">
+                  <label className="text-[10px] font-medium uppercase tracking-widest mb-1 block" style={{ color: 'var(--text-faint)' }}>Auth</label>
+                  <select value={ingestAuthType} onChange={(e) => setIngestAuthType(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+                    style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-primary)', fontFamily: 'var(--font)' }}>
+                    <option value="">auto</option>
+                    <option value="none">none</option>
+                    <option value="apiKey">apiKey</option>
+                    <option value="bearer">bearer</option>
+                    <option value="oauth">oauth</option>
+                  </select>
+                </div>
+              </div>
+              {ingestAuthType === 'apiKey' && (
+                <div>
+                  <label className="text-[10px] font-medium uppercase tracking-widest mb-1 block" style={{ color: 'var(--text-faint)' }}>API Key Header (optional)</label>
+                  <input value={ingestApiKeyHeader} onChange={(e) => setIngestApiKeyHeader(e.target.value)}
+                    placeholder="X-API-Key"
+                    className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+                    style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-primary)', fontFamily: 'var(--font)' }} />
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <div className="flex-1">
+                  <label className="text-[10px] font-medium uppercase tracking-widest mb-1 block" style={{ color: 'var(--text-faint)' }}>Max tools (optional)</label>
+                  <input value={ingestMaxTools} onChange={(e) => setIngestMaxTools(e.target.value)}
+                    placeholder="e.g. 100"
+                    inputMode="numeric"
+                    className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+                    style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-primary)', fontFamily: 'var(--font)' }} />
+                </div>
+                <label className="flex items-center gap-2 mt-5 text-[11px] cursor-pointer" style={{ color: 'var(--text-dim)' }}>
+                  <input type="checkbox" checked={ingestReplace} onChange={(e) => setIngestReplace(e.target.checked)} />
+                  Replace existing schemas
+                </label>
+              </div>
+            </div>
+            {ingestError && (
+              <div className="mb-4 rounded-lg p-3 text-[11px]" style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)', color: '#FF8A8A' }}>
+                {ingestError}
+              </div>
+            )}
+            {ingestResult && (
+              <div className="mb-4 rounded-lg p-3" style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.3)' }}>
+                <div className="flex items-center gap-2 mb-1.5">
+                  <Check size={13} style={{ color: '#22C55E' }} />
+                  <span className="text-[11px] font-semibold" style={{ color: '#7EE2A8' }}>
+                    Ingested {ingestResult.ingested} tool{ingestResult.ingested === 1 ? '' : 's'} for {ingestResult.connectorId}
+                  </span>
+                </div>
+                <p className="text-[10px] font-light" style={{ color: 'var(--text-dim)' }}>
+                  {ingestResult.replaced ? `Replaced ${ingestResult.removed} stale schema${ingestResult.removed === 1 ? '' : 's'} · ` : ''}
+                  {ingestResult.total} definitions total
+                  {ingestResult.catalogMatch ? ' · catalog defaults applied' : ''}
+                  {ingestResult.baseUrl ? ` · ${ingestResult.baseUrl}` : ''}
+                  {ingestResult.authType ? ` · auth: ${ingestResult.authType}` : ''}
+                </p>
+              </div>
+            )}
+            <div className="flex gap-2">
+              <button onClick={() => setIngestOpen(false)} className="flex-1 flex items-center justify-center py-2.5 rounded-xl text-sm font-medium" style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-dim)', fontFamily: 'var(--font)' }}>Close</button>
+              <button onClick={handleIngest} disabled={ingesting || !ingestConnectorId.trim() || (ingestSource === 'url' ? !ingestSpecUrl.trim() : !ingestSpecText.trim())}
+                className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-sm font-medium disabled:opacity-40"
+                style={{ background: avatar.accent, color: '#fff', border: 'none', fontFamily: 'var(--font)' }}>
+                {ingesting ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />}
+                {ingesting ? 'Ingesting…' : 'Ingest'}
               </button>
             </div>
           </div>

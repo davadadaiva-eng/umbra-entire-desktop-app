@@ -1,17 +1,18 @@
 /**
  * VirtualWallet — JIT financial safety ceiling.
- * Mirrors the spec: `ai_budget_limit` per user (PRO $5 / ADVANCED $10 / ENTERPRISE $20),
+ * Per-user model budgets (PRO 5 / ADVANCED 10 / ENTERPRISE 30),
  * stored in `users.ai_budget_limit` (see UserStore.migrateJIT).
  * On every OpenRouter response we deduct exact cost (incl. cache_read)
- * and when <= 0 we force spillover to `openrouter/free`.
+ * and when <= 0 we force spillover to the free model.
  * Hetzner server stays running — only API costs go to zero.
  *
- * Budget breakdown by tier:
- *   - Pro:        $5 models,  $6 cloud VPS,  $0 telco
- *   - Advanced:   $10 models, $8 cloud VPS,  $0 telco
- *   - Enterprise: $20 models, $25 cloud VPS, $15 telco
+ * Budget breakdown by tier (see ../metering/pricing.ts — single source):
+ *   - Pro:        5 models,  €6.70 cloud VPS,  0 telco
+ *   - Advanced:   10 models, €10 cloud VPS,    0 telco
+ *   - Enterprise: 30 models, €29.99 cloud VPS, 15 telco
  */
 import { UserStore } from '../auth/UserStore';
+import { walletBudgets } from '../metering/pricing';
 import { getLogger } from '../Logger';
 
 export interface WalletBudgets {
@@ -29,13 +30,7 @@ export class VirtualWallet {
   }
 
   getBudgets(tier: string): WalletBudgets {
-    switch (tier) {
-      case 'pro':        return { models: 5, cloud: 6, telco: 0 };
-      case 'ultimate':
-      case 'advanced':   return { models: 10, cloud: 8, telco: 0 };
-      case 'enterprise': return { models: 20, cloud: 25, telco: 15 };
-      default:           return { models: 0, cloud: 0, telco: 0 };
-    }
+    return walletBudgets(tier);
   }
 
   balance(userId: string): number {

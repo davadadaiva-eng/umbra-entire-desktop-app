@@ -127,6 +127,8 @@ import { createAuthToken } from './api/AuthToken';
 import { SignedUrl } from './mobile/SignedUrl';
 import { SmartThingsService } from './core/smart/SmartThingsService';
 import { SmartHomeScheduler } from './core/smart/SmartHomeScheduler';
+import { buildSmartHomeHub } from './core/smart/SmartHomeAdapters';
+import type { SmartHomeHub } from './core/smart/SmartHomePlatform';
 import { OpenCarruselBridge } from './core/media/OpenCarruselBridge';
 import { TwentyBridge } from './core/crm/TwentyBridge';
 import { MeetingStore } from './core/meeting/MeetingStore';
@@ -275,6 +277,7 @@ export class UmbraOS {
   private socialTimer?: ReturnType<typeof setInterval>;
   private smartThings!: SmartThingsService;
   private smartScheduler!: SmartHomeScheduler;
+  private smartHomeHub!: SmartHomeHub;
   private smartTimer?: ReturnType<typeof setInterval>;
   private carrusel!: OpenCarruselBridge;
   private twenty!: TwentyBridge;
@@ -837,6 +840,9 @@ export class UmbraOS {
       smartStatus: () => this.smartStatus(),
       smartSetToken: token => this.smartSetToken(token),
       smartClearToken: () => this.smartClearToken(),
+      smartPlatforms: () => this.smartPlatforms(),
+      smartConnectPlatform: (key, token, url) => this.smartConnectPlatform(key, token, url),
+      smartDisconnectPlatform: key => this.smartDisconnectPlatform(key),
       getVaultEntries: () => this.getVaultEntries(),
       setVaultEntry: entry => this.setVaultEntry(entry),
       deleteVaultEntry: id => this.deleteVaultEntry(id),
@@ -868,6 +874,9 @@ export class UmbraOS {
       executeConnectorAction: (connectorId, endpoint, method, payload, userId) =>
         this.connectorApi.executeConnectorAction(connectorId, endpoint, method, payload, userId),
       getRelevantTools: (query, limit) => this.connectorApi.getRelevantTools(query, limit),
+      listToolSchemas: opts => this.connectorApi.listToolSchemas(opts),
+      getConnectorTools: id => this.connectorApi.getConnectorTools(id),
+      ingestConnectorOpenApi: opts => this.ingestConnectorOpenApi(opts),
       syncConnectorCatalog: () => this.connectorApi.syncCatalog(),
       saveConnectorCredential: (slug, clientId, clientSecret, scopes) =>
         this.connectorApi.saveDeveloperCredential(slug, clientId, clientSecret, scopes),
@@ -1000,7 +1009,7 @@ export class UmbraOS {
         return r.output;
       },
       maxAttempts: 3,
-    });
+    }, this.toolIngestion);
 
     // ── P2P: pairing + signaling + PWA control plane — desktop only ──
     if (config.p2p.enabled && !this.headless) {
@@ -1152,8 +1161,8 @@ export class UmbraOS {
       agentConnectorBridge: this.connectorApi.getAgentConnectorBridge(),
     });
 
-    // ── Smart Home: give the agent SmartThings control ─────────
-    this.agent.registerSmartHome(this.smartThings, this.smartScheduler);
+    // ── Smart Home: the agent is given its Smart Home surface further down, once
+    // the hub and scheduler have actually been constructed.
 
     // ── Live Shadowing (real screen watch + takeover) — desktop only ──
     if (!this.headless) {
@@ -1220,7 +1229,7 @@ export class UmbraOS {
         // Find or create user for wallet linkage (tenantId may be userId or tenant::user)
         const user = this.userStore!.getUserById(tenantId) || this.userStore!.getUserById(tenantId.split('::').pop()!);
         const targetUserId = user ? user.id : tenantId;
-        // JIT wallet: Pro=$5, Advanced=$10, Enterprise=$20 models
+        // JIT wallet: Pro=5, Advanced=10, Enterprise=30 models
         const budgets = this.virtualWallet!.getBudgets(jitTier);
         try { this.virtualWallet!.init(targetUserId, jitTier); } catch {}
         // JIT Hetzner VPS provisioning
@@ -1281,7 +1290,23 @@ export class UmbraOS {
       token: config.smartthings?.token || '',
       baseUrl: config.smartthings?.baseUrl || 'https://api.smartthings.com',
     }, this.credVault as any);
-    this.smartScheduler = new SmartHomeScheduler(this.smartThings, config.paths.dataDir || undefined);
+
+    // ── Smart Home hub — multi-platform (SmartThings + HA + Hubitat + openHAB + Tuya + Hive + Homey + Apple/Alexa/Google bridges) ──
+    this.smartHomeHub = buildSmartHomeHub({ vault: this.credVault as any, smartThings: this.smartThings, config: (config as any).smartHome });
+
+    // Schedules route through the hub so rules on Home Assistant, Hubitat, Tuya, etc.
+    // run too. Rules saved before the hub existed hold a bare SmartThings id, so
+    // those keep going to the legacy service.
+    this.smartScheduler = new SmartHomeScheduler({
+      sendCommand: async (deviceId, command) => (deviceId.includes(':')
+        ? this.smartHomeHub.sendCommand(deviceId, command)
+        : this.smartThings.sendCommand(deviceId, command)),
+    }, config.paths.dataDir || undefined);
+
+    // ── Smart Home: give the agent its control surface (hub + scheduler) ──
+    // Registered here, not earlier, so these are the real instances.
+    this.agent.registerSmartHome(this.smartThings, this.smartScheduler);
+    this.agent.registerSmartHomeHub(this.smartHomeHub);
 
     // ── Open Carrusel (AI-powered Instagram carousel designer) ──
     this.carrusel = new OpenCarruselBridge(
@@ -1674,6 +1699,45 @@ export class UmbraOS {
   }
 
   // ─── Public API ────────────────────────────────────────────
+
+  /**
+   * On-demand OpenAPI ingestion for one connector (admin/API route): ingest
+   * into tool_definitions, then refresh the vector registry WITHOUT a restart
+   * — the evicted connector's old vectors are dropped and the replacement set
+   * re-embedded (hash-cache skips unchanged tools).
+   */
+  private async ingestConnectorOpenApi(opts: {
+    connectorId: string;
+    spec?: unknown;
+    specUrl?: string;
+    baseUrl?: string;
+    authType?: string;
+    apiKeyHeader?: string;
+    replace?: boolean;
+    maxTools?: number;
+  }): Promise<unknown> {
+    const result = await this.connectorApi.ingestOpenApiSpec(opts);
+    try {
+      if (this.toolVectorRegistry && this.toolIngestion) {
+        this.toolVectorRegistry.evictConnector(result.connectorId);
+        const defs = this.toolIngestion.listAll();
+        this.toolVectorRegistry.registerDefinitions(defs);
+        const embedded = await this.toolVectorRegistry.index({ force: false });
+        getLogger().info(
+          { connectorId: result.connectorId, embedded, indexed: this.toolVectorRegistry.status().indexed },
+          'Vector registry refreshed after OpenAPI ingestion',
+        );
+      }
+    } catch (err) {
+      // Definitions are already stored and keyword fallback still works;
+      // a vector refresh failure must not fail the ingestion request.
+      getLogger().warn(
+        { connectorId: result.connectorId, err: (err as Error).message },
+        'Vector re-index after ingestion failed — new tools stay keyword-retrievable',
+      );
+    }
+    return result;
+  }
 
   private async getApiStatus(): Promise<Record<string, unknown>> {
     const streamerStatus = this.streamer?.getStreamStatus ? this.streamer.getStreamStatus() : null;
@@ -2563,7 +2627,7 @@ export class UmbraOS {
       if (!userId || !user) throw new Error('No user could be resolved for checkout session');
       if (customerId) this.virtualWallet!.linkStripe(userId, customerId, subscriptionId);
 
-      // Activate plan + wallet (budgets: Pro=$5, Advanced=$10, Enterprise=$20 models)
+      // Activate plan + wallet (budgets: Pro=5, Advanced=10, Enterprise=30 models)
       const budgets = this.virtualWallet!.getBudgets(tier);
       this.virtualWallet!.init(userId, tier);
       const activateTier = tier === 'advanced' ? 'ultimate' : tier;
@@ -2613,10 +2677,11 @@ export class UmbraOS {
   }
 
   /** Smart routing with wallet + tier awareness and sticky prompt caching. */
-  getSmartRoute(userId: string, taskType: 'vision_ocr' | 'reasoning' | 'coding_heavy' | 'coding_fast' | 'routine', preferAltVision?: boolean): any {
+  getSmartRoute(userId: string, taskType: 'vision_ocr' | 'reasoning' | 'coding_heavy' | 'coding_fast' | 'routine' | 'backend_heavy' | 'agentic_code', preferAltVision?: boolean): any {
     const user = this.userStore!.getUserById(userId);
+    // Enterprise keeps its full-model route table; only ultimate folds into advanced.
     const rawPlan = (user?.plan as any) || 'free';
-    const plan = rawPlan === 'ultimate' ? 'advanced' : rawPlan === 'enterprise' ? 'advanced' : rawPlan;
+    const plan = rawPlan === 'ultimate' ? 'advanced' : rawPlan;
     const depleted = userId ? this.virtualWallet!.depleted(userId) : false;
     const decision = this.smartRouter.route(plan as any, taskType, { walletDepleted: depleted, preferAltVision });
     return { ...decision, plan, wallet: userId ? this.virtualWallet!.balance(userId) : null, depleted };
@@ -3920,21 +3985,28 @@ export class UmbraOS {
   // ── Smart Home (Samsung SmartThings) ─────────────────────
 
   async smartDevices(): Promise<any> {
-    if (!this.smartThings.isConfigured()) throw new Error('SmartThings is not configured — connect your PAT in Smart Home → Connect');
-    const timeout = <T>(p: Promise<T>, ms: number): Promise<T> => Promise.race([
-      p,
-      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('SmartThings request timed out (api.smartthings.com unreachable — check token/network)')), ms)),
-    ]);
-    // 12s total — rooms per-location can add a couple seconds beyond listDevices
-    return timeout(this.smartThings.getSmartHomeDevices(), 12000);
+    if (this.smartHomeHub.active().length > 0) {
+      const timeout = <T>(p: Promise<T>, ms: number): Promise<T> => Promise.race([
+        p,
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('Smart Home request timed out — a connected platform may be unreachable')), ms)),
+      ]);
+      return timeout(this.smartHomeHub.getDevices({ withStates: true }), 15000);
+    }
+    throw new Error('Smart Home is not configured — connect a platform in Smart Home → Connect');
   }
 
   async smartCommand(deviceId: string, command: 'on' | 'off'): Promise<any> {
+    // Namespaced ids (<platform>:<nativeId>) route through the multi-platform hub.
+    if (deviceId.includes(':')) {
+      if (this.smartHomeHub.active().length === 0) throw new Error('Smart Home is not configured — connect a platform in Smart Home → Connect');
+      return this.smartHomeHub.sendCommand(deviceId, command);
+    }
     if (!this.smartThings.isConfigured()) throw new Error('SmartThings is not configured — connect your PAT in Smart Home → Connect');
     return this.smartThings.sendCommand(deviceId, command);
   }
 
   async smartControlByName(name: string, command: 'on' | 'off'): Promise<any> {
+    if (this.smartHomeHub.active().length > 0) return this.smartHomeHub.controlByName(name, command);
     if (!this.smartThings.isConfigured()) throw new Error('SmartThings is not configured — connect your PAT in Smart Home → Connect');
     return this.smartThings.controlByName(name, command);
   }
@@ -3978,6 +4050,26 @@ export class UmbraOS {
   async smartClearToken(): Promise<{ ok: boolean }> {
     this.smartThings.clearToken();
     return { ok: true };
+  }
+
+  // ── Smart Home — multi-platform hub (SmartThings + HA + Hubitat + openHAB + Tuya + Hive + Homey + Apple/Alexa/Google) ──
+
+  async smartPlatforms(): Promise<any> {
+    return this.smartHomeHub.catalog();
+  }
+
+  async smartConnectPlatform(key: string, token: string, url?: string): Promise<any> {
+    const platform = this.smartHomeHub.get(key);
+    if (!platform?.setToken) throw new Error(`Platform "${key}" does not support token connect`);
+    const res = await platform.setToken(token, url);
+    return { ok: true, platform: key, deviceCount: res.deviceCount ?? 0, tokenMasked: res.tokenMasked };
+  }
+
+  async smartDisconnectPlatform(key: string): Promise<any> {
+    const platform = this.smartHomeHub.get(key);
+    if (!platform) throw new Error(`Unknown smart home platform "${key}"`);
+    await platform.clearToken?.();
+    return { ok: true, platform: key };
   }
 
   // ── Carrusel (AI-powered Instagram carousel designer) ──────

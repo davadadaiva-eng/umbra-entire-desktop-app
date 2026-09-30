@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import shutil
 import subprocess
@@ -60,6 +61,9 @@ class AudioEngine:
         self._callback = callback
         self._running = True
 
+        # Emit self-describing WAV (RIFF header + s16le PCM at the configured
+        # rate). The STT engine parses each chunk with soundfile, which needs
+        # the header. Do NOT pass --raw alongside --file-format=wav.
         cmd = [
             "parecord",
             "--device", self._config.pulse_monitor,
@@ -67,7 +71,7 @@ class AudioEngine:
             "--rate", str(self._config.audio_sample_rate),
             "--channels", str(self._config.audio_channels),
             "--file-format=wav",
-            "--raw",
+            "-",  # write to stdout
         ]
 
         logger.info("Starting audio capture: %s", " ".join(cmd))
@@ -133,20 +137,37 @@ class AudioEngine:
 
         logger.info("Audio capture stopped")
 
-    async def inject_audio(self, wav_bytes: bytes) -> None:
-        """Pipe WAV audio data into the virtual microphone source.
+    async def inject_audio(self, wav_bytes: bytes) -> float:
+        """Play a TTS-generated WAV into the virtual microphone sink.
 
         Parameters
         ----------
         wav_bytes:
-            Complete WAV file contents to inject.
+            Complete WAV file contents (header + PCM) as produced by
+            :meth:`tts_engine.PiperTTS.synthesize`.
+
+        Returns
+        -------
+        float
+            Duration of the injected audio in seconds (0.0 on failure).
         """
+        try:
+            pcm, rate, channels = self._extract_pcm(wav_bytes)
+        except Exception:
+            logger.exception("Could not parse TTS WAV blob; not injecting")
+            return 0.0
+
+        # Chromium captures bot_microphone.monitor; play the raw PCM into the
+        # bot_microphone sink at the TTS's own sample rate. The sink's monitor
+        # automatically exposes the stream to Chromium at the mic's negotiated
+        # rate, so no manual resampling is needed here.
         cmd = [
             "pacat",
             "--device", self._config.pulse_source,
             "--format", "s16le",
-            "--rate", str(self._config.audio_sample_rate),
-            "--channels", str(self._config.audio_channels),
+            "--rate", str(rate),
+            "--channels", str(channels),
+            "--raw",  # PCM only; the WAV header must NOT be played as audio
         ]
 
         try:
@@ -154,13 +175,33 @@ class AudioEngine:
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
             )
-            await proc.communicate(input=wav_bytes)
+            _, stderr = await proc.communicate(input=pcm)
 
+            duration = len(pcm) / (rate * channels * 2) if rate else 0.0
             if proc.returncode != 0:
-                logger.error("pacat exited with code %d", proc.returncode)
-            else:
-                logger.debug("Injected %d bytes into virtual mic", len(wav_bytes))
+                logger.error(
+                    "pacat exited with code %d: %s",
+                    proc.returncode,
+                    stderr.decode(errors="replace").strip(),
+                )
+                return 0.0
+            logger.debug(
+                "Injected %.1fs of PCM into virtual mic", duration
+            )
+            return duration
         except Exception:
             logger.exception("Audio injection failed")
+            return 0.0
+
+    @staticmethod
+    def _extract_pcm(wav_bytes: bytes) -> tuple[bytes, int, int]:
+        """Extract raw PCM, sample rate and channel count from a WAV blob."""
+        import wave
+
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wav_file:
+            rate = wav_file.getframerate()
+            channels = wav_file.getnchannels()
+            pcm = wav_file.readframes(wav_file.getnframes())
+        return pcm, rate, channels

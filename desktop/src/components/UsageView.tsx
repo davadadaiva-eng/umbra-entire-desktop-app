@@ -144,7 +144,7 @@ export function UsageView() {
     }
   };
 
-  const plan = 'Growth';
+  const plan = 'free';
 
   const planTier = planUsage ? String((planUsage.plan ?? planUsage.tier ?? (planUsage.usage as Record<string, unknown> | undefined)?.plan ?? plan) as string) : plan;
   const usageNode = (planUsage?.usage ?? planUsage?.data ?? {}) as Record<string, unknown>;
@@ -341,36 +341,74 @@ export function UsageView() {
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
             {[
-              { tier: 'Pro', desc: '$19.99/mo — $5 models, $6 cloud VPS' },
-              { tier: 'Advanced', desc: '$38/mo — $10 models, $8 cloud VPS' },
-              { tier: 'Enterprise', desc: '$89.99/mo — $20 models, $25 cloud, $15 telco' },
+              {
+                tier: 'pro',
+                name: 'Pro',
+                desc: '$19.99/mo — €5 AI models · CX33 cloud (€6.70)',
+                models: 'Gemini 2.5 Flash (frontend + tools) · GLM Long (backend) · Kimi Thinking (reasoning) · Muse Spark 1.3 (agentic code)',
+              },
+              {
+                tier: 'ultimate',
+                name: 'Advanced',
+                desc: '$38/mo — $10 AI models · CX43 cloud (€10)',
+                models: 'Flash + Kimi K3 (reasoning) · Claude Sonnet 5 (heavy backend) · Gemini 2.5 Pro (vision) · Spark 1.3 / Qwen Max (code)',
+              },
+              {
+                tier: 'enterprise',
+                name: 'Enterprise',
+                desc: '$89.99/mo — $30 AI models · CPX42 cloud (€29.99) · $15 telco',
+                models: 'Everything unlocked: Claude Sonnet 5 · Kimi K3 · Muse Spark 1.3 · Gemini 2.5 Pro · no downgrades',
+              },
             ].map((p) => (
-              <div key={p.tier} className="rounded-xl p-4 flex items-center justify-between" style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)' }}>
-                <div>
-                  <p className="text-sm font-bold" style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }}>{p.tier}</p>
-                  <p className="text-[11px] font-light" style={{ color: 'var(--text-dim)' }}>{p.desc}</p>
+              <div key={p.tier} className="rounded-xl p-4" style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)' }}>
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-bold" style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }}>{p.name}</p>
+                    <p className="text-[11px] font-light" style={{ color: 'var(--text-dim)' }}>{p.desc}</p>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <button
+                      onClick={() => void handleActivate(p.tier)}
+                      disabled={activatingTier === p.tier}
+                      className="px-3 py-1.5 rounded-lg text-[11px] font-medium transition-colors disabled:opacity-40"
+                      style={{ background: avatar.accent, color: '#fff', border: 'none', fontFamily: 'var(--font)' }}
+                    >
+                      {activatingTier === p.tier ? 'Activating…' : 'Activate'}
+                    </button>
+                    <button
+                      onClick={() => void handleCheckout(p.tier)}
+                      disabled={checkoutLoading === p.tier}
+                      className="px-3 py-1.5 rounded-lg text-[11px] font-medium transition-colors disabled:opacity-40"
+                      style={{ background: 'var(--surface-1)', color: 'var(--text-dim)', border: '1px solid var(--hairline-strong)', fontFamily: 'var(--font)' }}
+                    >
+                      {checkoutLoading === p.tier ? 'Loading…' : 'Checkout'}
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => void handleActivate(p.tier)}
-                    disabled={activatingTier === p.tier}
-                    className="px-3 py-1.5 rounded-lg text-[11px] font-medium transition-colors disabled:opacity-40"
-                    style={{ background: avatar.accent, color: '#fff', border: 'none', fontFamily: 'var(--font)' }}
-                  >
-                    {activatingTier === p.tier ? 'Activating…' : 'Activate'}
-                  </button>
-                  <button
-                    onClick={() => void handleCheckout(p.tier)}
-                    disabled={checkoutLoading === p.tier}
-                    className="px-3 py-1.5 rounded-lg text-[11px] font-medium transition-colors disabled:opacity-40"
-                    style={{ background: 'var(--surface-1)', color: 'var(--text-dim)', border: '1px solid var(--hairline-strong)', fontFamily: 'var(--font)' }}
-                  >
-                    {checkoutLoading === p.tier ? 'Loading…' : 'Checkout'}
-                  </button>
-                </div>
+                <p className="text-[10px] font-light mt-2 leading-snug" style={{ color: 'var(--text-faint)' }}>{p.models}</p>
               </div>
             ))}
           </div>
+          {(() => {
+            const b = (planUsage?.budget ?? {}) as Record<string, unknown>;
+            const spent = Number(b.spentUsd ?? 0);
+            const total = Number(b.monthlyBudgetUsd ?? 0);
+            if (!planUsage || !total) return null;
+            const pct = Math.min(100, Math.round((spent / total) * 100));
+            return (
+              <div className="rounded-xl p-4" style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)' }}>
+                <div className="flex items-center justify-between text-[11px] mb-1.5">
+                  <span className="font-semibold" style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }}>
+                    AI budget · ${spent.toFixed(2)} of ${total.toFixed(2)} used ({pct}%)
+                  </span>
+                  <span style={{ color: 'var(--text-faint)' }}>${Number(b.remainingUsd ?? total - spent).toFixed(2)} left · prompt caching on</span>
+                </div>
+                <div className="w-full rounded-full overflow-hidden" style={{ height: 6, background: 'var(--surface-3)' }}>
+                  <div className="rounded-full" style={{ width: `${pct}%`, height: '100%', background: pct > 85 ? '#ef4444' : pct > 60 ? '#f59e0b' : '#22c55e' }} />
+                </div>
+              </div>
+            );
+          })()}
         </div>
 
         <div className="usage-block card p-5 mb-5" style={{ background: 'var(--surface-1)' }}>
@@ -439,19 +477,19 @@ export function UsageView() {
 
         <div className="usage-block card p-5 flex items-center justify-between gap-4" style={{ background: `linear-gradient(120deg, ${avatar.accent}14, transparent)`, border: `1px solid ${avatar.accent}33` }}>
           <div>
-            <p className="text-sm font-bold" style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }}>{planTier} plan · 1,000,000 calls included</p>
+            <p className="text-sm font-bold" style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }}>{planTier} plan · pay-as-you-grow AI budgets</p>
             <p className="text-[11px] font-light mt-0.5" style={{ color: 'var(--text-dim)' }}>
-              Your teams stay in budget — upgrade doubles your call allocation.
+              Only an OpenRouter key is needed to start — plans add budgets, cloud servers and frontier models.
             </p>
           </div>
           <button
-            onClick={() => void handleCheckout('Scale')}
-            disabled={checkoutLoading === 'Scale'}
-            title="Open Scale checkout"
+            onClick={() => void handleCheckout('enterprise')}
+            disabled={checkoutLoading === 'enterprise'}
+            title="Open Enterprise checkout"
             className="flex-shrink-0 px-4 py-2 rounded-xl text-sm font-semibold disabled:opacity-60"
             style={{ background: avatar.accent, color: '#fff', border: 'none', fontFamily: 'var(--font)' }}
           >
-            {checkoutLoading === 'Scale' ? 'Opening…' : 'Upgrade to Scale'}
+            {checkoutLoading === 'enterprise' ? 'Opening…' : 'Upgrade to Enterprise'}
           </button>
         </div>
       </div>

@@ -723,6 +723,44 @@ describe('connector marketplace', () => {
     expect(res.status).toBe(500);
   });
 
+  test('GET /api/connectors/tools/schemas lists definitions with query passthrough', async () => {
+    const res = await api('/api/connectors/tools/schemas?q=gmail&limit=5&offset=10');
+    expect(res.status).toBe(200);
+    expect(res.json.tools[0].tool_id).toBe('curated-gmail.send_message');
+    expect(res.json.total).toBe(1);
+    expect(res.json.connection['curated-gmail']).toEqual({ connected: true, status: 'connected' });
+    expect(deps.calls.some(c => c.fn === 'listToolSchemas' && (c.args[0] as any)?.q === 'gmail')).toBe(true);
+  });
+
+  test('GET /api/connectors/:id/tools returns that connector schemas', async () => {
+    const res = await api('/api/connectors/curated-gmail/tools');
+    expect(res.status).toBe(200);
+    expect(res.json.connector).toBe('curated-gmail');
+    expect(res.json.tools[0].name).toBe('send_message');
+    expect(res.json.connection.connected).toBe(true);
+  });
+
+  test('POST /api/connectors/ingest-openapi forwards options and returns the summary', async () => {
+    const res = await api('/api/connectors/ingest-openapi', 'POST', {
+      connectorId: 'search-research-wikipedia',
+      specUrl: 'https://example.test/openapi.json',
+      replace: false,
+      maxTools: 40,
+    });
+    expect(res.status).toBe(200);
+    expect(res.json.ingested).toBe(12);
+    expect(res.json.catalogMatch).toBe(true);
+    const call = deps.calls.filter(c => c.fn === 'ingestConnectorOpenApi').pop()!;
+    expect(call.args[0]).toMatchObject({ connectorId: 'search-research-wikipedia', specUrl: 'https://example.test/openapi.json', replace: false, maxTools: 40 });
+  });
+
+  test('POST /api/connectors/ingest-openapi requires connectorId and a spec source', async () => {
+    const noId = await api('/api/connectors/ingest-openapi', 'POST', { spec: { openapi: '3.0.0', paths: {} } });
+    expect(noId.status).toBe(500);
+    const noSpec = await api('/api/connectors/ingest-openapi', 'POST', { connectorId: 'x' });
+    expect(noSpec.status).toBe(500);
+  });
+
   test('POST /api/connectors/sync refreshes the catalog', async () => {
     const res = await api('/api/connectors/sync', 'POST');
     expect(res.json.result.synced).toBe(40);

@@ -116,9 +116,9 @@ Rules:
     "repo" is the repo name (e.g. umbra, umbra ui desktop app, agent research, video building) or a path inside it.
 12. To change code in a repo: repo_read the relevant file, repo_write the edited file, then repo_run a build/test command to verify. Never write code without verifying with repo_run.
 13. PARALLEL EXECUTION: a step with no dependsOn may run at the same time as other such steps. For research/aggregation tasks (compare facts, gather several sources, look up multiple things and summarize), emit the independent gather steps FIRST with no dependsOn, then ONE aggregation step whose dependsOn lists every gather step's id. Give every step a stable id ("step-1", "step-2", ...) and only set dependsOn where an earlier step's result is genuinely needed.
-14. SMART HOME (Samsung SmartThings — lights, plugs, switches, thermostats when the user asks to control their home/devices/lights):
-    - sm_devices {} — list all SmartThings devices with their on/off state. Run this FIRST when a task mentions devices by name you haven't seen, so you can match names.
-    - sm_on {device} / sm_off {device} — turn a device on/off. "device" is the device name as shown in SmartThings (e.g. "Desk Lamp", "Porch Light"). Resolve the exact name from sm_devices output when unsure.
+14. SMART HOME (any connected platform — SmartThings, Home Assistant, Hubitat, openHAB, Tuya/Smart Life, Hive, Homey, Apple Home, Alexa, Google Home — lights, plugs, switches, thermostats, locks, sensors when the user asks to control their home/devices/lights):
+    - sm_devices {} — list all devices across every connected smart home platform, with their on/off state and platform label. Run this FIRST when a task mentions devices by name you haven't seen, so you can match names.
+    - sm_on {device} / sm_off {device} — turn a device on/off. "device" is the device name as shown on any connected platform (e.g. "Desk Lamp", "Porch Light") — matching is fuzzy across ALL platforms at once. Resolve the exact name from sm_devices output when unsure.
     - sm_schedule {device, command, kind, everyMinutes?, at?} — recurring device control (cron-style). kind "at" runs daily at HH:MM (24h, e.g. "19:00"); kind "everyMinutes" runs on an interval. Example: turn the porch light on every day at 7pm → sm_schedule {device: "Porch Light", command: "on", kind: "at", at: "19:00"}. Cancel or inspect schedules via sm_devices + user confirmation.
     Only use these when the user means their real smart home; otherwise ignore.
 

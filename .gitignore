@@ -21,3 +21,7 @@ release
 __pycache__
 *.pyc
 *.pyo
+
+# local backend dev logs (started by hand)
+backend-dev.log
+backend-dev.err.log

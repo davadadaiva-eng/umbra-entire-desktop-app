@@ -19,7 +19,8 @@ export interface AIProvider {
 }
 
 export const AI_PROVIDERS: AIProvider[] = [
-  { id: 'openrouter', label: 'OpenRouter', needsKey: true, models: ['google/gemini-2.0-flash-001', 'anthropic/claude-sonnet-4', 'anthropic/claude-haiku-4-5', 'openai/gpt-4o-mini', 'openai/gpt-4o', 'meta-llama/llama-3.3-70b-instruct', 'deepseek/deepseek-chat-v3-0324', 'qwen/qwen-2.5-72b-instruct'], baseUrl: 'https://openrouter.ai/api/v1/chat/completions' },
+  // Umbra lineup — one OpenRouter key funds every slot (see backend pricing.ts).
+  { id: 'openrouter', label: 'OpenRouter', needsKey: true, models: ['google/gemini-2.5-flash', 'google/gemini-2.5-pro', 'moonshotai/kimi-k3', 'moonshotai/kimi-k2-thinking', 'z-ai/glm-5-long', 'muse/muse-spark-1.3', 'anthropic/claude-sonnet-5', 'qwen/qwen3-max'], baseUrl: 'https://openrouter.ai/api/v1/chat/completions' },
   { id: 'free', label: 'Umbra Free', needsKey: false, models: ['openai', 'mistral', 'qwen-coder'], baseUrl: 'https://text.pollinations.ai/openai' },
   { id: 'openai', label: 'OpenAI', needsKey: true, models: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'], baseUrl: 'https://api.openai.com/v1/chat/completions' },
   { id: 'anthropic', label: 'Anthropic (Claude)', needsKey: true, models: ['claude-sonnet-4-5', 'claude-haiku-4-5', 'claude-opus-4-1'] },
@@ -36,7 +37,7 @@ export function providerById(id: string): AIProvider {
 export const DEFAULT_AI: AIConfig = {
   provider: 'openrouter',
   apiKey: import.meta.env.VITE_OPENROUTER_KEY || '',
-  model: 'google/gemini-2.0-flash-001',
+  model: 'google/gemini-2.5-flash',
 };
 
 export const FREE_AI: AIConfig = { provider: 'free', apiKey: '', model: 'openai' };

@@ -92,6 +92,21 @@ export interface ApiServerDeps {
   executeConnectorAction(connectorId: string, endpoint: string, method: string, payload: Record<string, unknown>, userId?: string): Promise<unknown>;
   /** Get tools relevant to a user query (for LLM function calling). */
   getRelevantTools(query: string, limit?: number): Promise<unknown>;
+  /** List stored tool definitions with per-connector connection state (schema browser). */
+  listToolSchemas(opts?: { q?: string; connectorId?: string; limit?: number; offset?: number }): Promise<unknown>;
+  /** All stored tool schemas for one connector. */
+  getConnectorTools(connectorId: string): Promise<unknown>;
+  /** Ingest an OpenAPI spec for one connector on demand (inline or fetched). */
+  ingestConnectorOpenApi(opts: {
+    connectorId: string;
+    spec?: unknown;
+    specUrl?: string;
+    baseUrl?: string;
+    authType?: string;
+    apiKeyHeader?: string;
+    replace?: boolean;
+    maxTools?: number;
+  }): Promise<unknown>;
   /** Sync connector catalog from external sources. */
   syncConnectorCatalog(): Promise<unknown>;
   /** Save developer credentials for a connector. */
@@ -243,7 +258,13 @@ export interface ApiServerDeps {
   socialCancelSchedule(id: string): Promise<unknown>;
   /** Social — get automation status. */
   socialStatus(): Promise<unknown>;
-  /** Smart Home — list SmartThings devices (with live switch state). */
+  /** Smart Home — platform catalog (connect cards for the UI). */
+  smartPlatforms(): Promise<unknown>;
+  /** Smart Home — connect a platform by key with a token (+ optional url). */
+  smartConnectPlatform(key: string, token: string, url?: string): Promise<unknown>;
+  /** Smart Home — disconnect a platform by key. */
+  smartDisconnectPlatform(key: string): Promise<unknown>;
+  /** Smart Home — list devices across all connected platforms (with live switch state). */
   smartDevices(): Promise<unknown>;
   /** Smart Home — send a switch command to a device. */
   smartCommand(deviceId: string, command: 'on' | 'off'): Promise<unknown>;
@@ -877,6 +898,8 @@ export class ApiServer {
       [/^GET \/api\/connectors\/([\w-]+)\/status$/, async (url, _body, match) => ({
         status: await this.deps.getConnectorStatus(match![1], url.searchParams.get('userId') || undefined),
       })],
+      [/^GET \/api\/connectors\/([\w-]+)\/tools$/, async (_url, _body, match) =>
+        this.deps.getConnectorTools(match![1])],
       [/^POST \/api\/connectors\/([\w-]+)\/disconnect$/, async (_url, _body, match) => ({
         result: await this.deps.disconnectConnectorApi(match![1]),
       })],
@@ -894,6 +917,27 @@ export class ApiServer {
         if (!query) throw new Error('query is required');
         const limit = body.limit !== undefined ? Number(body.limit) : undefined;
         return { tools: await this.deps.getRelevantTools(query, limit) };
+      }],
+      [/^GET \/api\/connectors\/tools\/schemas$/, async url =>
+        this.deps.listToolSchemas({
+          q: url.searchParams.get('q') || undefined,
+          connectorId: url.searchParams.get('connectorId') || undefined,
+          limit: url.searchParams.get('limit') !== null ? Number(url.searchParams.get('limit')) : undefined,
+          offset: url.searchParams.get('offset') !== null ? Number(url.searchParams.get('offset')) : undefined,
+        })],
+      [/^POST \/api\/connectors\/ingest-openapi$/, async (_url, body) => {
+        if (!body.connectorId) throw new Error('connectorId is required');
+        if (body.spec === undefined && !body.specUrl) throw new Error('spec or specUrl is required');
+        return this.deps.ingestConnectorOpenApi({
+        connectorId: String(body.connectorId || ''),
+        ...(body.spec !== undefined ? { spec: body.spec } : {}),
+        ...(body.specUrl !== undefined ? { specUrl: String(body.specUrl) } : {}),
+        ...(body.baseUrl !== undefined ? { baseUrl: String(body.baseUrl) } : {}),
+        ...(body.authType !== undefined ? { authType: String(body.authType) } : {}),
+        ...(body.apiKeyHeader !== undefined ? { apiKeyHeader: String(body.apiKeyHeader) } : {}),
+        ...(body.replace !== undefined ? { replace: body.replace === true } : {}),
+        ...(body.maxTools !== undefined ? { maxTools: Number(body.maxTools) } : {}),
+        });
       }],
       [/^POST \/api\/connectors\/sync$/, async () => ({
         result: await this.deps.syncConnectorCatalog(),
@@ -1203,6 +1247,16 @@ export class ApiServer {
       [/^GET \/api\/social\/status$/, async () => ({ social: await this.deps.socialStatus() })],
       // ── Smart Home (Samsung SmartThings) ─────────────────────
       [/^GET \/api\/smart\/status$/, async () => this.deps.smartStatus()],
+      [/^GET \/api\/smart\/platforms$/, async () => ({ platforms: await this.deps.smartPlatforms() })],
+      [/^POST \/api\/smart\/platforms\/([^/]+)\/connect$/, async (_url, body, match) => {
+        const key = String(match?.[1] || '');
+        const token = String(body.token || '').trim();
+        if (!token) throw new Error('token is required');
+        const url = body.url !== undefined ? String(body.url).trim() : undefined;
+        return this.deps.smartConnectPlatform(key, token, url || undefined);
+      }],
+      [/^POST \/api\/smart\/platforms\/([^/]+)\/disconnect$/, async (_url, _body, match) =>
+        this.deps.smartDisconnectPlatform(String(match?.[1] || ''))],
       [/^POST \/api\/smart\/token$/, async (_url, body) => {
         const token = String(body.token || '').trim();
         if (!token) throw new Error('token is required — paste your PAT from account.smartthings.com/tokens');

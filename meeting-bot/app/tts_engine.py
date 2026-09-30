@@ -34,14 +34,21 @@ class PiperTTS:
             model_dir = Path(self._config.tts_data_dir).expanduser()
             model_dir.mkdir(parents=True, exist_ok=True)
 
+            # PiperVoice.load() takes a model FILE path and reads
+            # "<path>.onnx.json" as the voice config next to it.
+            model_path = model_dir / f"{self._config.tts_voice}.onnx"
+            if not model_path.exists():
+                raise FileNotFoundError(
+                    f"Piper voice model not found at {model_path}. "
+                    "Run scripts/download_models.sh to fetch it."
+                )
+
             logger.info(
                 "Loading Piper voice %s from %s",
                 self._config.tts_voice,
-                model_dir,
+                model_path,
             )
-
-            # Piper expects a voice name; the library resolves the model path
-            self._model = piper.PiperVoice.load(self._config.tts_voice)
+            self._model = piper.PiperVoice.load(str(model_path))
             logger.info("Piper voice loaded successfully")
         except Exception:
             logger.exception("Failed to load Piper voice model")

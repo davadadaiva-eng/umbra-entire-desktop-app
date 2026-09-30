@@ -4,6 +4,7 @@ import { UmbraConfig, ModelProvider, McpConnectorConfig, McpOauthClientConfig } 
 import { getLogger } from '../core/Logger';
 import { MCP_CATALOG, McpCatalogEntry } from '../core/mcp/McpCatalog';
 import { DEFAULT_ROUTING } from '../core/metering/ModelRouter';
+import { MODELS as PRICING_MODELS, OPENROUTER_ENDPOINT } from '../core/metering/pricing';
 
 /** Accepted UMBRA_LLM_PROVIDER values → ModelProvider. */
 const ENV_PROVIDER_ALIASES: Record<string, ModelProvider> = {
@@ -259,7 +260,40 @@ export class ConfigManager {
     // Applied AFTER the first write so a boot-time env override never lands
     // in config.json.
     this.applyEnvOverrides();
+    this.applyOpenRouterDefault();
     return this.config;
+  }
+
+  /**
+   * OpenRouter-key-only startup: when an `OPENROUTER_API_KEY` is available
+   * (env or saved config) and no other provider was explicitly chosen, point
+   * everything at OpenRouter on that one key — provider, endpoint, lineup
+   * models, and the routed slots. Runtime-only, never persisted.
+   * Explicit `UMBRA_LLM_PROVIDER` always wins (applied just before this).
+   */
+  private applyOpenRouterDefault(): void {
+    const key = (process.env.OPENROUTER_API_KEY || '').trim()
+      || (this.config as any).openrouterApiKey
+      || this.config.openaiCompatible?.apiKey
+      || '';
+    if (!key) return;
+    if (this.config.provider !== 'ollama' && this.config.provider !== 'openai-compatible') return;
+
+    this.config.provider = 'openai-compatible';
+    this.config.models.provider = 'openai-compatible';
+    this.config.models.reasoning = PRICING_MODELS.kimiK3.id;
+    this.config.models.vision = PRICING_MODELS.geminiPro.id;
+    this.config.models.fast = PRICING_MODELS.geminiFlash.id;
+    this.config.openaiCompatible = {
+      ...this.config.openaiCompatible,
+      endpoint: this.config.openaiCompatible?.endpoint || OPENROUTER_ENDPOINT,
+      apiKey: key,
+    };
+    (this.config as any).openrouterApiKey = key;
+    this.config.plan.routing = this.config.plan.routing ?? { ...DEFAULT_ROUTING };
+    this.config.plan.routing.enabled = true;
+    this.config.llm = { ...this.config.llm, disabled: false, provider: 'openai-compatible', reason: undefined };
+    getLogger().info('OPENROUTER_API_KEY present — all model slots ride OpenRouter (Kimi K3 / Gemini / Muse Spark / Sonnet)');
   }
 
   /**

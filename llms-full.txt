@@ -201,7 +201,7 @@ All ports are bound to loopback (`127.0.0.1`) by default.
 - **Voice stack** — local STT/TTS/ASR via VibeVoice (voice cloning), whisper.cpp and Windows SAPI; hands-free voice commands, push-to-talk ("tap to listen") and meeting transcription. A `VoiceStackHealth` probe (STT / TTS / ASR / audio cable / loopback / mic) runs at boot and is reported in `/api/status`; the phone PWA can arm/disarm the push-to-talk hotkey from its settings card.
 - **Meetings** — attend end-to-end: plan an agenda, live digest, action items and decisions, with speaker diarization from VibeVoice-ASR ("who said what and when") plus mute / raise-hand / screen-share controls.
 - **MCP registry** — a model-context-protocol registry dispatches external tools over HTTP, native bindings or prompts, with vault-backed credentials; an MCP server endpoint lets external agents call Umbra's connectors.
-- **P2P mesh & device pairing** — an encrypted Rust mesh daemon plus a WebSocket device hub (port 8788) keeps phones/desktops connected; QR-code pairing, WebRTC streaming, and a bundled PWA for phone control. Plan device limits: Pro = 1 connected device, Ultimate = unlimited (enforced at join; `GET /api/devices` reports the limit).
+- **P2P mesh & device pairing** — an encrypted Rust mesh daemon plus a WebSocket device hub (port 8788) keeps phones/desktops connected; QR-code pairing, WebRTC streaming, and a bundled PWA for phone control. Plan device limits: Pro = 1 connected device, Ultimate (aka Advanced) = 5, Enterprise = unlimited (enforced at join; `GET /api/devices` reports the limit).
 - **Skill stack & context compression** — 20 domains × 5 skills (100 skills) route intents to skill definitions; a Graphify/Caveman pipeline compresses huge context (~10,000 tokens → ~300 with expandable cliques) before LLM calls.
 - **Metering & prompt caching** — every LLM call is gated behind a plan tier, a circuit breaker and token accounting, with prompt caching to cut repeat-context cost.
 - **Paid plans & billing** — Pro/Ultimate auto-assign a pre-split monthly token budget per model slot; a zero-dependency Stripe checkout + webhook (`/api/billing/checkout`, `/api/billing/webhook`) activates a plan automatically once payment succeeds.
@@ -266,7 +266,7 @@ src/
 The desktop app is a React 19 + Vite 8 + Electron 43 application:
 
 - **AI chat interface** — chat with the Umbra agent (Gemini Flash 2.0 by default, with automatic fallback to free providers)
-- **Smart home dashboard** — SmartThings device control
+- **Smart home hub** — multi-platform device control: SmartThings, Home Assistant, Hubitat Elevation, openHAB, Tuya/Smart Life, Hive, Homey, plus Apple Home / Amazon Alexa / Google Home via CLI bridges; connect cards in the Smart Home tab, tokens validated before vault persistence
 - **Voice controls** — push-to-talk, local voice engines
 - **Meeting companion** — agenda, live digest, action items
 - **Skills marketplace** — browse and install agent skills
@@ -534,19 +534,52 @@ Errors: `{ "error": "<message>" }` with status 400/404/500.
 | GET | `/api/meetings` | — | List meetings |
 | GET | `/api/meetings/:id` | — | Get a meeting by id |
 
-### 8.14 Smart Home (SmartThings)
+### 8.14 Smart Home (multi-platform hub)
+
+The smart home subsystem is a provider-neutral hub (`SmartHomeHub`): every
+platform adapter implements one interface, device ids are namespaced as
+`<platform>:<nativeId>` (e.g. `smartthings:lamp-1`, `homeassistant:switch.coffee`),
+and device-name matching is fuzzy across ALL connected platforms at once.
+One failing platform never breaks the aggregate responses.
+
+Supported platforms and how users connect them:
+
+| Key | Platform | Credential |
+| --- | --- | --- |
+| `smartthings` | Samsung SmartThings | PAT from account.smartthings.com/tokens (Devices Read+Control, Rooms Read) |
+| `homeassistant` | Home Assistant | Long-lived access token (Profile → Security) + server URL |
+| `hubitat` | Hubitat Elevation | Maker API app id + access token + hub URL |
+| `openhab` | openHAB | REST API token + server URL |
+| `tuya` | Tuya / Smart Life | IoT cloud project access token + regional endpoint |
+| `hive` | Hive (British Gas) | OAuth session token (api.bgchprod.info) |
+| `homey` | Homey (Athom) | PAT from tools.developer.homey.app |
+| `applehome` | Apple Home | CLI bridge — requires `homebridge` on PATH |
+| `alexa` | Amazon Alexa | CLI bridge — requires `alexa-remote-control` on PATH |
+| `googlehome` | Google Home | CLI bridge — requires `ghome` (google-nest-sdm) on PATH |
+
+Connect flow (UI or API): `GET /api/smart/platforms` lists the catalog, then
+`POST /api/smart/platforms/:key/connect` with `{ token, url? }` validates the
+device list BEFORE persisting to the encrypted vault — a failed connect never
+touches a previously stored credential.
 
 | Method | Path | Body | Description |
 | --- | --- | --- | --- |
-| GET | `/api/smart/status` | — | Connection status (token masked) |
-| POST | `/api/smart/token` | `{ token }` | Save PAT (validated before persistence) |
-| DELETE | `/api/smart/token` | — | Disconnect (clear PAT) |
-| GET | `/api/smart/devices` | — | List devices (with live switch state) |
-| POST | `/api/smart/command` | `{ deviceId, command }` | Send on/off to a device |
-| POST | `/api/smart/control` | `{ name, command }` | Control a device by fuzzy name match |
+| GET | `/api/smart/status` | — | Legacy SmartThings status (token masked) |
+| GET | `/api/smart/platforms` | — | Platform catalog (configured state, masked tokens, last errors) |
+| POST | `/api/smart/platforms/:key/connect` | `{ token, url? }` | Connect a platform (validated before persistence) |
+| POST | `/api/smart/platforms/:key/disconnect` | — | Disconnect a platform |
+| POST | `/api/smart/token` | `{ token }` | Legacy: save SmartThings PAT (validated) |
+| DELETE | `/api/smart/token` | — | Legacy: disconnect SmartThings |
+| GET | `/api/smart/devices` | — | Devices across all connected platforms (with live switch state) |
+| POST | `/api/smart/command` | `{ deviceId, command }` | Send on/off; `deviceId` may be namespaced (`smartthings:lamp-1`) |
+| POST | `/api/smart/control` | `{ name, command }` | Control a device by fuzzy name across all platforms |
 | GET | `/api/smart/schedules` | — | List device schedules |
 | POST | `/api/smart/schedules` | `{ deviceId, deviceName, command, kind, ... }` | Add a device schedule |
 | POST | `/api/smart/schedules/cancel` | `{ id }` | Cancel a device schedule |
+
+Agent tools `sm_devices` / `sm_on` / `sm_off` / `sm_schedule` operate across
+every connected platform simultaneously ("turn on the desk lamp" matches
+regardless of which hub the device lives on).
 
 ### 8.15 Vault
 
@@ -783,6 +816,7 @@ Configuration lives in `~/.umbra/config.json` (created on first boot with defaul
 - `shadow` — Live shadow recording (capture, fps)
 - `hermes` — External agent engine config
 - `smartthings` — SmartThings PAT and API URL
+- `smartHome` — per-platform pre-seeded credentials (e.g. `smartHome.homeassistant = { url, token }`)
 - `telco` — Telnyx settings
 - `docker` — Docker socket, default limits
 - `image` — Image generation provider
@@ -800,6 +834,11 @@ Configuration lives in `~/.umbra/config.json` (created on first boot with defaul
 | `UMBRA_LLM_PROVIDER` | Boot override: `ollama`/`openai`/`anthropic`/`openai-compatible`/`none` |
 | `UMBRA_CONSENT_AUTOGRANT` | `1` — skip consent prompts |
 | `UMBRA_SMARTTHINGS_TOKEN` | SmartThings PAT |
+| `UMBRA_HA_URL` | Home Assistant server URL (e.g. `http://homeassistant.local:8123`) |
+| `UMBRA_HUBITAT_URL` | Hubitat hub URL (Maker API base) |
+| `UMBRA_HUBITAT_APP_ID` | Hubitat Maker API app id (default `1`) |
+| `UMBRA_OPENHAB_URL` | openHAB REST server URL |
+| `UMBRA_TUYA_ENDPOINT` | Tuya IoT regional endpoint (e.g. `https://openapi.tuyaus.com`) |
 | `UMBRA_STRIPE_SECRET_KEY` | Stripe secret key |
 | `UMBRA_STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret |
 | `UMBRA_PUBLIC_URL` | Public base URL for QR/join links |
@@ -910,10 +949,18 @@ The cloud server runs Umbra's **headless core** — API, agent loop, MCP connect
 
 ### Cost targets
 
-| Plan | Cloud budget | Server size | Provider |
-| --- | --- | --- | --- |
-| Pro (€19) | ≤ $4/mo | 2 vCPU / 4 GB | Hetzner CX22 (~€3.79) |
-| Ultimate (€38) | ≤ $8–9/mo | 4 vCPU / 8 GB | Hetzner CX32 or CPX21 (~€7–9) |
+| Plan | Price | AI budget | Cloud server | Provider |
+| --- | --- | --- | --- | --- |
+| Pro | $19.99/mo | €5 models | 4 vCPU / 8 GB | Hetzner CX33 (€6.70/mo) |
+| Ultimate (aka Advanced) | $38/mo | $10 models | 8 vCPU / 16 GB | Hetzner CX43 (€10/mo) |
+| Enterprise | $89.99/mo | $30 models + $15 telco | AMD high-performance | Hetzner CPX42 (€29.99/mo) |
+
+Canonical numbers live in `backend/src/core/metering/pricing.ts` — do not
+duplicate $/1M model rates here. Model lineup: Gemini 2.5 Flash (frontend +
+fast tools), GLM Long (backend + large repos), Kimi K3 (reasoning, Advanced+;
+Pro uses Kimi Thinking), Gemini 2.5 Pro (vision / computer use), Muse Spark 1.3
+/ Qwen Max (agentic code), Claude Sonnet 5 (difficult / heavy architecture).
+All models run through OpenRouter on a single key with sticky prompt caching.
 
 ### Execution model: PC-first, cloud as fallback
 
@@ -962,7 +1009,7 @@ The cloud runs a DeviceHub (WebSocket on port 8788). Devices join once via QR co
 2. Hub returns a long-lived token
 3. Device auto-reconnects with backoff
 
-**Plan device limits**: Free/BYOK/Pro = 1 device, Ultimate = unlimited.
+**Plan device limits**: Free/BYOK/Pro = 1 device, Ultimate (aka Advanced) = 5, Enterprise = unlimited.
 
 ---
 

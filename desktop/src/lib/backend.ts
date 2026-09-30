@@ -80,6 +80,8 @@ export interface BackendStatus {
   voiceStack?: Record<string, unknown> | null;
   pushToTalk?: Record<string, unknown>;
   chromeExtension?: Record<string, unknown>;
+  /** Tool-framework health (retrieval mode + definition counts). */
+  tools?: ApiToolsHealth;
 }
 
 export const getHealth = () => backendFetch<{ ok: boolean; uptimeMs: number }>('/api/health');
@@ -1021,6 +1023,108 @@ export const connectorExecute = (opts: { connectorId: string; endpoint: string; 
     body: JSON.stringify(opts),
   });
 
+// ── Connector Tool Schemas (framework definitions) ────────────
+export interface ApiToolsHealth {
+  mode?: 'vector' | 'keyword' | string;
+  indexed?: number;
+  dimension?: number | null;
+  vecExtension?: boolean;
+  embedder?: boolean;
+  definitions?: number;
+}
+
+export interface ConnectorToolDefinition {
+  tool_id: string;
+  connector_id: string;
+  name: string;
+  natural_language_description: string;
+  category?: string;
+  parameters_schema: {
+    type: string;
+    properties?: Record<string, {
+      type?: string;
+      description?: string;
+      enum?: Array<string | number>;
+      items?: unknown;
+      required?: string[];
+    }>;
+    required?: string[];
+  };
+  auth_type?: string;
+  transport?: string;
+  endpoint_template?: string;
+  base_url?: string;
+  http_method?: string;
+  schema_quality?: string;
+  source?: string;
+}
+
+export interface ToolSchemasResult {
+  tools: ConnectorToolDefinition[];
+  total: number;
+  connectors: number;
+  connection: Record<string, { connected: boolean; status?: string }>;
+}
+
+// GET /api/status → the `tools` block only (null when unreachable/off).
+export const getToolsHealth = async (): Promise<ApiToolsHealth | null> => {
+  try {
+    const s = await backendFetch<Record<string, unknown>>('/api/status', { timeout: 15000 });
+    return (s as { tools?: ApiToolsHealth }).tools ?? null;
+  } catch {
+    return null;
+  }
+};
+
+export const listToolSchemas = (opts?: { q?: string; connectorId?: string; limit?: number; offset?: number }) => {
+  const params = new URLSearchParams();
+  if (opts?.q) params.set('q', opts.q);
+  if (opts?.connectorId) params.set('connectorId', opts.connectorId);
+  if (opts?.limit) params.set('limit', String(opts.limit));
+  if (opts?.offset) params.set('offset', String(opts.offset));
+  const qs = params.toString();
+  return backendFetch<ToolSchemasResult>(`/api/connectors/tools/schemas${qs ? `?${qs}` : ''}`);
+};
+
+export const getConnectorTools = (id: string) =>
+  backendFetch<{ connector: string; tools: ConnectorToolDefinition[]; connection: { connected: boolean; status?: string } }>(
+    `/api/connectors/${encodeURIComponent(id)}/tools`,
+  );
+
+export interface IngestOpenApiOptions {
+  connectorId: string;
+  /** Inline OpenAPI/Swagger JSON document (object form). */
+  spec?: unknown;
+  /** URL of an OpenAPI JSON document — fetched server-side. */
+  specUrl?: string;
+  baseUrl?: string;
+  authType?: string;
+  apiKeyHeader?: string;
+  /** Default true — delete the connector's previous definitions first. */
+  replace?: boolean;
+  maxTools?: number;
+}
+
+export interface IngestOpenApiResult {
+  connectorId: string;
+  ingested: number;
+  removed: number;
+  total: number;
+  replaced: boolean;
+  baseUrl?: string;
+  authType?: string;
+  catalogMatch: boolean;
+}
+
+// POST /api/connectors/ingest-openapi — grow the tool catalog without code
+// changes. The backend refreshes the vector registry without a restart.
+export const ingestConnectorOpenApi = (opts: IngestOpenApiOptions) =>
+  backendFetch<IngestOpenApiResult>('/api/connectors/ingest-openapi', {
+    method: 'POST',
+    body: JSON.stringify(opts),
+    timeout: 120000,
+  });
+
 export const syncConnectors = async () => {
   const res = await backendFetch<{ result?: { synced?: number; total?: number; added?: number } }>('/api/connectors/sync', { method: 'POST', timeout: 120000 });
   // Backend is canonical: POST /api/connectors/sync returns { result: { synced } }
@@ -1213,3 +1317,40 @@ export const smartHomeSwitch = (deviceId: string, command: 'on' | 'off') =>
     method: 'POST',
     body: JSON.stringify({ deviceId, command }),
   });
+
+// ── Smart Home — multi-platform hub ─────────────────────────────
+export interface SmartHomePlatformInfo {
+  key: string;
+  label: string;
+  help: string;
+  credentialsUrl?: string;
+  configured: boolean;
+  connected: boolean;
+  tokenMasked?: string;
+  lastError?: string;
+}
+export interface SmartHomeDeviceAny {
+  id: string;              // '<platform>:<nativeId>'
+  nativeId: string;
+  platform: string;
+  platformLabel: string;
+  name: string;
+  kind: string;
+  manufacturer: string;
+  room: string;
+  switchCapable: boolean;
+  switchState: 'on' | 'off' | null;
+  online: boolean;
+}
+export const getSmartHomePlatforms = () =>
+  backendFetch<{ platforms: SmartHomePlatformInfo[] }>('/api/smart/platforms');
+export const connectSmartHomePlatform = (key: string, token: string, url?: string) =>
+  backendFetch<{ ok: boolean; platform: string; deviceCount: number; tokenMasked?: string }>(
+    `/api/smart/platforms/${encodeURIComponent(key)}/connect`,
+    { method: 'POST', body: JSON.stringify({ token, ...(url ? { url } : {}) }) },
+  );
+export const disconnectSmartHomePlatform = (key: string) =>
+  backendFetch<{ ok: boolean; platform: string }>(
+    `/api/smart/platforms/${encodeURIComponent(key)}/disconnect`,
+    { method: 'POST' },
+  );

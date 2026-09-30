@@ -116,7 +116,7 @@ describe('TenantLedger', () => {
 
     ledger.activate('erin', 'enterprise');
     const enterprise = ledger.status('erin');
-    expect(enterprise.usage!.monthlyBudgetUsd).toBe(20);
+    expect(enterprise.usage!.monthlyBudgetUsd).toBe(30);
     expect(enterprise.deviceLimit).toBe(Infinity);
     expect(enterprise.deviceLimitLabel).toBe('unlimited');
   });

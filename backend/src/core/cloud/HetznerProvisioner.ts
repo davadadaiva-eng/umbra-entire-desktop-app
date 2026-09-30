@@ -1,11 +1,13 @@
 /**
  * HetznerProvisioner — on-demand VPS creation via Hetzner Cloud API.
  *
- * When a user pays via Stripe, this spins up a ~€4.49/mo CAX11 ARM64 box
- * (2 vCPU, 4 GB RAM), installs Umbra OS, and returns the access details.
+ * When a user pays via Stripe, this spins up their plan's box
+ * (pro → CX33 €6.70, advanced/ultimate → CX43 €10, enterprise → CPX42 €29.99),
+ * installs Umbra OS, and returns the access details.
  * On subscription cancel, the box is destroyed so the operator stops paying.
  *
- * Flow:
+ * Server types + costs live in ../metering/pricing (CLOUD_SPECS) —
+ * the single source of truth. Flow:
  *   1. Stripe webhook fires checkout.session.completed
  *   2. Umbra calls provision(userId, tier)
  *   3. Hetzner creates server, waits for SSH, runs cloud-init
@@ -15,6 +17,7 @@
  * Zero cost until a user actually pays — the VPS only exists while subscribed.
  */
 import { getLogger } from '../Logger';
+import { cloudSpecFor } from '../metering/pricing';
 
 export interface HetznerConfig {
   /** Hetzner Cloud API token (from cloud.hetzner.com/account/api-tokens). */
@@ -94,29 +97,23 @@ export class HetznerProvisioner {
 
   /**
    * Provision a new VPS for a paying user.
-   * Creates a Hetzner CAX11 server with cloud-init that installs Docker + Umbra.
+   * Server type comes from pricing.ts (CLOUD_SPECS): pro → CX33 (€6.70),
+   * advanced/ultimate → CX43 (€10), enterprise → CPX42 (€29.99).
    */
   /**
-   * JIT provisioning per spec: PRO→cx22 (4GB/40GB €3.79), ADVANCED→cx33 (8GB/80GB €6.49)
-   * Both use image=docker-ce, location=nbg1. Legacy tiers (free/ultimate) map to same.
+   * JIT provisioning per plan: each tier gets its own box.
+   * Legacy tiers (free/ultimate) map to their plan equivalents.
    */
   async provision(userId: string, tier: string): Promise<ProvisionResult> {
     if (!this.enabled) {
       return { serverId: 0, ip: '', sshPort: 22, status: 'error', accessUrl: '', sshCommand: '', estimatedCost: '', error: 'Hetzner not configured' };
     }
 
-    const normalizedTier = tier === 'advanced' ? 'advanced' : tier === 'pro' ? 'pro' : tier === 'ultimate' ? 'advanced' : tier;
+    const spec = cloudSpecFor(tier);
+    const normalizedTier = tier === 'advanced' ? 'advanced' : tier === 'pro' ? 'pro' : tier === 'ultimate' ? 'ultimate' : tier === 'enterprise' ? 'enterprise' : tier;
     const serverName = `umbra-${userId.slice(0, 8)}-${normalizedTier}`;
-    // JIT spec matrix
-    const jitMap: Record<string, { type: string; cost: string }> = {
-      pro: { type: 'cx22', cost: '€3.79/mo' },
-      advanced: { type: 'cx33', cost: '€6.49/mo' },
-      ultimate: { type: 'cx33', cost: '€6.49/mo' },
-      free: { type: 'cx22', cost: '€3.79/mo' },
-    };
-    const spec = jitMap[normalizedTier] || jitMap.pro;
     const serverType = spec.type;
-    const estimatedCost = spec.cost;
+    const estimatedCost = spec.label;
 
     getLogger().info({ userId, tier, serverName, serverType }, 'Provisioning Hetzner VPS');
 

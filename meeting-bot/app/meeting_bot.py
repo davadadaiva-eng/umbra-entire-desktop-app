@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Optional
@@ -19,8 +20,10 @@ CHROMIUM_ARGS = [
     "--no-sandbox",
     "--disable-gpu",
     '--js-flags="--max-old-space-size=1500"',
+    # --use-fake-ui-for-media-stream auto-accepts the mic permission prompt;
+    # the device itself must be the real PulseAudio virtual mic so the bot
+    # is audible to other participants.
     "--use-fake-ui-for-media-stream",
-    "--use-fake-device-for-media-stream",
     "--disable-background-networking",
     "--disable-default-apps",
     "--disable-extensions",
@@ -58,6 +61,9 @@ class MeetingBot:
         self._meeting_url = ""
         self._platform = ""
         self._running = False
+        # Wall-clock timestamp until which captured audio should be ignored
+        # because it is the bot's own TTS (prevents self-transcription).
+        self._bot_talking_until = 0.0
         self._transcript: list[dict[str, Any]] = []
 
     @property
@@ -157,17 +163,9 @@ class MeetingBot:
         except Exception:
             pass
 
-        # Mute mic before joining
-        try:
-            mic_btn = self._page.locator(
-                'button[aria-label*="Turn off microphone"], '
-                'button[aria-label*="Mute"]'
-            )
-            if await mic_btn.is_visible(timeout=3000):
-                await mic_btn.click()
-        except Exception:
-            pass
-
+        # NOTE: deliberately NOT muting the microphone here. The bot must
+        # be audible to other participants; muting before joining silences
+        # the TTS audio Chromium captures from the virtual mic.
         # Click join / ask to join
         try:
             join_btn = self._page.locator(
@@ -259,6 +257,11 @@ class MeetingBot:
         async def on_audio_chunk(chunk: bytes) -> None:
             if not self._running:
                 return
+            # Suppress chunks captured while the bot itself is speaking (+
+            # tail) so it never transcribes its own voice.
+            if time.monotonic() < self._bot_talking_until:
+                logger.debug("Skipping chunk: bot is talking (self-echo guard)")
+                return
             try:
                 result = await self._stt.transcribe(chunk)
                 text = result.get("text", "").strip()
@@ -276,7 +279,13 @@ class MeetingBot:
 
                 if response:
                     wav_bytes = await self._tts.synthesize(response)
-                    await self._audio.inject_audio(wav_bytes)
+                    duration = await self._audio.inject_audio(wav_bytes)
+                    if duration > 0:
+                        # Ignore mic audio for the speech duration plus a tail
+                        # covering pacat teardown and codec/room latency.
+                        self._bot_talking_until = (
+                            time.monotonic() + duration + 0.5
+                        )
             except Exception:
                 logger.exception("Error in meeting audio processing loop")
 

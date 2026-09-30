@@ -183,6 +183,12 @@ export class ToolIngestion {
     return row?.n ?? 0;
   }
 
+  /** Remove every definition for one connector (replace-semantics re-ingest). */
+  deleteForConnector(connectorId: string): number {
+    const info = this.db.prepare('DELETE FROM tool_definitions WHERE connector_id = ?').run(connectorId);
+    return info.changes;
+  }
+
   close(): void {
     this.db.close();
   }

@@ -211,4 +211,14 @@ describe('ToolIngestion', () => {
     ingestion.ingestOpenApi('test-pets', OPENAPI_SPEC);
     expect(ingestion.count()).toBe(3);
   });
+
+  it('deleteForConnector removes only that connector definitions', () => {
+    ingestion.ingestOpenApi('test-pets', OPENAPI_SPEC);
+    ingestion.loadCurated();
+    const before = ingestion.count();
+    const removed = ingestion.deleteForConnector('test-pets');
+    expect(removed).toBe(3);
+    expect(ingestion.getForConnector('test-pets')).toHaveLength(0);
+    expect(ingestion.count()).toBe(before - 3);
+  });
 });

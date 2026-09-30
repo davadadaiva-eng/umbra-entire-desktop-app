@@ -20,6 +20,7 @@ import { ConfigManager } from '../src/config/ConfigManager';
 import { CredentialVault } from '../src/core/vault/CredentialVault';
 import { getStableHwid } from '../src/native/win32/HardwareId';
 import { DEFAULT_ROUTING } from '../src/core/metering/ModelRouter';
+import { MODELS as PRICING_MODELS } from '../src/core/metering/pricing';
 import { ModelProvider, PlanTier, RoutingConfig, RoutingTier } from '../src/types';
 
 const PROVIDERS: ModelProvider[] = ['ollama', 'openai', 'anthropic', 'openai-compatible'];
@@ -31,16 +32,20 @@ const PROVIDER_MODELS: Record<string, { reasoning: string; vision: string; fast:
   'openai-compatible': { reasoning: '', vision: '', fast: '' },
 };
 
-/** OpenRouter — one key can fund every model slot (OpenAI-compatible). */
+/** OpenRouter — one key funds every model slot (OpenAI-compatible). */
 const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1';
 
-/** Real model ids + pricing (USD per 1M tokens) for each routing slot. */
+/**
+ * Real model ids + pricing (USD per 1M tokens) for each routing slot.
+ * Imported from pricing.ts — the single source of truth. Only an OpenRouter
+ * key is needed to start: every slot rides OpenRouter on that one key.
+ */
 const OPENROUTER_SLOTS: Record<RoutingTier, { model: string; inputPerM: number; cacheHitPerM: number; outputPerM: number }> = {
-  free: { model: 'meta-llama/llama-3.1-8b-instruct:free', inputPerM: 0, cacheHitPerM: 0, outputPerM: 0 },
-  fast: { model: 'deepseek/deepseek-chat', inputPerM: 0.27, cacheHitPerM: 0.07, outputPerM: 1.1 },
-  reasoning: { model: 'deepseek/deepseek-r1', inputPerM: 0.55, cacheHitPerM: 0.14, outputPerM: 2.19 },
-  frontend: { model: 'meta-llama/llama-3.3-70b-instruct', inputPerM: 0.23, cacheHitPerM: 0.04, outputPerM: 0.4 },
-  difficult: { model: 'anthropic/claude-3.5-sonnet', inputPerM: 3, cacheHitPerM: 0.3, outputPerM: 15 },
+  free: { model: PRICING_MODELS.free.id, inputPerM: 0, cacheHitPerM: 0, outputPerM: 0 },
+  fast: { model: PRICING_MODELS.geminiFlash.id, inputPerM: PRICING_MODELS.geminiFlash.inputPerM, cacheHitPerM: PRICING_MODELS.geminiFlash.cacheReadPerM, outputPerM: PRICING_MODELS.geminiFlash.outputPerM },
+  reasoning: { model: PRICING_MODELS.kimiK3.id, inputPerM: PRICING_MODELS.kimiK3.inputPerM, cacheHitPerM: PRICING_MODELS.kimiK3.cacheReadPerM, outputPerM: PRICING_MODELS.kimiK3.outputPerM },
+  frontend: { model: PRICING_MODELS.geminiFlash.id, inputPerM: PRICING_MODELS.geminiFlash.inputPerM, cacheHitPerM: PRICING_MODELS.geminiFlash.cacheReadPerM, outputPerM: PRICING_MODELS.geminiFlash.outputPerM },
+  difficult: { model: PRICING_MODELS.claudeSonnet.id, inputPerM: PRICING_MODELS.claudeSonnet.inputPerM, cacheHitPerM: PRICING_MODELS.claudeSonnet.cacheReadPerM, outputPerM: PRICING_MODELS.claudeSonnet.outputPerM },
 };
 
 /** Point every routing slot at OpenRouter with a real model id + pricing. */
@@ -213,9 +218,9 @@ async function main(): Promise<void> {
     provider = 'openai-compatible';
     endpoint = OPENROUTER_ENDPOINT;
     apiKey = openRouterKey;
-    modelReasoning = 'deepseek/deepseek-r1';
-    modelVision = 'meta-llama/llama-3.3-70b-instruct';
-    modelFast = 'deepseek/deepseek-chat';
+    modelReasoning = PRICING_MODELS.kimiK3.id;
+    modelVision = PRICING_MODELS.geminiPro.id;
+    modelFast = PRICING_MODELS.geminiFlash.id;
   } else {
     provider = (arg('provider') || process.env.UMBRA_PROVIDER || fv('provider', 'UMBRA_PROVIDER') || '') as ModelProvider;
     if (!PROVIDERS.includes(provider)) {

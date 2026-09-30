@@ -61,7 +61,8 @@ UI contract: [`docs/ui-contract.md`](docs/ui-contract.md).
 - **P2P mesh & device pairing** — an encrypted Rust mesh daemon plus a WebSocket device
   hub (port 8788) keeps phones/desktops connected; QR-code pairing, WebRTC streaming, and
   a bundled PWA for phone control. Plan device limits: Pro = 1 connected device,
-  Ultimate = unlimited (enforced at join; `GET /api/devices` reports the limit).
+  Ultimate (aka Advanced) = 5, Enterprise = unlimited (enforced at join;
+  `GET /api/devices` reports the limit).
 - **Skill stack & context compression** — 20 domains × 5 skills (100 skills) route
   intents to skill definitions; a Graphify/Caveman pipeline compresses huge context
   (~10,000 tokens → ~300 with expandable cliques) before LLM calls.

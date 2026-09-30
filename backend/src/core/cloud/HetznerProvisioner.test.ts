@@ -50,14 +50,14 @@ describe('HetznerProvisioner', () => {
     expect(result.status).toBe('provisioning');
     expect(result.accessUrl).toBe('http://1.2.3.4:8787');
     expect(result.sshCommand).toBe('ssh root@1.2.3.4');
-    expect(result.estimatedCost).toBe('€3.79/mo');
+    expect(result.estimatedCost).toBe('€6.70/mo');
     expect(capturedUrl).toBe('https://api.hetzner.cloud/v1/servers');
     expect(capturedBody.name).toContain('umbra');
-    expect(capturedBody.server_type).toBe('cx22');
+    expect(capturedBody.server_type).toBe('cx33');
     expect(capturedBody.user_data).toContain('nodejs');
   });
 
-  it('provision uses cx33 for advanced tier', async () => {
+  it('provision uses cx43 for advanced tier', async () => {
     const mockFetch = async (_url: string, _init: RequestInit) => {
       return {
         ok: true,
@@ -74,8 +74,28 @@ describe('HetznerProvisioner', () => {
     });
 
     const result = await p.provision('user-2', 'advanced');
-    // advanced maps to cx33
-    expect(result.estimatedCost).toBe('€6.49/mo');
+    // advanced maps to cx43
+    expect(result.estimatedCost).toBe('€10/mo');
+  });
+
+  it('provision uses cpx42 for enterprise tier', async () => {
+    const mockFetch = async (_url: string, _init: RequestInit) => {
+      return {
+        ok: true,
+        json: async () => ({
+          server: { id: 7, public_net: { ipv4: { ip: '9.9.9.9' } } },
+        }),
+      } as Response;
+    };
+
+    const p = new HetznerProvisioner({
+      apiToken: 'tok',
+      sshKeyName: 'key',
+      fetchImpl: mockFetch as any,
+    });
+
+    const result = await p.provision('user-3', 'enterprise');
+    expect(result.estimatedCost).toBe('€29.99/mo');
   });
 
   it('teardown calls DELETE', async () => {

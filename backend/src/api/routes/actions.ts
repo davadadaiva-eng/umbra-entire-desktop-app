@@ -156,6 +156,16 @@ export function actionRoutes(deps: ApiServerDeps): ActionRouteEntry[] {
     }],
     [/^GET \/api\/social\/status$/, async () => ({ social: await deps.socialStatus() })],
     [/^GET \/api\/smart\/status$/, async () => deps.smartStatus()],
+    [/^GET \/api\/smart\/platforms$/, async () => ({ platforms: await deps.smartPlatforms() })],
+    [/^POST \/api\/smart\/platforms\/([^/]+)\/connect$/, async (_url, body, match) => {
+      const key = String(match?.[1] || '');
+      const token = String(body.token || '').trim();
+      if (!token) throw new Error('token is required');
+      const url = body.url !== undefined ? String(body.url).trim() : undefined;
+      return deps.smartConnectPlatform(key, token, url || undefined);
+    }],
+    [/^POST \/api\/smart\/platforms\/([^/]+)\/disconnect$/, async (_url, _body, match) =>
+      deps.smartDisconnectPlatform(String(match?.[1] || ''))],
     [/^POST \/api\/smart\/token$/, async (_url, body) => {
       const token = String(body.token || '').trim();
       if (!token) throw new Error('token is required — paste your PAT from account.smartthings.com/tokens');

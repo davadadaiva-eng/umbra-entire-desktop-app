@@ -3,12 +3,15 @@
  * enforces a hard monthly *cost* budget, so hosted tokens never exceed what
  * the plan covers.
  *
- * Model slots:
+ * Model slots (flagship defaults — plan downgrades live in pricing.ts):
  *   free       — cloud free models (OpenRouter `:free`); the spillover target.
- *   fast       — day-to-day quick/vision work (DeepSeek V4 Flash).
- *   reasoning  — day-to-day agentic work (DeepSeek-R1).
- *   frontend   — frontend/design work (Muse Spark 1.2).
+ *   fast       — day-to-day quick work (Gemini 2.5 Flash).
+ *   reasoning  — day-to-day agentic work (Kimi K3).
+ *   frontend   — frontend/design work (Gemini 2.5 Flash).
  *   difficult  — hard tasks (Claude Sonnet 5).
+ *
+ * All prices, budgets, and model IDs live in ./pricing — the single source
+ * of truth. This file only re-exports them under their historic names.
  *
  * The token-saving stack is baked into the cost model and activated with the
  * plan:
@@ -28,105 +31,53 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { PlanTier, RoutingConfig, RoutingTier, UmbraConfig } from '../../types';
 import { estimateTokens } from '../graphify/Caveman';
+import {
+  PLAN_PROFILES as PRICING_PLANS,
+  MODELS as PRICING_MODELS,
+  SLOT_DEFAULTS,
+  OPENROUTER_ENDPOINT,
+  CACHE_HIT_RATIO,
+  type PlanProfile as PricingPlanProfile,
+} from './pricing';
 
-export interface PlanProfile {
-  name: string;
-  /** What the user pays per month. */
-  monthlyPriceUsd: number;
-  /** What Umbra may spend on hosted tokens per month. */
-  monthlyBudgetUsd: number;
-  /** Monthly cloud VPS budget (USD). */
-  cloudBudgetUsd: number;
-  /** Monthly telco/phone budget (USD). 0 = no telco included. */
-  telcoBudgetUsd: number;
-  /** How that budget is split across the four paid model slots. */
-  slotBudgetUsd: Record<RoutingTier, number>;
-  /** Hard max output tokens on every routed request (Caveman cap). */
-  maxOutputTokens: number;
-}
+export type PlanProfile = PricingPlanProfile;
 
 /**
  * The hosted plan ladder. Budgets are assigned automatically from the plan
- * tier — no per-user configuration is required:
- *   - `free`       — $0, cloud free models only (or bring your own key via BYOK).
- *   - `byok`       — $0, the user's own provider/key, uncapped.
- *   - `pro`        — $19.99/mo: $5 models, $6 cloud VPS.
- *   - `ultimate`   — $38/mo: $10 models, $8 cloud VPS.
- *   - `enterprise` — $89.99/mo: $20 models, $25 cloud VPS, $10-15 telco.
+ * (see pricing.ts — pro €5 models / €6.70 cloud, ultimate $10 / €10,
+ * enterprise $30 / €29.99 + $15 telco).
  */
-export const PLAN_PROFILES: Record<PlanTier, PlanProfile> = {
-  free: {
-    name: 'Free',
-    monthlyPriceUsd: 0,
-    monthlyBudgetUsd: 0,
-    cloudBudgetUsd: 0,
-    telcoBudgetUsd: 0,
-    slotBudgetUsd: { free: 0, fast: 0, reasoning: 0, frontend: 0, difficult: 0 },
-    maxOutputTokens: 800,
-  },
-  byok: {
-    name: 'Bring your own key',
-    monthlyPriceUsd: 0,
-    monthlyBudgetUsd: Infinity,
-    cloudBudgetUsd: 0,
-    telcoBudgetUsd: 0,
-    slotBudgetUsd: { free: Infinity, fast: Infinity, reasoning: Infinity, frontend: Infinity, difficult: Infinity },
-    maxOutputTokens: 800,
-  },
-  pro: {
-    name: 'Pro',
-    monthlyPriceUsd: 19.99,
-    monthlyBudgetUsd: 5,
-    cloudBudgetUsd: 6,
-    telcoBudgetUsd: 0,
-    slotBudgetUsd: { free: 0, fast: 1, reasoning: 1, frontend: 1, difficult: 2 },
-    maxOutputTokens: 800,
-  },
-  ultimate: {
-    name: 'Advanced',
-    monthlyPriceUsd: 38,
-    monthlyBudgetUsd: 10,
-    cloudBudgetUsd: 8,
-    telcoBudgetUsd: 0,
-    slotBudgetUsd: { free: 0, fast: 2, reasoning: 2, frontend: 2, difficult: 4 },
-    maxOutputTokens: 1200,
-  },
-  enterprise: {
-    name: 'Enterprise',
-    monthlyPriceUsd: 89.99,
-    monthlyBudgetUsd: 20,
-    cloudBudgetUsd: 25,
-    telcoBudgetUsd: 15,
-    slotBudgetUsd: { free: 0, fast: 4, reasoning: 4, frontend: 4, difficult: 8 },
-    maxOutputTokens: 2000,
-  },
-};
+export const PLAN_PROFILES: Record<PlanTier, PlanProfile> = PRICING_PLANS;
 
 /**
- * Default model slots. Model names mirror the spec (DeepSeek V4 Flash /
- * DeepSeek-R1 / Muse Spark 1.2 / Claude Sonnet 5) but are plain strings — a
- * user's own config can override every field. The free slot uses OpenRouter
- * cloud free models so spillover works without a local GPU.
+ * Default model slots. All slots ride OpenRouter (openai-compatible) on the
+ * operator's single key. The free slot uses OpenRouter cloud free models so
+ * spillover works without a local GPU.
  */
+function slot(tier: RoutingTier): RoutingConfig[RoutingTier] {
+  const def = SLOT_DEFAULTS[tier];
+  const price = PRICING_MODELS[def.modelKey];
+  return {
+    provider: def.provider,
+    model: price.id,
+    ...(def.endpoint || tier === 'free' ? { endpoint: def.endpoint ?? OPENROUTER_ENDPOINT } : {}),
+    inputPerM: price.inputPerM,
+    cacheHitPerM: price.cacheReadPerM,
+    outputPerM: price.outputPerM,
+  };
+}
+
 export const DEFAULT_ROUTING: RoutingConfig = {
   enabled: false,
-  cacheHitRatio: 0.85,
+  cacheHitRatio: CACHE_HIT_RATIO,
   graphify: true,
   caveman: true,
-  free: {
-    provider: 'openai-compatible',
-    model: 'meta-llama/llama-3.1-8b-instruct:free',
-    endpoint: 'https://openrouter.ai/api/v1',
-    inputPerM: 0,
-    cacheHitPerM: 0,
-    outputPerM: 0,
-  },
-  fast: { provider: 'openai-compatible', model: 'deepseek-v4-flash', inputPerM: 0.14, cacheHitPerM: 0.0028, outputPerM: 0.28 },
-  reasoning: { provider: 'openai-compatible', model: 'deepseek-r1', inputPerM: 0.55, cacheHitPerM: 0.14, outputPerM: 2.19 },
-  frontend: { provider: 'openai-compatible', model: 'muse-spark-1.2', inputPerM: 0.55, cacheHitPerM: 0.14, outputPerM: 2.19 },
-  difficult: { provider: 'anthropic', model: 'claude-sonnet-5', inputPerM: 3.0, cacheHitPerM: 0.3, outputPerM: 15.0 },
+  free: slot('free'),
+  fast: slot('fast'),
+  reasoning: slot('reasoning'),
+  frontend: slot('frontend'),
+  difficult: slot('difficult'),
 };
-
 export interface RouterUsage {
   date: string; // YYYY-MM-DD
   month: string; // YYYY-MM

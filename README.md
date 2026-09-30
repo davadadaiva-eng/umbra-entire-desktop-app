@@ -32,7 +32,7 @@ The backend runs on port 8787 and provides:
 - AI agent runtime (LLM routing, task planning, execution)
 - Voice stack (STT/TTS, noise cancellation, gesture detection)
 - P2P mesh networking (device pairing, encrypted channels)
-- Smart home integration (SmartThings)
+- Smart home integration (SmartThings, Home Assistant, Hubitat, openHAB, Tuya/Smart Life, Hive, Homey, Apple Home, Alexa, Google Home)
 - Meeting companion
 - Knowledge graph + recall
 - Credential vault

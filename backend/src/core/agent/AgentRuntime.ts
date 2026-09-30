@@ -30,6 +30,7 @@ import { ToolDefinition, toolFunctionName } from '../mcp/ToolDefinition';
 import { LLMToolDeclaration } from './LLMConnector';
 import { SmartThingsService, type SwitchCommand } from '../smart/SmartThingsService';
 import { SmartHomeScheduler } from '../smart/SmartHomeScheduler';
+import type { SmartHomeHub } from '../smart/SmartHomePlatform';
 import { eventBus } from '../EventBus';
 import { getLogger } from '../Logger';
 import { InjectionGuard } from './InjectionGuard';
@@ -68,6 +69,7 @@ export class AgentRuntime {
   /** Smart Home (Samsung SmartThings) — device control for the agent. */
   private smartThings?: SmartThingsService;
   private smartScheduler?: SmartHomeScheduler;
+  private smartHub?: SmartHomeHub;
   private activeTasks: Map<string, Task> = new Map();
   private maxSteps: number = 15;
   /** Cap on how many independent plan steps may execute in parallel. */
@@ -957,7 +959,17 @@ export class AgentRuntime {
     this.inProcess = undefined;
   }
 
+  /** Register the multi-platform Smart Home hub (cross-platform device control). */
+  registerSmartHomeHub(hub: SmartHomeHub): void {
+    this.smartHub = hub;
+    this.inProcess = undefined;
+  }
+
   private async executeSmartDevicesStep(): Promise<string> {
+    if (this.smartHub) {
+      const devices = await this.smartHub.getDevices({ withStates: true });
+      return JSON.stringify(devices.map(d => ({ name: d.name, kind: d.kind, room: d.room, state: d.switchState, switchable: d.switchCapable, platform: d.platform })));
+    }
     if (!this.smartThings) return 'Smart Home not configured';
     if (!this.smartThings.isConfigured()) return 'SmartThings is not configured (set UMBRA_SMARTTHINGS_TOKEN)';
     const devices = await this.smartThings.getSmartHomeDevices({ withStates: true });
@@ -965,6 +977,11 @@ export class AgentRuntime {
   }
 
   private async executeSmartControlStep(command: SwitchCommand, deviceName: string): Promise<string> {
+    if (this.smartHub) {
+      if (!deviceName) return `sm_${command} needs params.device (the device name)`;
+      const r = await this.smartHub.controlByName(deviceName, command);
+      return `OK: ${r.name} (${r.platform}) turned ${r.command}`;
+    }
     if (!this.smartThings) return 'Smart Home not configured';
     if (!this.smartThings.isConfigured()) return 'SmartThings is not configured (set UMBRA_SMARTTHINGS_TOKEN)';
     if (!deviceName) return `sm_${command} needs params.device (the device name)`;

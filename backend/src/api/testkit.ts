@@ -139,6 +139,35 @@ export function makeFullDeps(overrides: Partial<ApiServerDeps> = {}): FullDeps {
       return { status: 200, body: { ok: true, method, endpoint } };
     },
     getRelevantTools: async (query: string, limit?: number) => [{ name: 'gmail.send', query, limit }],
+    listToolSchemas: async (opts?: Record<string, unknown>) => {
+      calls.push({ fn: 'listToolSchemas', args: [opts] });
+      return {
+        tools: [{ tool_id: 'curated-gmail.send_message', connector_id: 'curated-gmail', name: 'send_message' }],
+        total: 1,
+        connectors: 1,
+        connection: { 'curated-gmail': { connected: true, status: 'connected' } },
+        ...opts,
+      };
+    },
+    getConnectorTools: async (connectorId: string) => {
+      calls.push({ fn: 'getConnectorTools', args: [connectorId] });
+      return {
+        connector: connectorId,
+        tools: [{ tool_id: `${connectorId}.send_message`, connector_id: connectorId, name: 'send_message' }],
+        connection: { connected: true, status: 'connected' },
+      };
+    },
+    ingestConnectorOpenApi: async (opts: { connectorId: string; specUrl?: string; replace?: boolean }) => {
+      calls.push({ fn: 'ingestConnectorOpenApi', args: [opts] });
+      return {
+        connectorId: opts.connectorId,
+        ingested: 12,
+        removed: 0,
+        total: 61,
+        replaced: false,
+        catalogMatch: true,
+      };
+    },
     syncConnectorCatalog: async () => ({ synced: 40 }),
     saveConnectorCredential: async (slug: string, clientId: string, clientSecret: string, scopes: string[]) => {
       calls.push({ fn: 'saveConnectorCredential', args: [slug, clientId, clientSecret, scopes] });
@@ -311,6 +340,12 @@ export function makeFullDeps(overrides: Partial<ApiServerDeps> = {}): FullDeps {
     smartStatus: async () => ({ configured: false, baseUrl: 'https://api.smartthings.com' }),
     smartSetToken: async (token: string) => { calls.push({ fn: 'smartSetToken', args: [token] }); return { configured: true, token: '••••' + token.slice(-4) }; },
     smartClearToken: async () => ({ configured: false }),
+    smartPlatforms: async () => ([
+      { key: 'smartthings', label: 'Samsung SmartThings', configured: false, connected: false },
+      { key: 'homeassistant', label: 'Home Assistant', configured: false, connected: false },
+    ]),
+    smartConnectPlatform: async (key: string, token: string) => { calls.push({ fn: 'smartConnectPlatform', args: [key, token] }); return { ok: true, platform: key, deviceCount: 3, tokenMasked: '••••' + token.slice(-4) }; },
+    smartDisconnectPlatform: async (key: string) => { calls.push({ fn: 'smartDisconnectPlatform', args: [key] }); return { ok: true, platform: key }; },
 
     // ── Vault ───────────────────────────────────────────────────
     getVaultEntries: async () => [{ id: 'v1', service: 'github', username: 'alex', hasSecret: true }],

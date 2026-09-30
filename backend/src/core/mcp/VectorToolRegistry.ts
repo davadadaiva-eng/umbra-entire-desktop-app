@@ -114,7 +114,8 @@ export class VectorToolRegistry {
   /** Load persisted embeddings + (re)register their definitions. */
   private loadFromDb(): void {
     try {
-      const rows = this.db.prepare('SELECT tool_id, dim, embedding, text_hash FROM tool_vectors').all() as any[];
+      // schema_version MUST be selected — it gates every row below.
+      const rows = this.db.prepare('SELECT tool_id, dim, embedding, text_hash, schema_version FROM tool_vectors').all() as any[];
       for (const r of rows) {
         if (r.schema_version !== SCHEMA_VERSION) continue;
         const arr = blobToFloats(r.embedding);
@@ -133,6 +134,31 @@ export class VectorToolRegistry {
   /** Register definitions so cached vectors can be resolved to schemas. */
   registerDefinitions(defs: ToolDefinition[]): void {
     for (const d of defs) this.defs.set(d.tool_id, d);
+  }
+
+  /**
+   * Drop every vector/definition belonging to one connector (called before
+   * re-indexing a replacement set after on-demand re-ingestion).
+   */
+  evictConnector(connectorId: string): number {
+    const doomed: string[] = [];
+    for (const [toolId, def] of this.defs) {
+      if (def.connector_id === connectorId) doomed.push(toolId);
+    }
+    for (const toolId of doomed) {
+      this.defs.delete(toolId);
+      this.vectors.delete(toolId);
+      this.hashes.delete(toolId);
+    }
+    if (doomed.length > 0) {
+      try {
+        const del = this.db.prepare('DELETE FROM tool_vectors WHERE tool_id = ?');
+        this.db.transaction(() => { for (const toolId of doomed) del.run(toolId); })();
+      } catch (e) {
+        getLogger().warn({ err: (e as Error).message, connectorId }, 'Vector eviction persist failed');
+      }
+    }
+    return doomed.length;
   }
 
   /** Late-wire the embedder (e.g. after the LLM connector is constructed). */
@@ -155,15 +181,31 @@ export class VectorToolRegistry {
    * Embed + persist tools that are new or whose text changed.
    * Skips everything when no embedder is available (keyword fallback mode).
    *
+   * Two call forms:
+   *   index(defs, opts)            — index the given definitions (boot path)
+   *   index({ defs, force, ... })  — object form; `defs` omitted means
+   *                                  re-index everything already registered
+   *                                  (post-ingestion replacement path)
+   *
    * @returns number of tools actually embedded this call
    */
   async index(
-    defs: ToolDefinition[],
-    opts: { force?: boolean; onProgress?: (done: number, total: number) => void } = {},
+    defsOrOpts: ToolDefinition[] | { defs?: ToolDefinition[]; force?: boolean; onProgress?: (done: number, total: number) => void } = {},
+    maybeOpts: { force?: boolean; onProgress?: (done: number, total: number) => void } = {},
   ): Promise<number> {
+    let defs: ToolDefinition[] | undefined;
+    let opts: { force?: boolean; onProgress?: (done: number, total: number) => void };
+    if (Array.isArray(defsOrOpts)) {
+      defs = defsOrOpts;
+      opts = maybeOpts;
+    } else {
+      opts = defsOrOpts;
+    }
+    const list = defs ?? [...this.defs.values()];
+
     // Register definitions FIRST so keyword fallback works even without an
     // embedder (retrieval must never depend on vector mode being available).
-    this.registerDefinitions(defs);
+    this.registerDefinitions(list);
     const embedder = this.options.embedder;
     if (!embedder) {
       getLogger().info('VectorToolRegistry: no embedder — retrieval stays in keyword mode');
@@ -173,7 +215,7 @@ export class VectorToolRegistry {
     // Determine dimension from the first embedding (needed before storing).
     let done = 0;
     let embedded = 0;
-    for (const def of defs) {
+    for (const def of list) {
       done++;
       const text = this.embedText(def);
       const hash = fnv1a(text);
@@ -193,12 +235,12 @@ export class VectorToolRegistry {
         // Per-tool failure is non-fatal — the tool just stays keyword-only.
         getLogger().debug({ toolId: def.tool_id, err: (err as Error).message }, 'Tool embedding failed');
       }
-      opts.onProgress?.(done, defs.length);
+      opts.onProgress?.(done, list.length);
     }
 
     if (embedded > 0) this.persist();
     getLogger().info(
-      { total: defs.length, embedded, dim: this.dim, vecExtension: this.vecAvailable },
+      { total: list.length, embedded, dim: this.dim, vecExtension: this.vecAvailable },
       'Tool vector indexing complete',
     );
     return embedded;
