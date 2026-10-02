@@ -57,13 +57,13 @@ export interface RoutingConfig {
   caveman: boolean;
   /** Free models — the spillover target and the free-plan default (cloud free models). */
   free: ModelTierConfig;
-  /** Day-to-day quick/vision work (DeepSeek V4 Flash). */
+  /** Day-to-day quick/vision work (Gemini 2.5 Flash). */
   fast: ModelTierConfig;
-  /** Day-to-day agentic/reasoning work (DeepSeek-R1). */
+  /** Day-to-day agentic/reasoning work (Kimi K3; Pro gets Kimi Thinking). */
   reasoning: ModelTierConfig;
-  /** Frontend / design work (Muse Spark 1.2). */
+  /** Frontend / design work (Gemini 2.5 Flash). */
   frontend: ModelTierConfig;
-  /** Difficult tasks (Claude Sonnet 5, hard-capped). */
+  /** Difficult tasks (Claude Sonnet 5; Pro gets GLM 5). */
   difficult: ModelTierConfig;
 }
 

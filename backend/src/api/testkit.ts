@@ -132,6 +132,9 @@ export function makeFullDeps(overrides: Partial<ApiServerDeps> = {}): FullDeps {
     getConnector: async (id: string) => ({ id, name: 'Gmail', category: 'Communication', authType: 'oauth' }),
     getConnectorCategories: async () => [{ id: 'communication', name: 'Communication', count: 1 }],
     connectConnector: async (id: string, opts: { apiKey?: string; redirectUri?: string }) => ({ id, connected: true, ...opts }),
+    completeConnectorOauth: async (id: string, code: string, state: string) => ({ success: state === 's1', connectorId: id, code, expiresAt: 123 }),
+    getConnectorReadiness: (id: string) => ({ connectorId: id, state: 'needs_oauth_app', authType: 'oauth', hasBaseUrl: true, hasTools: true, provider: 'Google', action: 'Authorize' }),
+    getConnectorReadinessSummary: () => ({ counts: { ready: 1, needs_oauth_app: 1 }, connectors: [] }),
     getConnectorStatus: async (id: string, userId?: string) => ({ id, userId: userId ?? null, connected: true }),
     disconnectConnectorApi: async (id: string) => ({ id, connected: false }),
     executeConnectorAction: async (connectorId: string, endpoint: string, method: string, payload: Record<string, unknown>, userId?: string) => {
@@ -169,6 +172,10 @@ export function makeFullDeps(overrides: Partial<ApiServerDeps> = {}): FullDeps {
       };
     },
     syncConnectorCatalog: async () => ({ synced: 40 }),
+    ensureConnectorTools: async (connectorId: string, opts?: { force?: boolean }) => {
+      calls.push({ fn: 'ensureConnectorTools', args: [connectorId, opts] });
+      return { connectorId, ingested: 12, alreadyIndexed: false, baseUrl: 'https://api.example.test/v1', source: 'spec' };
+    },
     saveConnectorCredential: async (slug: string, clientId: string, clientSecret: string, scopes: string[]) => {
       calls.push({ fn: 'saveConnectorCredential', args: [slug, clientId, clientSecret, scopes] });
       return { slug, saved: true };
@@ -313,7 +320,7 @@ export function makeFullDeps(overrides: Partial<ApiServerDeps> = {}): FullDeps {
     getChromeSites: async () => [{ host: 'example.com', visits: 3 }],
 
     // ── JIT routing / wallet / connectors registry ───────────────
-    getSmartRoute: async (userId: string, taskType: string, preferAlt?: boolean) => ({ userId, taskType, preferAlt: !!preferAlt, model: 'fast' }),
+    getSmartRoute: async (userId: string, taskType: string, preferAlt?: boolean) => ({ userId, taskType, preferAlt: !!preferAlt, model: 'fast', slot: 'fast', blocked: false }),
     deductWallet: async (userId: string, model: string, usage: Record<string, unknown>) => ({ userId, model, charged: usage['tokens'] ?? 0 }),
     getWallet: async (userId: string) => ({ userId, balanceUsd: 10 }),
     getConnectedConnectors: () => ([{ id: 'gmail', name: 'Gmail', provider: 'google', connectedAt: 1 }]),
@@ -346,6 +353,8 @@ export function makeFullDeps(overrides: Partial<ApiServerDeps> = {}): FullDeps {
     ]),
     smartConnectPlatform: async (key: string, token: string) => { calls.push({ fn: 'smartConnectPlatform', args: [key, token] }); return { ok: true, platform: key, deviceCount: 3, tokenMasked: '••••' + token.slice(-4) }; },
     smartDisconnectPlatform: async (key: string) => { calls.push({ fn: 'smartDisconnectPlatform', args: [key] }); return { ok: true, platform: key }; },
+    smartOauthStart: async (key: string, redirectUri?: string) => { calls.push({ fn: 'smartOauthStart', args: [key, redirectUri] }); return { platform: key, authorizeUrl: `https://example.test/authorize?state=st-${key}`, state: `st-${key}` }; },
+    smartOauthCallback: async (key: string, code: string, state: string) => { calls.push({ fn: 'smartOauthCallback', args: [key, code, state] }); return { ok: true, platform: key, deviceCount: 3, tokenMasked: '••••' + code.slice(-4) }; },
 
     // ── Vault ───────────────────────────────────────────────────
     getVaultEntries: async () => [{ id: 'v1', service: 'github', username: 'alex', hasSecret: true }],

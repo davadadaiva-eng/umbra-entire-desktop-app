@@ -103,6 +103,14 @@ export class ReposManager {
         resolve({ code, stdout: trim(stdout || ''), stderr: trim(stderr || ''), timedOut });
       });
       if (this.pending) this.pending.push(child);
+      // Prune once the child is done, otherwise `pending` grows without bound
+      // and `close()` walks a list of long-dead handles.
+      const prune = () => {
+        const i = this.pending.indexOf(child);
+        if (i >= 0) this.pending.splice(i, 1);
+      };
+      child.once('close', prune);
+      child.once('error', prune);
     });
   }
 

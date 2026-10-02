@@ -60,6 +60,11 @@ export function computerRoutes(deps: ApiServerDeps): ComputerRouteEntry[] {
         offset: url.searchParams.get('offset') !== null ? Number(url.searchParams.get('offset')) : undefined,
       }),
     })],
+    // Readiness routes MUST precede the `/api/connectors/([\w-]+)$` catch-all,
+    // otherwise "readiness" is matched as a connector id.
+    [/^GET \/api\/connectors\/readiness$/, async url => ({
+      readiness: deps.getConnectorReadinessSummary(url.searchParams.get('userId') || undefined),
+    })],
     [/^GET \/api\/connectors\/categories$/, async () => ({
       categories: await deps.getConnectorCategories(),
     })],
@@ -80,8 +85,54 @@ export function computerRoutes(deps: ApiServerDeps): ComputerRouteEntry[] {
         redirectUri: body.redirectUri !== undefined ? String(body.redirectUri) : undefined,
       });
     }],
+    // OAuth completion leg for POST /connect — the authorize redirect targets
+    // this route, so it must exist or the flow dead-ends on a 404.
+    [/^GET \/api\/connectors\/([\w-]+)\/callback$/, async (url, _body, match) => {
+      const code = url.searchParams.get('code') || '';
+      const state = url.searchParams.get('state') || '';
+      if (!code || !state) throw new Error('code and state are required');
+      return { oauth: await deps.completeConnectorOauth(match![1], code, state) };
+    }],
     [/^GET \/api\/connectors\/([\w-]+)\/status$/, async (url, _body, match) => ({
       status: await deps.getConnectorStatus(match![1], url.searchParams.get('userId') || undefined),
+    })],
+    // Tool-schema browser + on-demand ingestion. These live here (not the
+    // legacy map) so the sub-router owns the full connector domain; the more
+    // specific `/tools/schemas` path sits above the `([\w-]+)` patterns so a
+    // future bare-`/tools` catch-all can never swallow it.
+    [/^GET \/api\/connectors\/tools\/schemas$/, async url =>
+      deps.listToolSchemas({
+        q: url.searchParams.get('q') || undefined,
+        connectorId: url.searchParams.get('connectorId') || undefined,
+        limit: url.searchParams.get('limit') !== null ? Number(url.searchParams.get('limit')) : undefined,
+        offset: url.searchParams.get('offset') !== null ? Number(url.searchParams.get('offset')) : undefined,
+      })],
+    [/^GET \/api\/connectors\/([\w-]+)\/tools$/, async (_url, _body, match) =>
+      deps.getConnectorTools(match![1])],
+    [/^POST \/api\/connectors\/ingest-openapi$/, async (_url, body) => {
+      if (!body.connectorId) throw new Error('connectorId is required');
+      if (body.spec === undefined && !body.specUrl) throw new Error('spec or specUrl is required');
+      return deps.ingestConnectorOpenApi({
+        connectorId: String(body.connectorId || ''),
+        ...(body.spec !== undefined ? { spec: body.spec } : {}),
+        ...(body.specUrl !== undefined ? { specUrl: String(body.specUrl) } : {}),
+        ...(body.baseUrl !== undefined ? { baseUrl: String(body.baseUrl) } : {}),
+        ...(body.authType !== undefined ? { authType: String(body.authType) } : {}),
+        ...(body.apiKeyHeader !== undefined ? { apiKeyHeader: String(body.apiKeyHeader) } : {}),
+        ...(body.replace !== undefined ? { replace: body.replace === true } : {}),
+        ...(body.maxTools !== undefined ? { maxTools: Number(body.maxTools) } : {}),
+      });
+    }],
+    // One-click enable for name-only catalog rows: ingest the connector's
+    // known spec when it has no tools yet (idempotent — short-circuits when
+    // already indexed). `force: true` re-ingests from the spec.
+    [/^POST \/api\/connectors\/([\w-]+)\/ensure-tools$/, async (_url, body, match) => ({
+      result: await deps.ensureConnectorTools(match![1], {
+        ...(body.force !== undefined ? { force: body.force === true } : {}),
+      }),
+    })],
+    [/^GET \/api\/connectors\/([\w-]+)\/readiness$/, async (url, _body, match) => ({
+      readiness: deps.getConnectorReadiness(match![1], url.searchParams.get('userId') || undefined),
     })],
     [/^POST \/api\/connectors\/([\w-]+)\/disconnect$/, async (_url, _body, match) => ({
       result: await deps.disconnectConnectorApi(match![1]),

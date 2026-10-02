@@ -4,7 +4,8 @@ import { UmbraConfig, ModelProvider, McpConnectorConfig, McpOauthClientConfig } 
 import { getLogger } from '../core/Logger';
 import { MCP_CATALOG, McpCatalogEntry } from '../core/mcp/McpCatalog';
 import { DEFAULT_ROUTING } from '../core/metering/ModelRouter';
-import { MODELS as PRICING_MODELS, OPENROUTER_ENDPOINT } from '../core/metering/pricing';
+import { MODELS as PRICING_MODELS, SLOT_DEFAULTS, OPENROUTER_ENDPOINT } from '../core/metering/pricing';
+import type { RoutingTier } from '../types';
 
 /** Accepted UMBRA_LLM_PROVIDER values → ModelProvider. */
 const ENV_PROVIDER_ALIASES: Record<string, ModelProvider> = {
@@ -292,8 +293,32 @@ export class ConfigManager {
     (this.config as any).openrouterApiKey = key;
     this.config.plan.routing = this.config.plan.routing ?? { ...DEFAULT_ROUTING };
     this.config.plan.routing.enabled = true;
+    // The saved slot lineup may predate the current model catalog (e.g. slots
+    // written for a different endpoint). RoutedLLMConnector serves `vision`
+    // from the `fast` slot, so a stale text-only model there 404s on image
+    // input. Re-pin every slot that is not already a known catalog model.
+    this.refreshRoutingSlots();
     this.config.llm = { ...this.config.llm, disabled: false, provider: 'openai-compatible', reason: undefined };
     getLogger().info('OPENROUTER_API_KEY present — all model slots ride OpenRouter (Kimi K3 / Gemini / Muse Spark / Sonnet)');
+  }
+
+  /**
+   * Re-pin routing slots to the current catalog lineup when a slot's model is
+   * not a known OpenRouter catalog ID (stale lineup from an older lineup or a
+   * non-OpenRouter endpoint). Slots the operator customized to a known model
+   * are left alone. Only meaningful for openai-compatible (OpenRouter) slots.
+   */
+  private refreshRoutingSlots(): void {
+    const routing = this.config.plan.routing;
+    if (!routing) return;
+    for (const tier of Object.keys(SLOT_DEFAULTS) as RoutingTier[]) {
+      const slotCfg = routing[tier];
+      if (!slotCfg || slotCfg.provider !== 'openai-compatible') continue;
+      const isCatalogModel = Object.values(PRICING_MODELS).some(m => m.id === slotCfg.model);
+      if (isCatalogModel) continue;
+      const pricing = PRICING_MODELS[SLOT_DEFAULTS[tier].modelKey];
+      routing[tier] = { ...slotCfg, model: pricing.id, inputPerM: pricing.inputPerM, cacheHitPerM: pricing.cacheReadPerM, outputPerM: pricing.outputPerM };
+    }
   }
 
   /**

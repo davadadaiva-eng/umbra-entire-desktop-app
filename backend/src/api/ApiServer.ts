@@ -84,6 +84,11 @@ export interface ApiServerDeps {
   getConnectorCategories(): Promise<unknown>;
   /** Start OAuth flow or save API key for a connector. */
   connectConnector(id: string, opts: { apiKey?: string; redirectUri?: string }): Promise<unknown>;
+  /** Complete a connector OAuth callback (code + state). */
+  completeConnectorOauth(id: string, code: string, state: string, userId?: string): Promise<unknown>;
+  /** Honest per-connector readiness (what the user must do to connect it). */
+  getConnectorReadiness(id: string, userId?: string): unknown;
+  getConnectorReadinessSummary(userId?: string): unknown;
   /** Get connection status for a connector. */
   getConnectorStatus(id: string, userId?: string): Promise<unknown>;
   /** Disconnect a user from a connector. */
@@ -109,6 +114,12 @@ export interface ApiServerDeps {
   }): Promise<unknown>;
   /** Sync connector catalog from external sources. */
   syncConnectorCatalog(): Promise<unknown>;
+  /**
+   * Ensure a connector has callable tool schemas, ingesting its OpenAPI spec
+   * on demand when it has none. Idempotent — already-indexed connectors
+   * short-circuit without re-ingesting.
+   */
+  ensureConnectorTools(connectorId: string, opts?: { force?: boolean }): Promise<unknown>;
   /** Save developer credentials for a connector. */
   saveConnectorCredential(slug: string, clientId: string, clientSecret: string, scopes: string[]): Promise<unknown>;
   getModelStatus(): Promise<unknown>;
@@ -264,6 +275,10 @@ export interface ApiServerDeps {
   smartConnectPlatform(key: string, token: string, url?: string): Promise<unknown>;
   /** Smart Home — disconnect a platform by key. */
   smartDisconnectPlatform(key: string): Promise<unknown>;
+  /** Smart Home — begin an OAuth sign-in for a cloud platform. */
+  smartOauthStart(key: string, redirectUri?: string): Promise<unknown>;
+  /** Smart Home — finish an OAuth sign-in with the callback code + state. */
+  smartOauthCallback(key: string, code: string, state: string): Promise<unknown>;
   /** Smart Home — list devices across all connected platforms (with live switch state). */
   smartDevices(): Promise<unknown>;
   /** Smart Home — send a switch command to a device. */
@@ -895,8 +910,22 @@ export class ApiServer {
           redirectUri: body.redirectUri !== undefined ? String(body.redirectUri) : undefined,
         });
       }],
+      // The OAuth completion leg of POST /connect — without this route the
+      // connect flow redirected to a 404 and could never finish.
+      [/^GET \/api\/connectors\/([\w-]+)\/callback$/, async (url, _body, match) => {
+        const code = url.searchParams.get('code') || '';
+        const state = url.searchParams.get('state') || '';
+        if (!code || !state) throw new Error('code and state are required');
+        return { oauth: await this.deps.completeConnectorOauth(match![1], code, state) };
+      }],
       [/^GET \/api\/connectors\/([\w-]+)\/status$/, async (url, _body, match) => ({
         status: await this.deps.getConnectorStatus(match![1], url.searchParams.get('userId') || undefined),
+      })],
+      [/^GET \/api\/connectors\/readiness$/, async url => ({
+        readiness: this.deps.getConnectorReadinessSummary(url.searchParams.get('userId') || undefined),
+      })],
+      [/^GET \/api\/connectors\/([\w-]+)\/readiness$/, async (url, _body, match) => ({
+        readiness: this.deps.getConnectorReadiness(match![1], url.searchParams.get('userId') || undefined),
       })],
       [/^GET \/api\/connectors\/([\w-]+)\/tools$/, async (_url, _body, match) =>
         this.deps.getConnectorTools(match![1])],

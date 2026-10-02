@@ -1,5 +1,6 @@
 import { HttpBridge } from './HttpBridge';
 import { UmbraConfig } from '../../types';
+import type { TaskKind } from '../metering/pricing';
 
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant';
@@ -15,8 +16,12 @@ export interface LLMCompletionOptions {
   temperature?: number;
   maxTokens?: number;
   stream?: boolean;
-  /** Task category hint for tiered model routing. */
-  task?: 'general' | 'frontend' | 'difficult';
+  /**
+   * Task category hint for tiered model routing: legacy slot names plus
+   * the smart-routing task kinds (which the router maps to budget slots
+   * via TASK_TO_SLOT, so smart tasks get budget enforcement too).
+   */
+  task?: 'general' | 'frontend' | 'difficult' | TaskKind;
   /**
    * Native tool declarations (OpenAI function-calling format). When provided
    * AND the provider supports native tools, they are sent in the request body

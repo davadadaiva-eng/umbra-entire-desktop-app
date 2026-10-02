@@ -31,6 +31,7 @@ import { LLMToolDeclaration } from './LLMConnector';
 import { SmartThingsService, type SwitchCommand } from '../smart/SmartThingsService';
 import { SmartHomeScheduler } from '../smart/SmartHomeScheduler';
 import type { SmartHomeHub } from '../smart/SmartHomePlatform';
+import { fuzzyScore } from '../smart/SmartHomePlatform';
 import { eventBus } from '../EventBus';
 import { getLogger } from '../Logger';
 import { InjectionGuard } from './InjectionGuard';
@@ -990,8 +991,7 @@ export class AgentRuntime {
   }
 
   private async executeSmartScheduleStep(params: Record<string, unknown>): Promise<string> {
-    if (!this.smartThings || !this.smartScheduler) return 'Smart Home not configured';
-    if (!this.smartThings.isConfigured()) return 'SmartThings is not configured (set UMBRA_SMARTTHINGS_TOKEN)';
+    if (!this.smartScheduler) return 'Smart Home not configured';
     const deviceName = String(params.device || params.name || '');
     const command = params.command === 'on' ? 'on' : params.command === 'off' ? 'off' : '';
     const kind = params.kind === 'at' ? 'at' : params.kind === 'everyMinutes' ? 'everyMinutes' : '';
@@ -1004,11 +1004,32 @@ export class AgentRuntime {
     if (kind === 'everyMinutes' && !Number(params.everyMinutes)) {
       return 'sm_schedule kind "everyMinutes" needs params.everyMinutes (>= 1)';
     }
-    const device = await this.smartThings.resolveDevice(deviceName);
-    if (!device) return `No SmartThings device matching "${deviceName}"`;
+    // Resolve the name against the hub first so routines work on every connected
+    // platform; fall back to the legacy SmartThings service for bare device ids.
+    let deviceId: string;
+    let resolvedName: string;
+    if (this.smartHub && this.smartHub.active().length > 0) {
+      const devices = await this.smartHub.getDevices({ withStates: true });
+      const q = deviceName.trim().toLowerCase();
+      const best = devices
+        .map((d) => ({ d, score: fuzzyScore(q, d.name.toLowerCase()) }))
+        .filter((x) => x.score > 0)
+        .sort((a, b) => b.score - a.score)[0];
+      if (!best) return `No device matching "${deviceName}" on any connected platform`;
+      deviceId = best.d.id;
+      resolvedName = best.d.name;
+    } else {
+      if (!this.smartThings || !this.smartThings.isConfigured()) {
+        return 'Smart Home is not configured — connect a platform in Smart Home → Connect';
+      }
+      const device = await this.smartThings.resolveDevice(deviceName);
+      if (!device) return `No SmartThings device matching "${deviceName}"`;
+      deviceId = device.deviceId;
+      resolvedName = device.label || device.name;
+    }
     const rule = this.smartScheduler.add({
-      deviceId: device.deviceId,
-      deviceName: device.label || device.name,
+      deviceId,
+      deviceName: resolvedName,
       command,
       kind,
       everyMinutes: kind === 'everyMinutes' ? Number(params.everyMinutes) : undefined,

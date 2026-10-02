@@ -99,6 +99,7 @@ import { McpServerEndpoint } from './core/mcp/McpServerEndpoint';
 import { ExternalRegistrySync, DEFAULT_SOURCES } from './core/mcp/ExternalRegistrySync';
 import { OAuthConnector, OAuthTokenSet } from './core/mcp/OAuthConnector';
 import { MCP_CATALOG } from './core/mcp/McpCatalog';
+import { curatedConnectorForCatalogId } from './core/mcp/curatedTools';
 import { ConnectorStore } from './core/mcp/ConnectorStore';
 import { ConnectorApi } from './core/mcp/ConnectorApi';
 import { ToolIngestion } from './core/mcp/ToolIngestion';
@@ -135,6 +136,7 @@ import { MeetingStore } from './core/meeting/MeetingStore';
 import { RecordingService } from './core/audio/RecordingService';
 import { VirtualWallet } from './core/billing/VirtualWallet';
 import { SmartRoutingMatrix, buildStickySystemPrompt } from './core/metering/SmartRoutingMatrix';
+import { normalizeRoutePlan, TASK_TO_SLOT } from './core/metering/pricing';
 import Stripe from 'stripe';
 import * as crypto from 'crypto';
 
@@ -843,6 +845,8 @@ export class UmbraOS {
       smartPlatforms: () => this.smartPlatforms(),
       smartConnectPlatform: (key, token, url) => this.smartConnectPlatform(key, token, url),
       smartDisconnectPlatform: key => this.smartDisconnectPlatform(key),
+      smartOauthStart: (key, redirectUri) => this.smartOauthStart(key, redirectUri),
+      smartOauthCallback: (key, code, state) => this.smartOauthCallback(key, code, state),
       getVaultEntries: () => this.getVaultEntries(),
       setVaultEntry: entry => this.setVaultEntry(entry),
       deleteVaultEntry: id => this.deleteVaultEntry(id),
@@ -869,6 +873,9 @@ export class UmbraOS {
       getConnector: id => this.connectorApi.getConnector(id),
       getConnectorCategories: () => this.connectorApi.getConnectorCategories(),
       connectConnector: (id, opts) => this.connectorApi.connectConnector(id, opts),
+      completeConnectorOauth: (id, code, state, userId) => this.connectorApi.handleOAuthCallback(id, code, state, userId),
+      getConnectorReadiness: (id, userId) => this.connectorApi.getReadiness(id, userId),
+      getConnectorReadinessSummary: userId => this.connectorApi.getReadinessSummary(userId),
       getConnectorStatus: (id, userId) => this.connectorApi.getConnectorStatus(id, userId),
       disconnectConnectorApi: (id, userId) => this.connectorApi.disconnectConnector(id, userId),
       executeConnectorAction: (connectorId, endpoint, method, payload, userId) =>
@@ -877,6 +884,7 @@ export class UmbraOS {
       listToolSchemas: opts => this.connectorApi.listToolSchemas(opts),
       getConnectorTools: id => this.connectorApi.getConnectorTools(id),
       ingestConnectorOpenApi: opts => this.ingestConnectorOpenApi(opts),
+      ensureConnectorTools: (id, opts) => this.ensureConnectorTools(id, opts),
       syncConnectorCatalog: () => this.connectorApi.syncCatalog(),
       saveConnectorCredential: (slug, clientId, clientSecret, scopes) =>
         this.connectorApi.saveDeveloperCredential(slug, clientId, clientSecret, scopes),
@@ -1717,14 +1725,35 @@ export class UmbraOS {
     maxTools?: number;
   }): Promise<unknown> {
     const result = await this.connectorApi.ingestOpenApiSpec(opts);
+    await this.refreshToolVectors(result.connectorId);
+    return result;
+  }
+
+  /**
+   * One-click enable for name-only catalog rows: ingest the connector's
+   * known OpenAPI spec when it has no tools yet (no-op when already
+   * indexed), then refresh the vector registry WITHOUT a restart.
+   */
+  private async ensureConnectorTools(id: string, opts?: { force?: boolean }): Promise<unknown> {
+    const result = await this.connectorApi.ensureConnectorTools(id, opts ?? {});
+    await this.refreshToolVectors(result.connectorId);
+    return result;
+  }
+
+  /**
+   * Drop the connector's stale vectors and re-embed the replacement set
+   * (hash-cache skips unchanged tools). A refresh failure never fails the
+   * request — definitions are already stored and keyword fallback works.
+   */
+  private async refreshToolVectors(connectorId: string): Promise<void> {
     try {
       if (this.toolVectorRegistry && this.toolIngestion) {
-        this.toolVectorRegistry.evictConnector(result.connectorId);
+        this.toolVectorRegistry.evictConnector(connectorId);
         const defs = this.toolIngestion.listAll();
         this.toolVectorRegistry.registerDefinitions(defs);
         const embedded = await this.toolVectorRegistry.index({ force: false });
         getLogger().info(
-          { connectorId: result.connectorId, embedded, indexed: this.toolVectorRegistry.status().indexed },
+          { connectorId, embedded, indexed: this.toolVectorRegistry.status().indexed },
           'Vector registry refreshed after OpenAPI ingestion',
         );
       }
@@ -1732,11 +1761,10 @@ export class UmbraOS {
       // Definitions are already stored and keyword fallback still works;
       // a vector refresh failure must not fail the ingestion request.
       getLogger().warn(
-        { connectorId: result.connectorId, err: (err as Error).message },
+        { connectorId, err: (err as Error).message },
         'Vector re-index after ingestion failed — new tools stay keyword-retrievable',
       );
     }
-    return result;
   }
 
   private async getApiStatus(): Promise<Record<string, unknown>> {
@@ -2066,14 +2094,25 @@ export class UmbraOS {
       enabled: opts.enabled,
     });
     if (opts.apiKey) {
-      if (this.credVault.isUnlocked) {
-        this.credVault.set({
-          service: entry.credentialKey || entry.name,
-          username: 'api-key',
-          secret: opts.apiKey,
+      // Mirror the key under the catalog id and any curated credential_service
+      // too, so curated tools (which look up `credential_service`) find it.
+      const keys = new Set<string>([entry.credentialKey || entry.name, entry.id]);
+      const curatedService = curatedConnectorForCatalogId(entry.id)?.credentialService;
+      if (curatedService) keys.add(curatedService);
+
+      for (const k of keys) {
+        // ConnectorStore — what ToolExecutor.resolveAuth reads.
+        this.connectorApi?.saveOAuthTokens({
+          userId: 'default', connectorId: k, apiKey: opts.apiKey,
+          accessToken: opts.apiKey, expiresIn: 0,
         });
-      } else {
-        getLogger().warn({ id }, 'Vault locked — API key not stored');
+        if (this.credVault.isUnlocked) {
+          const existing = this.credVault.find(k);
+          this.credVault.set({ service: k, username: 'api-key', secret: opts.apiKey }, existing?.id);
+        }
+      }
+      if (!this.credVault.isUnlocked) {
+        getLogger().warn({ id }, 'Vault locked — API key not mirrored to vault');
       }
     } else if (opts.baseUrl && opts.enabled && entry.authType !== 'none') {
       const cred = this.credVault.find(entry.credentialKey || entry.name);
@@ -2132,15 +2171,35 @@ export class UmbraOS {
     return entry?.credentialKey || id;
   }
 
+  /**
+   * Resolve the OAuth client for a connector, checking BOTH credential stores:
+   *   1. ConfigManager.mcp.oauthClients — file-based, operator-edited
+   *   2. ConnectorStore.developer_credentials — SQLite, written by the UI
+   *      (/api/connectors/credential) and /api/admin/credentials
+   * Previously only the first was read, so credentials saved through the UI
+   * were invisible here and the setup modal looped forever.
+   */
   private oauthClientFor(id: string): { key: string; client: McpOauthClientConfig } {
     const key = this.oauthKeyFor(id);
-    const client = this.configManager.getMcpOauthClient(key);
-    if (!client) {
-      throw new Error(
-        `OAuth client not configured for "${key}" — register the app with the provider, then add mcp.oauthClients["${key}"] = { clientId }`,
-      );
+
+    const configured = this.configManager.getMcpOauthClient(key);
+    if (configured?.clientId) return { key, client: configured };
+
+    const stored = this.connectorApi?.getDeveloperCredentials(key);
+    if (stored?.isConfigured && stored.clientId) {
+      return {
+        key,
+        client: {
+          clientId: stored.clientId,
+          clientSecret: stored.clientSecret || undefined,
+          scopes: stored.scopes?.length ? stored.scopes : undefined,
+        },
+      };
     }
-    return { key, client };
+
+    throw new Error(
+      `OAuth client not configured for "${key}" — register the app with the provider, then add mcp.oauthClients["${key}"] = { clientId }`,
+    );
   }
 
   /** Start OAuth for an `oauth` connector: returns the authorize URL to open. */
@@ -2148,39 +2207,147 @@ export class UmbraOS {
     const entry = await this.configManager.upsertMcpConnector(id, {});
     if (entry.authType !== 'oauth') throw new Error(`Connector "${id}" is not OAuth (authType=${entry.authType})`);
     const { key, client } = this.oauthClientFor(id);
-    const started = this.oauth.begin(id, client, redirectUri || this.oauthRedirectUri());
-    return { connector: entry, key, authorizeUrl: started.authorizeUrl, state: started.state };
+    // Resolve the provider against the CREDENTIAL KEY, not the catalog id:
+    // the provider table is keyed `gmail`, while the catalog id is
+    // `productivity-gmail`. Passing `id` here made every catalog connector
+    // fail to resolve.
+    const started = this.oauth.begin(key, client, redirectUri || this.oauthRedirectUri());
+    return {
+      connector: entry,
+      key,
+      connectorId: id,
+      authorizeUrl: started.authorizeUrl,
+      state: started.state,
+    };
   }
 
-  /** Complete OAuth: exchange the code, persist tokens, and enable the connector. */
+  /**
+   * Complete OAuth: exchange the code, persist tokens, and enable the connector.
+   *
+   * `key` coming back from the pending flow is the CREDENTIAL KEY (e.g.
+   * `gmail`), so it must be mapped back to the catalog id (`productivity-gmail`)
+   * before touching config. Several catalog entries can share one credentialKey
+   * (Google Calendar/Drive/Sheets all use `google-*`), so we prefer the
+   * connector whose pending flow actually produced this state when possible.
+   */
   async completeMcpOauth(code: string, state: string): Promise<any> {
-    const { key: id, tokens } = await this.oauth.complete(code, state);
+    const { key, tokens } = await this.oauth.complete(code, state);
+    const id = this.catalogIdForCredentialKey(key);
     const entry = await this.configManager.upsertMcpConnector(id, {});
     if (entry.authType !== 'oauth') throw new Error(`Connector "${id}" is not OAuth (authType=${entry.authType})`);
 
-    this.storeOauthToken(this.oauthKeyFor(id), tokens);
+    this.storeOauthToken(this.oauthKeyFor(id), tokens, id);
 
     // Enable + register the live binding now that credentials exist.
     await this.configManager.upsertMcpConnector(id, { enabled: true });
     this.registerConnectorBinding(entry);
-    return { connector: entry, connected: true, expiresAt: tokens.expiresAt };
+    return { connector: entry, key, connectorId: id, connected: true, expiresAt: tokens.expiresAt };
   }
 
-  /** Persist an OAuth token set in the vault (JSON blob under oauth:<key>). */
-  private storeOauthToken(key: string, tokens: OAuthTokenSet): void {
-    if (!this.credVault.isUnlocked) throw new Error('Vault locked — cannot store OAuth tokens');
-    const existing = this.credVault.find(`oauth:${key}`);
-    this.credVault.set(
-      { service: `oauth:${key}`, username: 'oauth-token', secret: JSON.stringify(tokens) },
-      existing?.id,
+  /** Map a credentialKey back to its catalog connector id. */
+  private catalogIdForCredentialKey(key: string): string {
+    const existing = this.configManager.raw.mcp.connectors.find(
+      c => (c.credentialKey || c.id) === key && c.authType === 'oauth',
     );
+    if (existing) return existing.id;
+    const entry = MCP_CATALOG.find(c => (c.credentialKey || c.id) === key);
+    return entry?.id ?? key;
   }
 
+  /**
+   * Persist an OAuth token set.
+   *
+   * Tokens are written to BOTH stores because two consumers read them:
+   *   - ConnectorStore.user_connections — what ToolExecutor reads per request
+   *     (and what its auto-refresh path updates), keyed by CATALOG id.
+   *   - CredentialVault `oauth:<key>` — the raw token set incl. expiry.
+   *
+   * The vault entry is stored with username `api-key` and the BARE access token
+   * as the secret. Previously it held a JSON blob under username `oauth-token`,
+   * which McpHttpConnector.authHeaders() interpreted as a user/password pair
+   * and base64-encoded into a `Basic` header — every OAuth call sent a garbage
+   * credential. A bearer-shaped entry is correct for both consumers.
+   */
+  private storeOauthToken(key: string, tokens: OAuthTokenSet, catalogId?: string): void {
+    const connectorId = catalogId ?? this.catalogIdForCredentialKey(key);
+    const expiresIn = Math.max(0, Math.floor((tokens.expiresAt - Date.now()) / 1000));
+
+    // 1. ConnectorStore — the executor's source of truth.
+    //
+    // The same token is written under EVERY key a call path might look it up
+    // by, because those keys disagree today:
+    //   - `productivity-gmail`  the catalog id (what the UI and /status use)
+    //   - `gmail`               the credentialKey
+    //   - `google`               curated tools' shared credential_service
+    //     (Calendar/Drive/Sheets all declare `google`, not their own key)
+    // Storing under only one left curated tools reporting "not connected"
+    // even after a successful authorization.
+    const storeKeys = new Set<string>([connectorId, key]);
+    const curatedService = curatedConnectorForCatalogId(connectorId)?.credentialService;
+    if (curatedService) storeKeys.add(curatedService);
+
+    for (const storeKey of storeKeys) {
+      this.connectorApi?.saveOAuthTokens({
+        userId: 'default',
+        connectorId: storeKey,
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        expiresIn,
+      });
+    }
+
+    // 2. CredentialVault — bearer-shaped so McpHttpConnector can use it.
+    // Mirrored under the same set of keys for the same reason.
+    if (!this.credVault.isUnlocked) {
+      getLogger().warn({ key }, 'Vault locked — OAuth token not mirrored to vault');
+      return;
+    }
+    for (const storeKey of storeKeys) {
+      const existing = this.credVault.find(storeKey);
+      this.credVault.set(
+        { service: storeKey, username: 'api-key', secret: tokens.accessToken },
+        existing?.id,
+      );
+    }
+  }
+
+  /**
+   * Read the stored OAuth token set. ConnectorStore is consulted first (it
+   * holds the refresh token and expiry that the executor maintains); the vault
+   * is the fallback for tokens written before this dual-write existed.
+   */
   private readOauthToken(key: string): OAuthTokenSet | undefined {
+    const connectorId = this.catalogIdForCredentialKey(key);
+
+    // Try every key the token may have been stored under (see storeOauthToken).
+    const candidates = [connectorId, key];
+    const curatedService = curatedConnectorForCatalogId(connectorId)?.credentialService;
+    if (curatedService) candidates.push(curatedService);
+
+    for (const candidate of candidates) {
+      const stored = this.connectorApi?.getOAuthTokens('default', candidate);
+      if (stored?.accessToken) {
+        const conn = this.connectorApi?.getConnectionRow('default', candidate);
+        return {
+          accessToken: stored.accessToken,
+          refreshToken: stored.refreshToken,
+          expiresAt: conn?.tokenExpiresAt?.getTime() ?? Date.now() + 3600_000,
+        };
+      }
+    }
+
     if (!this.credVault.isUnlocked) return undefined;
-    const entry = this.credVault.find(`oauth:${key}`);
-    if (!entry) return undefined;
-    try { return JSON.parse(entry.secret) as OAuthTokenSet; } catch { return undefined; }
+    for (const candidate of candidates) {
+      const entry = this.credVault.find(candidate);
+      if (!entry) continue;
+      // Legacy shape: a JSON token blob.
+      try {
+        const parsed = JSON.parse(entry.secret) as OAuthTokenSet;
+        if (parsed?.accessToken) return parsed;
+      } catch { /* not JSON — it's the bare bearer token */ }
+      return { accessToken: entry.secret, expiresAt: Date.now() + 3600_000 };
+    }
+    return undefined;
   }
 
   /** Live registry binding for a connector (same shape as connectMcp). */
@@ -2219,6 +2386,11 @@ export class UmbraOS {
     return { connected: true, expiresAt: next.expiresAt };
   }
 
+  /** Persist a refreshed token set (used by the executor's auto-refresh). */
+  async persistRefreshedOauth(id: string, tokens: OAuthTokenSet): Promise<void> {
+    this.storeOauthToken(this.oauthKeyFor(id), tokens, id);
+  }
+
   // ── Model routing / plans / BYOK ───────────────────────────
 
   /** Plan + usage dashboard: spend by slot, budget remaining, metering. */
@@ -2241,6 +2413,7 @@ export class UmbraOS {
         optimizations: snap.optimizations,
         maxOutputTokens: snap.maxOutputTokens,
       },
+      plans: snap.plans,
       metering: this.metering.snapshot(),
     };
   }
@@ -2679,12 +2852,15 @@ export class UmbraOS {
   /** Smart routing with wallet + tier awareness and sticky prompt caching. */
   getSmartRoute(userId: string, taskType: 'vision_ocr' | 'reasoning' | 'coding_heavy' | 'coding_fast' | 'routine' | 'backend_heavy' | 'agentic_code', preferAltVision?: boolean): any {
     const user = this.userStore!.getUserById(userId);
-    // Enterprise keeps its full-model route table; only ultimate folds into advanced.
+    // Canonical tier spelling via pricing.ts: ultimate/advanced fold together,
+    // enterprise keeps its full-model route table.
     const rawPlan = (user?.plan as any) || 'free';
-    const plan = rawPlan === 'ultimate' ? 'advanced' : rawPlan;
+    const plan = normalizeRoutePlan(rawPlan) ?? rawPlan;
     const depleted = userId ? this.virtualWallet!.depleted(userId) : false;
     const decision = this.smartRouter.route(plan as any, taskType, { walletDepleted: depleted, preferAltVision });
-    return { ...decision, plan, wallet: userId ? this.virtualWallet!.balance(userId) : null, depleted };
+    // Which ModelRouter budget slot pays for this decision (TASK_TO_SLOT bridge).
+    const slot = TASK_TO_SLOT[taskType] ?? 'fast';
+    return { ...decision, plan, slot, wallet: userId ? this.virtualWallet!.balance(userId) : null, depleted };
   }
 
   deductWalletForUsage(userId: string, model: string, usage: { prompt_tokens?: number; completion_tokens?: number; cached_tokens?: number; prompt_tokens_details?: any }): number {
@@ -2702,7 +2878,7 @@ export class UmbraOS {
    * Smart OpenRouter call — prompt structure identical across loops for caching.
    * Wraps fetch to https://openrouter.ai/api/v1/chat/completions with sticky prefix.
    */
-  async smartOpenRouterComplete(userId: string, messages: any[], taskType: 'vision_ocr' | 'reasoning' | 'coding_heavy' | 'coding_fast' | 'routine', opts: { preferAltVision?: boolean; maxTokens?: number } = {}): Promise<any> {
+  async smartOpenRouterComplete(userId: string, messages: any[], taskType: 'vision_ocr' | 'reasoning' | 'coding_heavy' | 'coding_fast' | 'routine' | 'backend_heavy' | 'agentic_code', opts: { preferAltVision?: boolean; maxTokens?: number } = {}): Promise<any> {
     const route = this.getSmartRoute(userId, taskType, opts.preferAltVision);
     const model = route.model;
     const apiKey = (this.configManager.raw as any).openrouterApiKey || this.configManager.raw.openaiCompatible?.apiKey || process.env.OPENROUTER_API_KEY || '';
@@ -3254,12 +3430,25 @@ export class UmbraOS {
       await this.audioRouter?.play(res.wav);
       return `Spoke (${res.voice})`;
     }
+    if (tts === 'piper') {
+      if (!this.piperTts) throw new Error('Piper TTS not initialized');
+      const spoken = await this.piperTts.speakWithFallback(text, {
+        voice: opts?.voice || this.configManager.raw.voice.piperVoice,
+        language: opts?.language,
+      });
+      await this.audioRouter?.play(spoken.wav);
+      if (spoken.degraded) {
+        getLogger().warn({ fix: spoken.fix }, 'Meeting TTS spoke with Windows SAPI — Piper not running');
+        return 'Spoke (Windows SAPI fallback — Piper TTS not running)';
+      }
+      return `Spoke (piper)`;
+    }
     if (tts === 'local') {
       if (!this.windowsTts?.available) throw new Error('Windows TTS is only available on Windows');
       await this.windowsTts.speak(text);
       return 'Spoke';
     }
-    throw new Error('Meeting TTS is disabled — set meeting.tts to local, vibevoice or voicebox');
+    throw new Error('Meeting TTS is disabled — set meeting.tts to local, piper, vibevoice or voicebox');
   }
 
   /** Synthesize meeting speech to WAV bytes using the configured provider (meeting.tts). */
@@ -3288,12 +3477,20 @@ export class UmbraOS {
       });
       return { wav: res.wav, label: res.voice };
     }
+    if (tts === 'piper') {
+      if (!this.piperTts) throw new Error('Piper TTS not initialized');
+      const spoken = await this.piperTts.speakWithFallback(text, {
+        voice: opts?.voice || this.configManager.raw.voice.piperVoice,
+        language: opts?.language,
+      });
+      return { wav: spoken.wav, label: spoken.degraded ? 'windows SAPI (piper down)' : `piper (${this.configManager.raw.voice.piperVoice})` };
+    }
     if (tts === 'local') {
       if (!this.windowsTts?.available) throw new Error('Windows TTS is only available on Windows');
       const wav = await this.windowsTts.synthesize(text);
       return { wav, label: 'windows SAPI' };
     }
-    throw new Error('Meeting TTS is disabled — set meeting.tts to local, vibevoice or voicebox');
+    throw new Error('Meeting TTS is disabled — set meeting.tts to local, piper, vibevoice or voicebox');
   }
 
   /** Resolve the cable render device ('auto' or a name/id) to its endpoint id. */
@@ -4016,8 +4213,19 @@ export class UmbraOS {
   }
 
   async smartScheduleAdd(rule: { deviceId: string; deviceName: string; command: 'on' | 'off'; kind: 'everyMinutes' | 'at'; everyMinutes?: number; at?: string }): Promise<any> {
-    if (!this.smartThings.isConfigured()) throw new Error('SmartThings is not configured — connect your PAT in Smart Home → Connect');
-    return this.smartScheduler.add(rule);
+    const deviceId = String(rule.deviceId || '').trim();
+    if (!deviceId) throw new Error('deviceId is required');
+    if (deviceId.includes(':')) {
+      // Namespaced id ("<platform>:<nativeId>") — the owning platform must be connected.
+      const key = deviceId.split(':')[0];
+      const platform = this.smartHomeHub.get(key);
+      if (!platform) throw new Error(`Unknown smart home platform "${key}" — pick a device from Smart Home → Devices`);
+      if (!platform.isConfigured()) throw new Error(`${platform.label} is not connected — connect it in Smart Home → Connect`);
+    } else if (!this.smartThings.isConfigured()) {
+      // A bare id is a legacy SmartThings device id from before the multi-platform hub.
+      throw new Error('SmartThings is not configured — connect your PAT in Smart Home → Connect, or schedule a device from another platform');
+    }
+    return this.smartScheduler.add({ ...rule, deviceId });
   }
 
   async smartScheduleCancel(id: string): Promise<any> {
@@ -4070,6 +4278,25 @@ export class UmbraOS {
     if (!platform) throw new Error(`Unknown smart home platform "${key}"`);
     await platform.clearToken?.();
     return { ok: true, platform: key };
+  }
+
+  /** Cloud platforms only — build the vendor consent URL the desktop opens. */
+  async smartOauthStart(key: string, redirectUri?: string): Promise<any> {
+    const platform = this.smartHomeHub.get(key);
+    if (!platform?.beginOAuth) throw new Error(`Platform "${key}" does not support OAuth sign-in — paste a token instead`);
+    // Default to a loopback on the API port so the vendor can redirect back to
+    // us. Mirrors the connector OAuth callback default in ConnectorApi.
+    const redirect = redirectUri?.trim() || `http://127.0.0.1:8787/api/smart/platforms/${encodeURIComponent(key)}/oauth/callback`;
+    return { platform: key, ...platform.beginOAuth(redirect) };
+  }
+
+  /** Exchange the callback code, persist the session, and report the device count. */
+  async smartOauthCallback(key: string, code: string, state: string): Promise<any> {
+    const platform = this.smartHomeHub.get(key);
+    if (!platform?.completeOAuth) throw new Error(`Platform "${key}" does not support OAuth sign-in`);
+    if (!code) throw new Error('code is required');
+    const res = await platform.completeOAuth(code, state);
+    return { platform: key, ...res };
   }
 
   // ── Carrusel (AI-powered Instagram carousel designer) ──────

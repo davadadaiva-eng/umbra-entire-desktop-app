@@ -15,7 +15,12 @@ describe('ReposManager', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(root, { recursive: true, force: true });
+    // `run()` spawns cmd.exe with this directory as its cwd. A just-finished
+    // child can still hold the dir open briefly, and Windows refuses to delete
+    // a directory in use (EBUSY/EPERM). `force` only suppresses ENOENT, so opt
+    // into Node's retry — 5 attempts is a worst case of ~750ms, which is
+    // proportionate for a temp dir.
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   function makeRepo(): ReposManager {

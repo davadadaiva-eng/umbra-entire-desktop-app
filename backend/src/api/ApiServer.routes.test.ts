@@ -761,6 +761,23 @@ describe('connector marketplace', () => {
     expect(noSpec.status).toBe(500);
   });
 
+  test('POST /api/connectors/:id/ensure-tools forwards force and returns the summary', async () => {
+    const res = await api('/api/connectors/apisguru-stripe/ensure-tools', 'POST', { force: true });
+    expect(res.status).toBe(200);
+    expect(res.json.result.connectorId).toBe('apisguru-stripe');
+    expect(res.json.result.source).toBe('spec');
+    const call = deps.calls.filter(c => c.fn === 'ensureConnectorTools').pop()!;
+    expect(call.args[0]).toBe('apisguru-stripe');
+    expect(call.args[1]).toMatchObject({ force: true });
+  });
+
+  test('POST /api/connectors/:id/ensure-tools defaults force to unset', async () => {
+    const res = await api('/api/connectors/apisguru-stripe/ensure-tools', 'POST', {});
+    expect(res.status).toBe(200);
+    const call = deps.calls.filter(c => c.fn === 'ensureConnectorTools').pop()!;
+    expect(call.args[1]).toMatchObject({});
+  });
+
   test('POST /api/connectors/sync refreshes the catalog', async () => {
     const res = await api('/api/connectors/sync', 'POST');
     expect(res.json.result.synced).toBe(40);
@@ -883,6 +900,36 @@ describe('smart home', () => {
   test('POST /api/smart/control resolves a device by name', async () => {
     const res = await api('/api/smart/control', 'POST', { name: 'Lamp', command: 'off' });
     expect(res.json.result.name).toBe('Lamp');
+  });
+
+  test('POST /api/smart/platforms/:key/oauth/start returns the consent URL', async () => {
+    const res = await api('/api/smart/platforms/smartthings/oauth/start', 'POST', {});
+    expect(res.json.platform).toBe('smartthings');
+    expect(res.json.authorizeUrl).toContain('state=st-smartthings');
+    expect(res.json.state).toBe('st-smartthings');
+  });
+
+  test('POST /api/smart/platforms/:key/oauth/start forwards an explicit redirect', async () => {
+    await api('/api/smart/platforms/smartthings/oauth/start', 'POST', {
+      redirectUri: 'http://127.0.0.1:9999/cb',
+    });
+    // deps.calls is shared across the file — take the most recent.
+    const matches = deps.calls.filter(c => c.fn === 'smartOauthStart');
+    expect(matches.pop()!.args).toEqual(['smartthings', 'http://127.0.0.1:9999/cb']);
+  });
+
+  test('GET /api/smart/platforms/:key/oauth/callback exchanges the code', async () => {
+    const res = await api('/api/smart/platforms/smartthings/oauth/callback?code=abc123&state=st-smartthings');
+    expect(res.json).toMatchObject({ ok: true, platform: 'smartthings', deviceCount: 3 });
+    expect(callTo('smartOauthCallback')).toEqual(['smartthings', 'abc123', 'st-smartthings']);
+  });
+
+  test('GET /api/smart/platforms/:key/oauth/callback rejects a callback with no code or state', async () => {
+    const before = deps.calls.filter(c => c.fn === 'smartOauthCallback').length;
+    const res = await api('/api/smart/platforms/smartthings/oauth/callback?error=access_denied');
+    expect(res.status).toBe(500);
+    expect(res.json.error).toMatch(/missing code or state/);
+    expect(deps.calls.filter(c => c.fn === 'smartOauthCallback')).toHaveLength(before);
   });
 
   test('GET /api/smart/schedules lists schedules', async () => {

@@ -11,10 +11,13 @@
  * companion degrades gracefully — you can route system audio to the mic via
  * VB-Cable / Stereo Mix, or feed audio through the API instead.
  */
-import { execSync } from 'child_process';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from '../Logger';
+
+const execFileAsync = promisify(execFile);
 
 const CS_SOURCE = `using System;
 using System.IO;
@@ -54,16 +57,20 @@ public static class LoopbackRecorder
     {
         [PreserveSig] int Initialize(AUDCLNT_SHAREMODE shareMode, int streamFlags, long hnsBufferDuration, long hnsPeriodicity, IntPtr pFormat, ref Guid audioSessionGuid);
         [PreserveSig] int GetBufferSize(out int numBufferFrames);
+        // Real vtable between GetBufferSize(4) and GetMixFormat(8):
+        // GetStreamLatency(5), GetCurrentPadding(6), IsFormatSupported(7).
+        // Getting this count wrong shifts every later call one slot —
+        // GetMixFormat then actually invokes GetDevicePeriod and the bogus
+        // pointer faults inside Marshal.PtrToStructure (AccessViolation).
         int NotImpl1();
         int NotImpl2();
         int NotImpl3();
-        int NotImpl4();
         [PreserveSig] int GetMixFormat(out IntPtr ppFormat);
-        int NotImpl5();
+        int NotImpl5(); // GetDevicePeriod
         [PreserveSig] int Start();
         [PreserveSig] int Stop();
-        int NotImpl6();
-        int NotImpl7();
+        int NotImpl6(); // Reset
+        int NotImpl7(); // SetEventHandle
         [PreserveSig] int GetService(ref Guid riid, [MarshalAs(UnmanagedType.IUnknown)] out object ppv);
     }
 
@@ -124,6 +131,12 @@ public static class LoopbackRecorder
         int sampleRate = (int)fmt.nSamplesPerSec;
         int channels = fmt.nChannels;
         int bitsPerSample = fmt.wBitsPerSample;
+        // Shared-mode WASAPI always mixes in IEEE float32; writing those raw
+        // bytes under a PCM (integer) WAV header makes every consumer decode
+        // garbage — whisper hears distorted noise. Convert float -> int16 so
+        // the file is a plain, valid PCM WAV regardless of the mix format.
+        bool isFloat = bitsPerSample == 32;
+        int outBits = isFloat ? 16 : bitsPerSample;
 
         long totalFrames = (long)sampleRate * seconds;
         long framesRead = 0;
@@ -148,7 +161,24 @@ public static class LoopbackRecorder
                     int bytesToCopy = frames * blockAlign;
                     var chunk = new byte[bytesToCopy];
                     Marshal.Copy(buf, chunk, 0, bytesToCopy);
-                    ms.Write(chunk, 0, bytesToCopy);
+                    if (isFloat)
+                    {
+                        int sampleCount = bytesToCopy / 4;
+                        var pcm = new byte[sampleCount * 2];
+                        for (int i = 0; i < sampleCount; i++)
+                        {
+                            float f = BitConverter.ToSingle(chunk, i * 4);
+                            if (f > 1f) f = 1f; else if (f < -1f) f = -1f;
+                            short s = (short)Math.Round(f * 32767f);
+                            pcm[i * 2] = (byte)(s & 0xFF);
+                            pcm[i * 2 + 1] = (byte)((s >> 8) & 0xFF);
+                        }
+                        ms.Write(pcm, 0, pcm.Length);
+                    }
+                    else
+                    {
+                        ms.Write(chunk, 0, bytesToCopy);
+                    }
                     framesRead += frames;
                 }
                 capture.ReleaseBuffer(frames);
@@ -159,7 +189,7 @@ public static class LoopbackRecorder
 
         using (var fs = new FileStream(path, FileMode.Create))
         {
-            WriteWavHeader(fs, ms.Length, sampleRate, channels, bitsPerSample);
+            WriteWavHeader(fs, ms.Length, sampleRate, channels, outBits);
             ms.Position = 0;
             ms.CopyTo(fs);
         }
@@ -189,6 +219,9 @@ public static class LoopbackRecorder
 
 const PS_RECORD_SCRIPT = `param([string]$OutPath, [int]$Seconds)
 $ErrorActionPreference = 'Stop'
+# Compile in-memory on every run: caching the DLL to disk and Add-Type -Path
+# is blocked by Windows application control policy on locked-down machines
+# (HRESULT 0x800711C7), while in-memory compilation is allowed.
 Add-Type -TypeDefinition @'
 __CS_SOURCE__
 '@
@@ -223,14 +256,17 @@ export class LoopbackRecorder {
     fs.writeFileSync(psPath, PS_RECORD_SCRIPT.replace('__CS_SOURCE__', CS_SOURCE), 'utf-8');
 
     try {
-      execSync(
-        `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${psPath}" "${outPath}" ${seconds}`,
-        { timeout: (seconds + 10) * 1000, encoding: 'utf-8', windowsHide: true, maxBuffer: 1024 * 1024 },
+      // Async, not execSync: a 6s chunk must not freeze the backend event
+      // loop for the whole PowerShell run (compile + capture window).
+      await execFileAsync(
+        'powershell',
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', psPath, outPath, String(seconds)],
+        { timeout: (seconds + 20) * 1000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
       );
     } catch (err: any) {
       getLogger().warn({ err: (err.stderr || err.message || '').toString().slice(0, 300) }, 'Loopback capture failed');
       throw new Error(
-        'Loopback capture failed. Enable "Stereo Mix" in sound settings, or install VB-Cable and route system audio to the mic, then retry.',
+        'Loopback capture failed — WASAPI loopback on the default render device returned an error. Check that the default output device is a real playback endpoint (some HDMI/driver devices block loopback), or route system audio to a virtual cable and feed it via the API instead.',
       );
     }
 

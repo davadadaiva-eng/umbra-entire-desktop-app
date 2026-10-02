@@ -166,6 +166,20 @@ export function actionRoutes(deps: ApiServerDeps): ActionRouteEntry[] {
     }],
     [/^POST \/api\/smart\/platforms\/([^/]+)\/disconnect$/, async (_url, _body, match) =>
       deps.smartDisconnectPlatform(String(match?.[1] || ''))],
+    // ── OAuth sign-in (cloud platforms) ──
+    [/^POST \/api\/smart\/platforms\/([^/]+)\/oauth\/start$/, async (_url, body, match) =>
+      deps.smartOauthStart(
+        String(match?.[1] || ''),
+        body.redirectUri ? String(body.redirectUri) : undefined,
+      )],
+    // The vendor redirects the browser here, so this is a GET reading the query
+    // string. It also answers a real browser, so failures come back as JSON.
+    [/^GET \/api\/smart\/platforms\/([^/]+)\/oauth\/callback$/, async (url, _body, match) => {
+      const code = url.searchParams.get('code') || '';
+      const state = url.searchParams.get('state') || '';
+      if (!code || !state) throw new Error('OAuth callback is missing code or state');
+      return deps.smartOauthCallback(String(match?.[1] || ''), code, state);
+    }],
     [/^POST \/api\/smart\/token$/, async (_url, body) => {
       const token = String(body.token || '').trim();
       if (!token) throw new Error('token is required — paste your PAT from account.smartthings.com/tokens');
