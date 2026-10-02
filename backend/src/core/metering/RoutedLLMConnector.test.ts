@@ -57,9 +57,12 @@ describe('RoutedLLMConnector', () => {
   let server: http.Server;
   let port: number;
   let lastBody: any;
+  /** When true, the fake server rejects image input on every model. */
+  let rejectAllImages: boolean;
 
   beforeEach(async () => {
     lastBody = undefined;
+    rejectAllImages = false;
     server = http.createServer((req, res) => {
       let body = '';
       req.on('data', c => (body += c));
@@ -70,6 +73,17 @@ describe('RoutedLLMConnector', () => {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'boom' }));
           return;
+        }
+        const acceptsImages = parsed.model === 'google/gemini-2.5-pro' && !rejectAllImages;
+        if (!acceptsImages && (parsed.model.startsWith('novision') || parsed.model.startsWith('google/gemini') || parsed.model.startsWith('fail')) && Array.isArray(parsed.messages)) {
+          const hasImage = parsed.messages.some((m: any) => Array.isArray(m.content) && m.content.some((p: any) => p?.type === 'image' || p?.type === 'image_url'));
+          if (hasImage) {
+            // Mirrors OpenRouter's routing funnel: the model exists but has no
+            // endpoints that accept image input.
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: 'No endpoints found that support image input', code: 404, metadata: { routing_funnel: [{ step: 'Initial Endpoints', endpoint_count: 15 }, { step: 'Filter by Image Support', endpoint_count: 0 }] } } }));
+            return;
+          }
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ message: { content: `pong:${parsed.model}` }, prompt_eval_count: 20, eval_count: 10, done_reason: 'stop' }));
@@ -155,6 +169,61 @@ describe('RoutedLLMConnector', () => {
 
     const nodeRes = await conn.complete([{ role: 'user', content: 'hi' }], 'fast');
     expect(nodeRes.content).toBe('pong:fast-model'); // outside any tenant: node default router
+  });
+
+  it('retries vision calls on a vision-capable model when the slot model rejects image input', async () => {
+    const endpoint = `http://127.0.0.1:${port}`;
+    // fast slot = a text-only model; the request carries a screenshot.
+    const config = makeConfig(endpoint, { fast: { provider: 'ollama', model: 'novision-text-only', inputPerM: 0.1, cacheHitPerM: 0.01, outputPerM: 0.1 } });
+    const metering = new MeteringService({ dataDir: dir });
+    const conn = new RoutedLLMConnector(config, metering, new ModelRouter({ config }));
+
+    const messages = [{
+      role: 'user' as const,
+      content: [
+        { type: 'text' as const, text: 'Did the action succeed?' },
+        { type: 'image' as const, image: 'aGVsbG8=' },
+      ],
+    }];
+    const res = await conn.complete(messages, 'vision');
+
+    expect(res.content).toBe('pong:google/gemini-2.5-pro');
+    expect(lastBody.model).toBe('google/gemini-2.5-pro'); // retried on the catalog VLM
+  });
+
+  it('does not burn the vision retry on plain provider failures', async () => {
+    const endpoint = `http://127.0.0.1:${port}`;
+    const config = makeConfig(endpoint, { fast: { provider: 'ollama', model: 'fail-fast-model', inputPerM: 0.1, cacheHitPerM: 0.01, outputPerM: 0.1 } });
+    const metering = new MeteringService({ dataDir: dir });
+    const conn = new RoutedLLMConnector(config, metering, new ModelRouter({ config }));
+
+    const res = await conn.complete([{ role: 'user', content: 'no image here' }], 'fast');
+
+    expect(res.content).toBe('pong:free-model'); // straight to the free spillover
+    expect(lastBody.model).toBe('free-model');
+  });
+
+  it('spills to free models when the vision retry also fails', async () => {
+    const endpoint = `http://127.0.0.1:${port}`;
+    // Slot already names a vision model the fixture server refuses (no image
+    // endpoints) → the retry must skip it, land on the other vision model,
+    // and when that fails too, spill to the free slot.
+    rejectAllImages = true;
+    const config = makeConfig(endpoint, { fast: { provider: 'ollama', model: 'google/gemini-2.5-flash', inputPerM: 0.1, cacheHitPerM: 0.01, outputPerM: 0.1 } });
+    const metering = new MeteringService({ dataDir: dir });
+    const conn = new RoutedLLMConnector(config, metering, new ModelRouter({ config }));
+
+    const messages = [{
+      role: 'user' as const,
+      content: [
+        { type: 'text' as const, text: 'Look at this' },
+        { type: 'image' as const, image: 'aGVsbG8=' },
+      ],
+    }];
+    const res = await conn.complete(messages, 'vision');
+
+    expect(res.content).toBe('pong:free-model');
+    expect(lastBody.model).toBe('free-model');
   });
 
   it('locks the free plan to free models even with routing enabled', async () => {

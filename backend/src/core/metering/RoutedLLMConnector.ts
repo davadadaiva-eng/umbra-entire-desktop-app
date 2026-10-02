@@ -23,6 +23,21 @@ import { MeteringService } from './MeteringService';
 import { ModelRouter } from './ModelRouter';
 import { TenantLedger } from '../billing/TenantLedger';
 import { RoutingTier, UmbraConfig } from '../../types';
+import { MODELS as PRICING_MODELS } from './pricing';
+
+/** Catalog models known to accept image input (retry targets for vision calls). */
+const VISION_CAPABLE_MODELS = [PRICING_MODELS.geminiPro.id, PRICING_MODELS.geminiFlash.id];
+
+function carriesImage(messages: LLMMessage[]): boolean {
+  return messages.some(m => Array.isArray(m.content) && m.content.some((p: any) => p?.type === 'image'));
+}
+
+function isImageInputError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  // OpenRouter 404s text-only models with "No endpoints found that support
+  // image input" (routing_funnel: Filter by Image Support).
+  return /image input|image support|multimodal/i.test(msg);
+}
 
 export class RoutedLLMConnector extends MeteredLLMConnector {
   private router: ModelRouter;
@@ -62,6 +77,25 @@ export class RoutedLLMConnector extends MeteredLLMConnector {
     try {
       return await this.runTier(router, tier, messages, role, options);
     } catch (err: any) {
+      // A text-only slot model rejects screenshots outright (OpenRouter 404
+      // "no endpoints support image input") before inference even starts.
+      // Retry once on a known vision-capable catalog model so image work
+      // still lands on a working slot instead of failing the task.
+      const visionFallback = carriesImage(messages) && isImageInputError(err)
+        ? VISION_CAPABLE_MODELS.find(m => m !== router.tierConfig(tier).model)
+        : undefined;
+      if (visionFallback) {
+        getLogger().warn({ tier, model: router.tierConfig(tier).model, fallback: visionFallback }, 'Slot model rejects image input — retrying on a vision-capable model');
+        try {
+          return await this.runTier(router, tier, messages, role, { ...options, model: visionFallback });
+        } catch (retryErr: any) {
+          if (tier !== 'free') {
+            getLogger().warn({ tier, fallback: visionFallback, err: retryErr.message }, 'Vision fallback failed — spilling over to free models');
+            return await this.runTier(router, 'free', messages, role, options);
+          }
+          throw retryErr;
+        }
+      }
       // Provider failure or quota: spill over to free models so we never
       // run out of capacity.
       if (tier !== 'free') {

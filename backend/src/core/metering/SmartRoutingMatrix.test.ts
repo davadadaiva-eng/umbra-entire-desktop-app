@@ -63,6 +63,18 @@ describe('SmartRoutingMatrix', () => {
       expect(d.model).toBe(MODELS.REASONING);
     });
 
+    it('ultimate and advanced resolve identically for every task', () => {
+      for (const task of ['vision_ocr', 'reasoning', 'coding_heavy', 'coding_fast', 'routine', 'backend_heavy', 'agentic_code'] as const) {
+        expect(router.route('ultimate', task)).toEqual(router.route('advanced', task));
+      }
+    });
+
+    it('documents blocked as downgrade, not denial', () => {
+      const d = router.route('pro', 'reasoning');
+      expect(d.blocked).toBe(true);
+      expect(d.model).toBe(MODELS.REASONING_PRO);
+    });
+
     it('enterprise allows all models (reasoning, coding_heavy, vision)', () => {
       const d1 = router.route('enterprise', 'reasoning');
       expect(d1.model).toBe(MODELS.REASONING);

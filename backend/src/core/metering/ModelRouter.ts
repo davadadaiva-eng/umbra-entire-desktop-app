@@ -37,7 +37,12 @@ import {
   SLOT_DEFAULTS,
   OPENROUTER_ENDPOINT,
   CACHE_HIT_RATIO,
+  TASK_TO_SLOT,
+  costForModel,
+  normalizeRoutePlan,
+  planSlotModels,
   type PlanProfile as PricingPlanProfile,
+  type TaskKind,
 } from './pricing';
 
 export type PlanProfile = PricingPlanProfile;
@@ -169,15 +174,21 @@ export class ModelRouter {
   }
 
   /** Map an LLM role (+ optional task hint) to its model slot. */
-  routeFor(role: 'reasoning' | 'vision' | 'fast', task?: 'general' | 'frontend' | 'difficult'): RoutingTier {
+  routeFor(role: 'reasoning' | 'vision' | 'fast', task?: 'general' | 'frontend' | 'difficult' | TaskKind): RoutingTier {
     if (task === 'frontend') return 'frontend';
     if (task === 'difficult') return 'difficult';
+    if (task && task in TASK_TO_SLOT) return TASK_TO_SLOT[task as TaskKind];
     if (role === 'reasoning') return 'reasoning';
     return 'fast';
   }
 
+  /** Bridge: map a smart-routing task kind to the budget slot that pays for it. */
+  slotForTask(task: TaskKind): RoutingTier {
+    return TASK_TO_SLOT[task] ?? 'fast';
+  }
+
   /** The slot to actually run, after applying plan restrictions. */
-  resolveTier(role: 'reasoning' | 'vision' | 'fast', task?: 'general' | 'frontend' | 'difficult'): RoutingTier {
+  resolveTier(role: 'reasoning' | 'vision' | 'fast', task?: 'general' | 'frontend' | 'difficult' | TaskKind): RoutingTier {
     if (!this.planAllowsHosted()) return 'free';
     return this.routeFor(role, task);
   }
@@ -198,13 +209,18 @@ export class ModelRouter {
     }, 0);
   }
 
-  /** Estimated USD cost for a slot, with prompt-caching already applied. */
+  /** Estimated USD cost for a slot, with prompt-caching already applied. Same engine as SmartRoutingMatrix. */
   cost(tier: RoutingTier, inputTokens: number, outputTokens: number): number {
     const c = this.routing[tier];
     const hit = Math.min(1, Math.max(0, this.routing.cacheHitRatio));
+    const cached = Math.round(inputTokens * hit);
+    // Catalog models share the single cost engine; operator-overridden slot
+    // models keep their configured rates.
+    if (Object.values(PRICING_MODELS).some(m => m.id === c.model)) {
+      return costForModel(c.model, inputTokens, outputTokens, cached);
+    }
     const inputCost = (inputTokens / 1_000_000) * (hit * c.cacheHitPerM + (1 - hit) * c.inputPerM);
-    const outputCost = (outputTokens / 1_000_000) * c.outputPerM;
-    return inputCost + outputCost;
+    return inputCost + (outputTokens / 1_000_000) * c.outputPerM;
   }
 
   /** True when a slot's token cost fits the plan's slot + total budgets. */
@@ -231,23 +247,38 @@ export class ModelRouter {
     return TIERS.filter(t => t !== 'free').reduce((sum, t) => sum + this.usage.spent[t], 0);
   }
 
-  /** Per-plan model + budget overview for the UI/API. */
+  /**
+   * Per-plan model + budget overview for the UI/API. Paid plans show the
+   * models their route table actually serves (derived from PLAN_ROUTES, so
+   * the desktop can never drift from policy); free is locked to the $0
+   * model and byok rides the operator's configured slots.
+   */
   allPlans(): PlanOverview[] {
-    const models: Record<RoutingTier, string[]> = {
+    const slotDefaults: Record<RoutingTier, string[]> = {
       free: [this.routing.free.model],
       fast: [this.routing.fast.model],
       reasoning: [this.routing.reasoning.model],
       frontend: [this.routing.frontend.model],
       difficult: [this.routing.difficult.model],
     };
-    return (Object.keys(PLAN_PROFILES) as PlanTier[]).map(tier => ({
-      tier,
-      name: PLAN_PROFILES[tier].name,
-      priceUsd: PLAN_PROFILES[tier].monthlyPriceUsd,
-      budgetUsd: PLAN_PROFILES[tier].monthlyBudgetUsd,
-      models,
-      slotBudgets: PLAN_PROFILES[tier].slotBudgetUsd,
-    }));
+    const freeModels: Record<RoutingTier, string[]> = {
+      free: [this.routing.free.model],
+      fast: [this.routing.free.model],
+      reasoning: [this.routing.free.model],
+      frontend: [this.routing.free.model],
+      difficult: [this.routing.free.model],
+    };
+    return (Object.keys(PLAN_PROFILES) as PlanTier[]).map(tier => {
+      const routePlan = normalizeRoutePlan(tier);
+      return {
+        tier,
+        name: PLAN_PROFILES[tier].name,
+        priceUsd: PLAN_PROFILES[tier].monthlyPriceUsd,
+        budgetUsd: PLAN_PROFILES[tier].monthlyBudgetUsd,
+        models: routePlan ? planSlotModels(routePlan) : tier === 'byok' ? slotDefaults : freeModels,
+        slotBudgets: PLAN_PROFILES[tier].slotBudgetUsd,
+      };
+    });
   }
 
   snapshot(): RouterSnapshot {

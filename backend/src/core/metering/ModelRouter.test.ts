@@ -78,10 +78,38 @@ describe('ModelRouter', () => {
     expect(snap.tiers.frontend.model).toContain('gemini-2.5-flash');
     expect(snap.tiers.difficult.model).toContain('sonnet');
 
+    // Per-plan models come from the route table (pro is downgraded off the flagships).
     const pro = snap.plans.find(p => p.tier === 'pro')!;
-    expect(pro.models.fast).toEqual(['google/gemini-2.5-flash']);
-    expect(pro.models.reasoning).toEqual(['moonshotai/kimi-k3']);
-    expect(pro.models.difficult).toEqual(['anthropic/claude-sonnet-5']);
+    expect(pro.models.fast).toEqual(['google/gemini-2.5-pro', 'google/gemini-2.5-flash']);
+    expect(pro.models.reasoning).toEqual(['moonshotai/kimi-k2-thinking', 'meta/muse-spark-1.3']);
+    expect(pro.models.difficult).toEqual(['z-ai/glm-5']);
+
+    const ultimate = snap.plans.find(p => p.tier === 'ultimate')!;
+    expect(ultimate.models.reasoning).toContain('moonshotai/kimi-k3');
+    expect(ultimate.models.difficult).toContain('anthropic/claude-sonnet-5');
+
+    const free = snap.plans.find(p => p.tier === 'free')!;
+    for (const slot of Object.values(free.models)) {
+      expect(slot).toEqual([snap.tiers.free.model]);
+    }
+  });
+
+  it('maps smart task kinds to budget slots', () => {
+    const router = new ModelRouter({ config: makeConfig() });
+    expect(router.slotForTask('vision_ocr')).toBe('fast');
+    expect(router.slotForTask('reasoning')).toBe('reasoning');
+    expect(router.slotForTask('agentic_code')).toBe('reasoning');
+    expect(router.slotForTask('coding_heavy')).toBe('difficult');
+    expect(router.slotForTask('backend_heavy')).toBe('difficult');
+    expect(router.slotForTask('coding_fast')).toBe('fast');
+    expect(router.slotForTask('routine')).toBe('fast');
+  });
+
+  it('routes smart task kinds through routeFor like legacy hints', () => {
+    const router = new ModelRouter({ config: makeConfig() });
+    expect(router.routeFor('fast', 'backend_heavy')).toBe('difficult');
+    expect(router.routeFor('fast', 'agentic_code')).toBe('reasoning');
+    expect(router.resolveTier('fast', 'vision_ocr')).toBe('fast');
   });
 
   it('uses a cloud OpenRouter free model as the spillover tier', () => {

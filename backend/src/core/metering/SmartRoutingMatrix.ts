@@ -5,9 +5,9 @@
  *   FRONTEND       = 'google/gemini-2.5-flash'      // frontend + fast tools
  *   VISION         = 'google/gemini-2.5-pro'        // screenshots, computer/mobile
  *   REASONING      = 'moonshotai/kimi-k3'           // flagship reasoning (Advanced/Enterprise)
- *   REASONING_PRO  = 'moonshotai/kimi-k2-thinking'  // pro reasoning (K3 costs $5.85/session)
- *   BACKEND        = 'z-ai/glm-5-long'              // backend + large repos
- *   AGENTIC        = 'muse/muse-spark-1.3'          // agentic code
+ *   REASONING_PRO  = 'moonshotai/kimi-k2-thinking'  // pro reasoning (flagship too rich for €5)
+ *   BACKEND        = 'z-ai/glm-5'                   // backend + large repos
+ *   AGENTIC        = 'meta/muse-spark-1.3'          // agentic code
  *   AGENTIC_ALT    = 'qwen/qwen3-max'               // agentic-code alternative
  *   FRONTIER       = 'anthropic/claude-sonnet-5'    // difficult/rare, heavy architecture
  *   FREE           = 'meta-llama/llama-3.1-8b-instruct:free' // $0 safety ceiling
@@ -17,7 +17,7 @@
  * on repeating desktop frames. See buildStickySystemPrompt().
  */
 
-import { MODELS as CATALOG, PLAN_ROUTES, type TaskKind } from './pricing';
+import { MODELS as CATALOG, PLAN_ROUTES, normalizeRoutePlan, costForModel, type TaskKind } from './pricing';
 
 export const MODELS = {
   FREE: CATALOG.free.id,
@@ -25,7 +25,7 @@ export const MODELS = {
   VISION: CATALOG.geminiPro.id,
   REASONING: CATALOG.kimiK3.id,
   REASONING_PRO: CATALOG.kimiThinking.id,
-  BACKEND: CATALOG.glmLong.id,
+  BACKEND: CATALOG.glm5.id,
   AGENTIC: CATALOG.spark.id,
   AGENTIC_ALT: CATALOG.qwenMax.id,
   FRONTIER: CATALOG.claudeSonnet.id,
@@ -59,7 +59,12 @@ export function buildStickySystemPrompt(extra: string): string {
 export interface RouteDecision {
   model: string;
   reason: string;
-  blocked: boolean; // true if tier blocks this class
+  /**
+   * true = the flagship for this task class was substituted with a cheaper
+   * in-budget model (a downgrade, e.g. Pro reasoning → Kimi Thinking).
+   * The returned model is always runnable — never a denial.
+   */
+  blocked: boolean;
 }
 
 export class SmartRoutingMatrix {
@@ -71,8 +76,8 @@ export class SmartRoutingMatrix {
     if (opts.walletDepleted) {
       return { model: MODELS.FREE, reason: 'wallet depleted → free fallback (safety ceiling)', blocked: false };
     }
-    const p = plan === 'ultimate' ? 'advanced' : plan;
-    if (p !== 'pro' && p !== 'advanced' && p !== 'enterprise') {
+    const p = normalizeRoutePlan(plan);
+    if (!p) {
       return { model: MODELS.FREE, reason: 'free/byok → free fallback', blocked: false };
     }
     const entry = PLAN_ROUTES[p][taskType] ?? PLAN_ROUTES[p].routine;
@@ -86,17 +91,10 @@ export class SmartRoutingMatrix {
     return { model: modelId, reason: entry.reason, blocked: entry.blocked };
   }
 
-  /** Calculate cost from OpenRouter usage block (incl. cache_read). */
+  /** Calculate cost from OpenRouter usage block (incl. cache_read). Single engine lives in pricing.ts. */
   calculateCost(model: string, usage: { prompt_tokens?: number; completion_tokens?: number; cached_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } }): number {
-    const pricing = PRICING[model] || PRICING[MODELS.FREE];
     const cached = usage.cached_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? 0;
-    const prompt = usage.prompt_tokens ?? 0;
-    const completion = usage.completion_tokens ?? 0;
-    const uncachedPrompt = Math.max(0, prompt - cached);
-    const cost = (uncachedPrompt / 1_000_000) * pricing.input
-               + (cached / 1_000_000) * pricing.cacheRead
-               + (completion / 1_000_000) * pricing.output;
-    return Number(cost.toFixed(6));
+    return costForModel(model, usage.prompt_tokens ?? 0, usage.completion_tokens ?? 0, cached);
   }
 
   /** Infer task type from planner/tool context (heuristic). */

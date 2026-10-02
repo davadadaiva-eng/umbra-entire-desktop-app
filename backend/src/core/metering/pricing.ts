@@ -11,12 +11,14 @@
  *
  * Rules:
  *   - Wallet arithmetic is currency-agnostic units; € mirrors $ 1:1.
- *   - Rates are $/1M tokens, verified against OpenRouter (Sep 2026).
- *   - Entries flagged `verified: false` MUST be confirmed on
- *     https://openrouter.ai/models before relying on them in production —
- *     the router treats them normally, but margins are estimates.
+ *   - Rates are $/1M tokens, verified against OpenRouter (30 Sep 2026).
+ *     `verified: false` MUST still be confirmed on
+ *     https://openrouter.ai/models before relying on it in production.
  *   - Manual sync: when OpenRouter prices drift, update the numbers here
  *     and every consumer follows. Never duplicate a price elsewhere.
+ *   - Tier naming: `ultimate` is canonical, `advanced` its alias (see
+ *     normalizeRoutePlan). PLAN_ROUTES is keyed pro/advanced/enterprise for
+ *     history; always look it up through normalizeRoutePlan.
  */
 
 import type { PlanTier, RoutingTier } from '../../types';
@@ -137,41 +139,45 @@ export const MODELS = {
     inputPerM: 1.25, cacheReadPerM: 0.125, outputPerM: 10.0,
     verified: true, blurb: 'Vision, computer use, pro thinking',
   },
-  /** Reasoning flagship (Advanced/Enterprise). 1M context. */
+  /**
+   * Reasoning flagship (Advanced/Enterprise). 1M context.
+   * Cheapest OpenRouter listing (Sail Research, slightly clipped context);
+   * typical providers serve $3.00 / $0.30 / $15.00 (Moonshot list).
+   */
   kimiK3: {
     id: 'moonshotai/kimi-k3',
     inputPerM: 2.6, cacheReadPerM: 0.29, outputPerM: 13.0,
     verified: true, blurb: 'Flagship reasoning, agentic coding',
   },
-  /** Pro reasoning (K3 costs $5.85/session — too rich for the €5 budget). */
+  /** Pro reasoning (K3 at ~$0.26/session list would still vaporize the €5 budget at volume). */
   kimiThinking: {
     id: 'moonshotai/kimi-k2-thinking',
-    inputPerM: 0.6, cacheReadPerM: 0.06, outputPerM: 3.0,
-    verified: false, blurb: 'Pro reasoning — confirm slug + rates',
+    inputPerM: 0.6, cacheReadPerM: 0.06, outputPerM: 2.5,
+    verified: true, blurb: 'Pro reasoning, 262K context',
   },
-  /** Backend + large-repo workhorse (Pro). */
-  glmLong: {
-    id: 'z-ai/glm-5-long',
-    inputPerM: 1.4, cacheReadPerM: 0.14, outputPerM: 4.4,
-    verified: false, blurb: 'Backend, large repos — confirm slug + rates',
+  /** Backend + large-repo workhorse (Pro/Advanced). Z.ai flagship, 200K context. */
+  glm5: {
+    id: 'z-ai/glm-5',
+    inputPerM: 0.6, cacheReadPerM: 0.12, outputPerM: 1.92,
+    verified: true, blurb: 'Backend, large repos',
   },
-  /** Agentic code (all paid plans). */
+  /** Agentic code (all paid plans). 1M context. */
   spark: {
-    id: 'muse/muse-spark-1.3',
-    inputPerM: 1.25, cacheReadPerM: 0.125, outputPerM: 5.0,
-    verified: false, blurb: 'Agentic code — input verified, output estimated',
+    id: 'meta/muse-spark-1.3',
+    inputPerM: 1.25, cacheReadPerM: 0.15, outputPerM: 4.25,
+    verified: true, blurb: 'Agentic code, 1M context',
   },
   /** Difficult/rare, heavy backend + architecture (Advanced/Enterprise). */
   claudeSonnet: {
     id: 'anthropic/claude-sonnet-5',
     inputPerM: 2.0, cacheReadPerM: 0.2, outputPerM: 10.0,
-    verified: true, blurb: 'Frontier coding — intro pricing, standard $3/$15 after Aug 2026',
+    verified: true, blurb: 'Frontier coding, standard pricing',
   },
-  /** Agentic-code alternative (Advanced/Enterprise). */
+  /** Agentic-code alternative (Advanced/Enterprise). 262K context. */
   qwenMax: {
     id: 'qwen/qwen3-max',
-    inputPerM: 0.4, cacheReadPerM: 0.04, outputPerM: 1.6,
-    verified: false, blurb: 'Agentic-code alt — confirm slug + rates',
+    inputPerM: 0.78, cacheReadPerM: 0.156, outputPerM: 3.9,
+    verified: true, blurb: 'Agentic-code alt',
   },
 } satisfies Record<string, ModelPrice>;
 
@@ -205,14 +211,19 @@ export const CACHE_HIT_RATIO = 0.85;
 export type PlanId = 'pro' | 'advanced' | 'enterprise' | 'free' | 'byok';
 export type TaskKind = 'vision_ocr' | 'reasoning' | 'coding_heavy' | 'coding_fast' | 'routine' | 'backend_heavy' | 'agentic_code';
 
+/**
+ * `blocked: true` does NOT mean denied — it means the flagship for this
+ * task class was substituted with a cheaper in-budget model (a downgrade).
+ * The returned `model` is always runnable.
+ */
 export const PLAN_ROUTES: Record<Exclude<PlanId, 'free' | 'byok'>, Record<TaskKind, { model: ModelKey; blocked: boolean; reason: string }>> = {
   pro: {
     vision_ocr: { model: 'geminiPro', blocked: false, reason: 'PRO vision → Gemini Pro' },
     reasoning: { model: 'kimiThinking', blocked: true, reason: 'PRO reasoning → Kimi Thinking (K3 blocked: €5 budget)' },
-    coding_heavy: { model: 'glmLong', blocked: true, reason: 'PRO heavy backend → GLM Long (Claude/K3 blocked)' },
+    coding_heavy: { model: 'glm5', blocked: true, reason: 'PRO heavy backend → GLM 5 (Claude/K3 blocked)' },
     coding_fast: { model: 'geminiFlash', blocked: false, reason: 'PRO scripting → Gemini Flash' },
     routine: { model: 'geminiFlash', blocked: false, reason: 'PRO routine → Gemini Flash' },
-    backend_heavy: { model: 'glmLong', blocked: false, reason: 'PRO large repos → GLM Long' },
+    backend_heavy: { model: 'glm5', blocked: false, reason: 'PRO large repos → GLM 5' },
     agentic_code: { model: 'spark', blocked: false, reason: 'PRO agentic code → Muse Spark 1.3' },
   },
   advanced: {
@@ -221,7 +232,7 @@ export const PLAN_ROUTES: Record<Exclude<PlanId, 'free' | 'byok'>, Record<TaskKi
     coding_heavy: { model: 'claudeSonnet', blocked: false, reason: 'ADVANCED heavy → Claude Sonnet 5' },
     coding_fast: { model: 'geminiFlash', blocked: false, reason: 'ADVANCED iterative → Gemini Flash' },
     routine: { model: 'geminiFlash', blocked: false, reason: 'ADVANCED routine → Gemini Flash' },
-    backend_heavy: { model: 'glmLong', blocked: false, reason: 'ADVANCED large repos → GLM Long' },
+    backend_heavy: { model: 'glm5', blocked: false, reason: 'ADVANCED large repos → GLM 5' },
     agentic_code: { model: 'spark', blocked: false, reason: 'ADVANCED agentic code → Muse Spark 1.3 (alt: Qwen Max)' },
   },
   enterprise: {
@@ -274,4 +285,71 @@ export function walletBudgets(tier: string): WalletBudgets {
     case 'enterprise': return { models: 30, cloud: 29.99, telco: 15 };
     default: return { models: 0, cloud: 0, telco: 0 };
   }
+}
+
+// ── Routing unification ─────────────────────────────────────────
+// Single canonicalizer for the paid route tables. `ultimate` and
+// `advanced` are the same tier; everything folds to the `advanced`
+// PLAN_ROUTES key. Use this everywhere instead of ad-hoc ternaries.
+
+export type RoutePlan = 'pro' | 'advanced' | 'enterprise';
+
+export function normalizeRoutePlan(tier: string): RoutePlan | null {
+  if (tier === 'pro') return 'pro';
+  if (tier === 'ultimate' || tier === 'advanced') return 'advanced';
+  if (tier === 'enterprise') return 'enterprise';
+  return null;
+}
+
+/**
+ * Bridge between the 7 smart task kinds and the 5 legacy budget slots.
+ * Lets RoutedLLMConnector enforce ModelRouter slot budgets for smart
+ * tasks, and lets getSmartRoute report which budget slot a decision
+ * draws from. Frontend has no smart task kind → falls back to flash.
+ */
+export const TASK_TO_SLOT: Record<TaskKind, RoutingTier> = {
+  vision_ocr: 'fast',
+  reasoning: 'reasoning',
+  coding_heavy: 'difficult',
+  coding_fast: 'fast',
+  routine: 'fast',
+  backend_heavy: 'difficult',
+  agentic_code: 'reasoning',
+};
+
+/** The single cost engine: exact $ for a model + real token counts. */
+export function costForModel(
+  modelId: string,
+  promptTokens: number,
+  completionTokens: number,
+  cachedTokens = 0,
+): number {
+  const entry = Object.values(MODELS).find(m => m.id === modelId) ?? MODELS.free;
+  const uncached = Math.max(0, promptTokens - cachedTokens);
+  return Number((
+    (uncached / 1_000_000) * entry.inputPerM +
+    (cachedTokens / 1_000_000) * entry.cacheReadPerM +
+    (completionTokens / 1_000_000) * entry.outputPerM
+  ).toFixed(6));
+}
+
+/**
+ * Per-plan models grouped by budget slot, derived from PLAN_ROUTES via
+ * TASK_TO_SLOT (never hand-maintained). Powers ModelRouter.allPlans()
+ * and the desktop Usage plan cards so the UI can't drift from policy.
+ */
+export function planSlotModels(plan: RoutePlan): Record<RoutingTier, string[]> {
+  const buckets: Record<RoutingTier, string[]> = {
+    free: [MODELS.free.id],
+    fast: [],
+    reasoning: [],
+    frontend: [MODELS.geminiFlash.id],
+    difficult: [],
+  };
+  for (const [task, entry] of Object.entries(PLAN_ROUTES[plan]) as Array<[TaskKind, { model: ModelKey }]>) {
+    const slot = TASK_TO_SLOT[task];
+    const id = MODELS[entry.model].id;
+    if (!buckets[slot].includes(id)) buckets[slot].push(id);
+  }
+  return buckets;
 }
