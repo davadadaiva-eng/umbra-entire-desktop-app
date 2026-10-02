@@ -29,6 +29,8 @@ export interface McpCatalogEntry extends McpConnectorConfig {
   description: string;
   /** Documentation / repo hint surfaced to the user when connecting. */
   docs?: string;
+  /** OpenAPI/Swagger spec URL — enables on-demand tool ingestion. */
+  specUrl?: string;
 }
 
 type Row = [
@@ -1317,6 +1319,7 @@ const externalEntries: McpCatalogEntry[] = (externalCatalog as any[]).map((e) =>
   kind: e.kind || ('verified' as const),
   description: e.description || '',
   docs: e.docs,
+  specUrl: e.specUrl,
 }));
 
 /** Hardcoded catalog (before merge). */

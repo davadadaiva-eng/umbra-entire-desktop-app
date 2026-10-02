@@ -72,10 +72,35 @@ export interface ToolExecutorOptions {
   mcpCall?: (connectorId: string, tool: string, input: Record<string, unknown>) => Promise<unknown>;
   /** Max HTTP attempts per call (default 3). */
   maxAttempts?: number;
+  /**
+   * Resolve the OAuth token endpoint + client for a connector's credentialKey.
+   * Wired to OAuthConnector so refresh uses the same provider table as the
+   * authorize step (the previous hardcoded 10-entry map fell back to a fake
+   * `https://oauth.<key>.com/token` for everything else).
+   */
+  oauthClient?: (credentialKey: string) => { clientId: string; clientSecret?: string; tokenUrl: string } | undefined;
 }
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 const DEFAULT_MAX_ATTEMPTS = 3;
+
+/**
+ * Fallback token endpoints for when no OAuthConnector resolver is injected.
+ * Deliberately a short, honest list — the previous code guessed
+ * `https://oauth.<key>.com/token` for anything unlisted, which 404'd silently.
+ */
+const TOKEN_ENDPOINTS: Record<string, string> = {
+  google: 'https://oauth2.googleapis.com/token',
+  microsoft: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+  github: 'https://github.com/login/oauth/access_token',
+  slack: 'https://slack.com/api/oauth.v2.access',
+  spotify: 'https://accounts.spotify.com/api/token',
+  discord: 'https://discord.com/api/oauth2/token',
+  dropbox: 'https://api.dropboxapi.com/oauth2/token',
+  linear: 'https://api.linear.app/oauth/token',
+  notion: 'https://api.notion.com/v1/oauth/token',
+  figma: 'https://www.figma.com/api/oauth/token',
+};
 
 // Well-known base URLs (explicit allowlist — no domain guessing).
 const KNOWN_BASE_URLS: Record<string, string> = {
@@ -109,6 +134,7 @@ export class ToolExecutor {
   private injectionGuard?: InjectionGuard;
   private mcpCall?: ToolExecutorOptions['mcpCall'];
   private maxAttempts: number;
+  private oauthClient?: ToolExecutorOptions['oauthClient'];
 
   constructor(store: ConnectorStore, options: ToolExecutorOptions = {}) {
     this.store = store;
@@ -116,6 +142,7 @@ export class ToolExecutor {
     this.injectionGuard = options.injectionGuard;
     this.mcpCall = options.mcpCall;
     this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    this.oauthClient = options.oauthClient;
   }
 
   // ══════════════════════════════════════════════════════════════════
@@ -499,33 +526,42 @@ export class ToolExecutor {
     userId: string,
   ): Promise<string> {
     const credKey = connector.credentialKey || connector.id;
-    const devCreds = this.store.getDeveloperCredentials(credKey);
 
-    if (!devCreds) {
-      throw new Error(`No developer credentials configured for ${credKey}. Add them at /admin/developer-apps`);
+    // Prefer the injected resolver (the real OAuthConnector provider table),
+    // which knows both the token URL and the per-provider secret requirement.
+    let tokenUrl: string | undefined;
+    let clientId: string | undefined;
+    let clientSecret: string | undefined;
+
+    const resolved = this.oauthClient?.(credKey);
+    if (resolved) {
+      tokenUrl = resolved.tokenUrl;
+      clientId = resolved.clientId;
+      clientSecret = resolved.clientSecret;
     }
 
-    const tokenEndpoints: Record<string, string> = {
-      google: 'https://oauth2.googleapis.com/token',
-      microsoft: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
-      github: 'https://github.com/login/oauth/access_token',
-      slack: 'https://slack.com/api/oauth.v2.access',
-      spotify: 'https://accounts.spotify.com/api/token',
-      discord: 'https://discord.com/api/oauth2/token',
-      dropbox: 'https://api.dropboxapi.com/oauth2/token',
-      linear: 'https://api.linear.app/oauth/token',
-      notion: 'https://api.notion.com/v1/oauth/token',
-      figma: 'https://www.figma.com/api/oauth/token',
-    };
+    if (!tokenUrl || !clientId) {
+      const devCreds = this.store.getDeveloperCredentials(credKey);
+      if (!devCreds) {
+        throw new Error(`No developer credentials configured for ${credKey}. Add them at /admin/developer-apps`);
+      }
+      clientId = devCreds.clientId;
+      clientSecret = devCreds.clientSecret;
+      tokenUrl = TOKEN_ENDPOINTS[credKey];
+    }
 
-    const tokenUrl = tokenEndpoints[credKey] || `https://oauth.${credKey}.com/token`;
+    if (!tokenUrl) {
+      throw new Error(
+        `No OAuth token endpoint known for "${credKey}" — add tokenUrl to the connector's OAuth client config`,
+      );
+    }
 
     const body = new URLSearchParams({
       grant_type: 'refresh_token',
       refresh_token: refreshToken,
-      client_id: devCreds.clientId,
-      client_secret: devCreds.clientSecret,
+      client_id: clientId,
     });
+    if (clientSecret) body.set('client_secret', clientSecret);
 
     const response = await HttpBridge.post(tokenUrl, body.toString(), {
       'Content-Type': 'application/x-www-form-urlencoded',

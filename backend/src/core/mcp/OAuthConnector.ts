@@ -151,6 +151,477 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderDef> = {
     tokenUrl: 'https://id.twitch.tv/oauth2/token',
     scopes: ['user:read:email'],
   },
+  paypal: {
+    name: 'PayPal',
+    authorizeUrl: 'https://www.paypal.com/signin/authorize',
+    tokenUrl: 'https://api.paypal.com/v1/oauth2/token',
+    scopes: ['openid', 'email', 'profile'],
+  },
+  xero: {
+    name: 'Xero',
+    authorizeUrl: 'https://login.xero.com/identity/connect/authorize',
+    tokenUrl: 'https://identity.xero.com/connect/token',
+    scopes: ['openid', 'profile', 'email', 'offline_access'],
+  },
+  quickbooks: {
+    name: 'QuickBooks',
+    authorizeUrl: 'https://appcenter.intuit.com/connect/oauth2',
+    tokenUrl: 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer',
+    scopes: ['com.intuit.quickbooks.accounting', 'openid', 'profile', 'email'],
+  },
+  amazon: {
+    name: 'Amazon',
+    authorizeUrl: 'https://www.amazon.com/ap/oa',
+    tokenUrl: 'https://api.amazon.com/auth/o2/token',
+    scopes: ['profile'],
+  },
+  ebay: {
+    name: 'eBay',
+    authorizeUrl: 'https://www.ebay.com/oauth2/authorize',
+    tokenUrl: 'https://api.ebay.com/identity/v1/oauth2/token',
+    scopes: ['https://api.ebay.com/oauth/api_scope'],
+  },
+  twitter: {
+    name: 'Twitter / X',
+    authorizeUrl: 'https://twitter.com/i/oauth2/authorize',
+    tokenUrl: 'https://api.twitter.com/2/oauth2/token',
+    scopes: ['tweet.read', 'users.read', 'offline.access'],
+    includeSecret: true,
+  },
+  facebook: {
+    name: 'Facebook',
+    authorizeUrl: 'https://www.facebook.com/v21.0/dialog/oauth',
+    tokenUrl: 'https://graph.facebook.com/v21.0/oauth/access_token',
+    scopes: [],
+  },
+  instagram: {
+    name: 'Instagram',
+    authorizeUrl: 'https://api.instagram.com/oauth/authorize',
+    tokenUrl: 'https://api.instagram.com/oauth/access_token',
+    scopes: ['user_profile', 'user_media'],
+  },
+  tiktok: {
+    name: 'TikTok',
+    authorizeUrl: 'https://www.tiktok.com/v2/auth/authorize/',
+    tokenUrl: 'https://open.tiktokapis.com/v2/oauth/token/',
+    scopes: [],
+  },
+  pinterest: {
+    name: 'Pinterest',
+    authorizeUrl: 'https://www.pinterest.com/oauth/',
+    tokenUrl: 'https://api.pinterest.com/v5/oauth/token',
+    scopes: [],
+  },
+  tumblr: {
+    name: 'Tumblr',
+    authorizeUrl: 'https://www.tumblr.com/oauth2/authorize',
+    tokenUrl: 'https://api.tumblr.com/v2/oauth2/token',
+    scopes: ['basic'],
+    includeSecret: true,
+  },
+  snapchat: {
+    name: 'Snapchat',
+    authorizeUrl: 'https://accounts.snapchat.com/accounts/oauth2/auth',
+    tokenUrl: 'https://accounts.snapchat.com/accounts/oauth2/token',
+    scopes: ['https://auth.snapchat.com/oauth2/api/user.read'],
+    includeSecret: true,
+  },
+  linkedin: {
+    name: 'LinkedIn',
+    authorizeUrl: 'https://www.linkedin.com/oauth/v2/authorization',
+    tokenUrl: 'https://www.linkedin.com/oauth/v2/accessToken',
+    scopes: ['openid', 'profile', 'email'],
+    includeSecret: true,
+  },
+  adobe: {
+    name: 'Adobe',
+    authorizeUrl: 'https://ims-na1.adobelogin.com/ims/authorize/v2',
+    tokenUrl: 'https://ims-na1.adobelogin.com/ims/token/v3',
+    scopes: ['openid', 'AdobeID', 'read_organizations'],
+  },
+  fitbit: {
+    name: 'Fitbit',
+    authorizeUrl: 'https://www.fitbit.com/oauth2/authorize',
+    tokenUrl: 'https://api.fitbit.com/oauth2/token',
+    scopes: [],
+    includeSecret: true,
+  },
+  withings: {
+    name: 'Withings',
+    authorizeUrl: 'https://account.withings.com/oauth2_user/authorize',
+    tokenUrl: 'https://account.withings.com/oauth2_access_token',
+    scopes: [],
+  },
+  garmin: {
+    name: 'Garmin',
+    authorizeUrl: 'https://connect.garmin.com/oauth2Confirm',
+    tokenUrl: 'https://connectapi.garmin.com/oauth-service/oauth/request',
+    scopes: [],
+    includeSecret: true,
+  },
+  freshbooks: {
+    name: 'FreshBooks',
+    authorizeUrl: 'https://auth.freshbooks.com/oauth/authorize/',
+    tokenUrl: 'https://api.freshbooks.com/auth/oauth/token',
+    scopes: [],
+  },
+  wave: {
+    name: 'Wave',
+    authorizeUrl: 'https://api.waveapps.com/oauth2/authorize/',
+    tokenUrl: 'https://api.waveapps.com/oauth2/token/',
+    scopes: [],
+    includeSecret: true,
+  },
+  revolut: {
+    name: 'Revolut',
+    authorizeUrl: 'https://www.revolut.com/auth/authorize',
+    tokenUrl: 'https://api.revolut.com/api/1.0/auth/token',
+    scopes: [],
+  },
+  monzo: {
+    name: 'Monzo',
+    authorizeUrl: 'https://auth.monzo.com/',
+    tokenUrl: 'https://api.monzo.com/oauth2/token',
+    scopes: [],
+  },
+  truelayer: {
+    name: 'TrueLayer',
+    authorizeUrl: 'https://truelayer-sandbox.com/oauth/authorize',
+    tokenUrl: 'https://api.truelayer-sandbox.com/oauth/token',
+    scopes: [],
+    includeSecret: true,
+  },
+  alibaba: {
+    name: 'Alibaba',
+    authorizeUrl: 'https://open.1688.com/open/oauth2/authorize',
+    tokenUrl: 'https://api.1688.com/openapi/1.0/token',
+    scopes: [],
+  },
+  wix: {
+    name: 'Wix',
+    authorizeUrl: 'https://www.wix.com/_serverless/oauth2/authorize',
+    tokenUrl: 'https://www.wix.com/_serverless/oauth2/token',
+    scopes: [],
+  },
+  woocommerce: {
+    name: 'WooCommerce',
+    authorizeUrl: 'https://connect.woocommerce.com/auth/authorize/',
+    tokenUrl: 'https://connect.woocommerce.com/auth/token/',
+    scopes: ['read'],
+  },
+  hubspot: {
+    name: 'HubSpot',
+    authorizeUrl: 'https://app.hubspot.com/oauth/authorize',
+    tokenUrl: 'https://api.hubapi.com/oauth/v1/token',
+    scopes: ['oauth'],
+  },
+  asana: {
+    name: 'Asana',
+    authorizeUrl: 'https://app.asana.com/-/oauth_authorize',
+    tokenUrl: 'https://app.asana.com/-/oauth_token',
+    scopes: [],
+    includeSecret: true,
+  },
+  atlassian: {
+    name: 'Atlassian',
+    authorizeUrl: 'https://auth.atlassian.com/authorize',
+    tokenUrl: 'https://auth.atlassian.com/oauth/token',
+    scopes: ['read:jira-work', 'offline_access'],
+  },
+  zoom: {
+    name: 'Zoom',
+    authorizeUrl: 'https://zoom.us/oauth/authorize',
+    tokenUrl: 'https://zoom.us/oauth/token',
+    scopes: ['user:read'],
+  },
+  salesforce: {
+    name: 'Salesforce',
+    authorizeUrl: 'https://login.salesforce.com/services/oauth2/authorize',
+    tokenUrl: 'https://login.salesforce.com/services/oauth2/token',
+    scopes: ['openid', 'api', 'refresh_token'],
+  },
+  soundcloud: {
+    name: 'SoundCloud',
+    authorizeUrl: 'https://secure.soundcloud.com/authorize',
+    tokenUrl: 'https://secure.soundcloud.com/oauth/token',
+    scopes: [],
+    includeSecret: true,
+  },
+  tidal: {
+    name: 'TIDAL',
+    authorizeUrl: 'https://login.tidal.com/authorize',
+    tokenUrl: 'https://auth.tidal.com/v1/oauth2/token',
+    scopes: [],
+    includeSecret: true,
+  },
+  podbean: {
+    name: 'Podbean',
+    authorizeUrl: 'https://api.podbean.com/v1/oauth/authorize',
+    tokenUrl: 'https://api.podbean.com/v1/oauth/token',
+    scopes: [],
+  },
+  trakt: {
+    name: 'Trakt',
+    authorizeUrl: 'https://trakt.tv/oauth/authorize',
+    tokenUrl: 'https://api.trakt.tv/oauth/token',
+    scopes: [],
+    includeSecret: true,
+  },
+  unsplash: {
+    name: 'Unsplash',
+    authorizeUrl: 'https://unsplash.com/oauth/authorize',
+    tokenUrl: 'https://unsplash.com/oauth/token',
+    scopes: [],
+    includeSecret: true,
+  },
+  shutterstock: {
+    name: 'Shutterstock',
+    authorizeUrl: 'https://www.shutterstock.com/oauth/authorize',
+    tokenUrl: 'https://api.shutterstock.com/oauth/access_token',
+    scopes: [],
+  },
+  canva: {
+    name: 'Canva',
+    authorizeUrl: 'https://www.canva.com/api/oauth/authorize',
+    tokenUrl: 'https://api.canva.com/rest/v1/oauth/token',
+    scopes: ['design:content:read'],
+  },
+  framer: {
+    name: 'Framer',
+    authorizeUrl: 'https://www.framer.com/mcp/oauth/authorize',
+    tokenUrl: 'https://api.framer.com/auth/oauth/token',
+    scopes: [],
+  },
+  feedly: {
+    name: 'Feedly',
+    authorizeUrl: 'https://cloud.feedly.com/v3/auth/authorize',
+    tokenUrl: 'https://cloud.feedly.com/v3/auth/token',
+    scopes: [],
+  },
+  inoreader: {
+    name: 'Inoreader',
+    authorizeUrl: 'https://www.inoreader.com/oauth2/authorize',
+    tokenUrl: 'https://www.inoreader.com/oauth2/token',
+    scopes: [],
+  },
+  pocket: {
+    name: 'Pocket',
+    authorizeUrl: 'https://getpocket.com/v3/oauth/authorize',
+    tokenUrl: 'https://getpocket.com/v3/oauth/authorize',
+    scopes: [],
+  },
+  mendeley: {
+    name: 'Mendeley',
+    authorizeUrl: 'https://api.mendeley.com/oauth/authorize',
+    tokenUrl: 'https://api.mendeley.com/oauth/token',
+    scopes: ['all'],
+    includeSecret: true,
+  },
+  overleaf: {
+    name: 'Overleaf',
+    authorizeUrl: 'https://www.overleaf.com/oauth/authorize',
+    tokenUrl: 'https://www.overleaf.com/oauth/token',
+    scopes: [],
+  },
+  grab: {
+    name: 'Grab',
+    authorizeUrl: 'https://api.staging.grab.com/v1/oauth/authorize',
+    tokenUrl: 'https://api.staging.grab.com/v1/oauth/token',
+    scopes: [],
+  },
+  ecobee: {
+    name: 'ecobee',
+    authorizeUrl: 'https://www.ecobee.com/authorize',
+    tokenUrl: 'https://api.ecobee.com/oauth/token',
+    scopes: [],
+  },
+  honeywell: {
+    name: 'Honeywell',
+    authorizeUrl: 'https://nxaixcloud.b2clogin.com/oidc/authorize',
+    tokenUrl: 'https://nxaixcloud.b2clogin.com/oidc/token',
+    scopes: [],
+  },
+  netatmo: {
+    name: 'Netatmo',
+    authorizeUrl: 'https://dev.netatmo.com/authorize',
+    tokenUrl: 'https://dev.netatmo.com/token',
+    scopes: [],
+  },
+  foursquare: {
+    name: 'Foursquare',
+    authorizeUrl: 'https://foursquare.com/oauth2/authenticate',
+    tokenUrl: 'https://foursquare.com/oauth2/access_token',
+    scopes: [],
+  },
+  'sentinel-hub': {
+    name: 'Sentinel Hub',
+    authorizeUrl: 'https://services.sentinel-hub.com/oauth/auth/realms/sentinel-hub/protocol/openid-connect/auth',
+    tokenUrl: 'https://services.sentinel-hub.com/oauth/auth/realms/sentinel-hub/protocol/openid-connect/token',
+    scopes: [],
+  },
+  upwork: {
+    name: 'Upwork',
+    authorizeUrl: 'https://www.upwork.com/services/api/auth',
+    tokenUrl: 'https://www.upwork.com/api/auth/v1/token',
+    scopes: [],
+  },
+  freelancer: {
+    name: 'Freelancer',
+    authorizeUrl: 'https://www.freelancer.com/api/oauth/authorize',
+    tokenUrl: 'https://www.freelancer.com/api/oauth/token',
+    scopes: [],
+  },
+  chargepoint: {
+    name: 'ChargePoint',
+    authorizeUrl: 'https://www.chargepoint.com/oauth2/authorize',
+    tokenUrl: 'https://www.chargepoint.com/oauth2/token',
+    scopes: [],
+  },
+  amadeus: {
+    name: 'Amadeus',
+    authorizeUrl: 'https://developers.amadeus.com/oauth2/authorize',
+    tokenUrl: 'https://developers.amadeus.com/oauth2/token',
+    scopes: [],
+    includeSecret: true,
+  },
+  gusto: {
+    name: 'Gusto',
+    authorizeUrl: 'https://partner.gusto.com/oauth/authorize',
+    tokenUrl: 'https://partner.gusto.com/oauth/token',
+    scopes: [],
+    includeSecret: true,
+  },
+  adp: {
+    name: 'ADP',
+    authorizeUrl: 'https://api.adp.com/oauth2/v2/authorize',
+    tokenUrl: 'https://api.adp.com/oauth2/v2/token',
+    scopes: ['openid'],
+  },
+  sap: {
+    name: 'SAP',
+    authorizeUrl: 'https://account.sap.com/oauth/authorize',
+    tokenUrl: 'https://api.sap.com/oauth/token',
+    scopes: [],
+  },
+  oracle: {
+    name: 'Oracle',
+    authorizeUrl: 'https://login.oracle.com/oauth/v1/authorize',
+    tokenUrl: 'https://login.oracle.com/oauth/v1/token',
+    scopes: ['openid', 'profile', 'email'],
+  },
+  netsuite: {
+    name: 'NetSuite',
+    authorizeUrl: 'https://system.na1.netsuite.com/oauth2/v1/authorize',
+    tokenUrl: 'https://system.na1.netsuite.com/oauth2/v1/token',
+    scopes: [],
+  },
+  podio: {
+    name: 'Podio',
+    authorizeUrl: 'https://podio.com/oauth/authorize',
+    tokenUrl: 'https://podio.com/oauth/token',
+    scopes: [],
+    includeSecret: true,
+  },
+  weibo: {
+    name: 'Weibo',
+    authorizeUrl: 'https://api.weibo.com/oauth2/authorize',
+    tokenUrl: 'https://api.weibo.com/oauth2/access_token',
+    scopes: [],
+  },
+  naver: {
+    name: 'Naver',
+    authorizeUrl: 'https://nid.naver.com/oauth2.0/authorize',
+    tokenUrl: 'https://nid.naver.com/oauth2.0/token',
+    scopes: [],
+  },
+  dribbble: {
+    name: 'Dribbble',
+    authorizeUrl: 'https://dribbble.com/oauth/authorize',
+    tokenUrl: 'https://dribbble.com/oauth/token',
+    scopes: [],
+    includeSecret: true,
+  },
+  'noun-project': {
+    name: 'Noun Project',
+    authorizeUrl: 'https://api.nounproject.com/oauth/authorize',
+    tokenUrl: 'https://api.nounproject.com/oauth/token',
+    scopes: [],
+  },
+  '500px': {
+    name: '500px',
+    authorizeUrl: 'https://api.500px.com/v1/oauth/authorize',
+    tokenUrl: 'https://api.500px.com/v1/oauth/token',
+    scopes: [],
+  },
+  betfair: {
+    name: 'Betfair',
+    authorizeUrl: 'https://identity.betfair.com/oauth2/auth',
+    tokenUrl: 'https://identity.betfair.com/oauth2/token',
+    scopes: [],
+    includeSecret: true,
+  },
+  affirm: {
+    name: 'Affirm',
+    authorizeUrl: 'https://identity.affirm.com/api/oauth/authorize',
+    tokenUrl: 'https://identity.affirm.com/api/oauth/token',
+    scopes: [],
+  },
+  afterpay: {
+    name: 'Afterpay',
+    authorizeUrl: 'https://api.afterpay.com/oauth2/authorize',
+    tokenUrl: 'https://api.afterpay.com/oauth2/token',
+    scopes: [],
+  },
+  sezzle: {
+    name: 'Sezzle',
+    authorizeUrl: 'https://auth.sezzle.com/oauth/authorize',
+    tokenUrl: 'https://auth.sezzle.com/oauth/token',
+    scopes: [],
+    includeSecret: true,
+  },
+  mercadolibre: {
+    name: 'Mercado Libre',
+    authorizeUrl: 'https://auth.mercadolibre.com.ar/authorization',
+    tokenUrl: 'https://api.mercadolibre.com/oauth/token',
+    scopes: ['offline_access'],
+  },
+  workday: {
+    name: 'Workday',
+    authorizeUrl: 'https://wd2-impl-services1.workday.com/ccx/oauth2/authorize',
+    tokenUrl: 'https://wd2-impl-services1.workday.com/ccx/oauth2/token',
+    scopes: [],
+  },
+  mercedes: {
+    name: 'Mercedes-Benz',
+    authorizeUrl: 'https://api.mercedes-benz.com/oauth2/authorize',
+    tokenUrl: 'https://api.mercedes-benz.com/oauth2/token',
+    scopes: [],
+  },
+  ford: {
+    name: 'Ford',
+    authorizeUrl: 'https://developer.ford.com/accounts/login/oauth2/v2/authorize',
+    tokenUrl: 'https://developer.ford.com/accounts/login/oauth2/v2/token',
+    scopes: [],
+    includeSecret: true,
+  },
+  shopify: {
+    name: 'Shopify',
+    authorizeUrl: 'https://{shop}.myshopify.com/admin/oauth/authorize',
+    tokenUrl: 'https://{shop}.myshopify.com/admin/oauth/access_token',
+    scopes: ['read_products'],
+  },
+  sipgate: {
+    name: 'sipgate',
+    authorizeUrl: 'https://sipgate.com/oauth/authorize',
+    tokenUrl: 'https://sipgate.com/oauth/token',
+    scopes: [],
+  },
+  ringcentral: {
+    name: 'RingCentral',
+    authorizeUrl: 'https://platform.ringcentral.com/oauth/authorize',
+    tokenUrl: 'https://platform.ringcentral.com/oauth/token',
+    scopes: ['ReadAccounts'],
+  },
 };
 
 /**
@@ -179,18 +650,148 @@ const CONNECTOR_OAUTH: Record<string, { provider: string; scopes: string[] }> = 
   'azure-ad': { provider: 'microsoft', scopes: ['offline_access', 'User.Read', 'Directory.Read.All'] },
   // Named providers whose slug differs from the credentialKey
   'notion-calendar': { provider: 'notion', scopes: [] },
+  // Consumer/social + commerce providers
+  messenger: { provider: 'facebook', scopes: [] },
+  'facebook-messenger': { provider: 'facebook', scopes: [] },
+  'instagram-messaging': { provider: 'facebook', scopes: [] },
+  instagram: { provider: 'facebook', scopes: [] },
+  facebook: { provider: 'facebook', scopes: [] },
+  tiktok: { provider: 'tiktok', scopes: [] },
+  pinterest: { provider: 'pinterest', scopes: [] },
+  tumblr: { provider: 'tumblr', scopes: [] },
+  threads: { provider: 'facebook', scopes: [] },
+  snapchat: { provider: 'snapchat', scopes: [] },
+  linkedin: { provider: 'linkedin', scopes: [] },
+  behance: { provider: 'adobe', scopes: [] },
+  'adobe-creative-cloud': { provider: 'adobe', scopes: [] },
+  // Health / fitness
+  fitbit: { provider: 'fitbit', scopes: [] },
+  withings: { provider: 'withings', scopes: [] },
+  garmin: { provider: 'garmin', scopes: [] },
+  // Finance / accounting
+  paypal: { provider: 'paypal', scopes: [] },
+  xero: { provider: 'xero', scopes: [] },
+  quickbooks: { provider: 'quickbooks', scopes: [] },
+  freshbooks: { provider: 'freshbooks', scopes: [] },
+  wave: { provider: 'wave', scopes: [] },
+  revolut: { provider: 'revolut', scopes: [] },
+  monzo: { provider: 'monzo', scopes: [] },
+  truelayer: { provider: 'truelayer', scopes: [] },
+  // Commerce / marketplace
+  'amazon-sp-api': { provider: 'amazon', scopes: [] },
+  ebay: { provider: 'ebay', scopes: [] },
+  alibaba: { provider: 'alibaba', scopes: [] },
+  wix: { provider: 'wix', scopes: [] },
+  woocommerce: { provider: 'woocommerce', scopes: [] },
+  // Productivity / dev
+  shopify: { provider: 'shopify', scopes: [] },
+  hubspot: { provider: 'hubspot', scopes: [] },
+  asana: { provider: 'asana', scopes: [] },
+  jira: { provider: 'atlassian', scopes: [] },
+  confluence: { provider: 'atlassian', scopes: [] },
+  'zoom-phone': { provider: 'zoom', scopes: [] },
+  salesforce: { provider: 'salesforce', scopes: [] },
+  workday: { provider: 'workday', scopes: [] },
+  gusto: { provider: 'gusto', scopes: [] },
+  // Media / content
+  soundcloud: { provider: 'soundcloud', scopes: [] },
+  tidal: { provider: 'tidal', scopes: [] },
+  podbean: { provider: 'podbean', scopes: [] },
+  trakt: { provider: 'trakt', scopes: [] },
+  unsplash: { provider: 'unsplash', scopes: [] },
+  shutterstock: { provider: 'shutterstock', scopes: [] },
+  canva: { provider: 'canva', scopes: [] },
+  framer: { provider: 'framer', scopes: [] },
+  // Reading / education / misc
+  feedly: { provider: 'feedly', scopes: [] },
+  inoreader: { provider: 'inoreader', scopes: [] },
+  pocket: { provider: 'pocket', scopes: [] },
+  mendeley: { provider: 'mendeley', scopes: [] },
+  overleaf: { provider: 'overleaf', scopes: [] },
+  grab: { provider: 'grab', scopes: [] },
+  // Banking / insurance
+  mercedes: { provider: 'mercedes', scopes: [] },
+  ford: { provider: 'ford', scopes: [] },
+  chargepoint: { provider: 'chargepoint', scopes: [] },
+  amadeus: { provider: 'amadeus', scopes: [] },
+  // Other
+  ecobee: { provider: 'ecobee', scopes: [] },
+  honeywell: { provider: 'honeywell', scopes: [] },
+  netatmo: { provider: 'netatmo', scopes: [] },
+  foursquare: { provider: 'foursquare', scopes: [] },
+  'sentinel-hub': { provider: 'sentinel-hub', scopes: [] },
+  upwork: { provider: 'upwork', scopes: [] },
+  freelancer: { provider: 'freelancer', scopes: [] },
+  'linkedin-learning': { provider: 'linkedin', scopes: [] },
+  betfair: { provider: 'betfair', scopes: [] },
+  afterpay: { provider: 'afterpay', scopes: [] },
+  affirm: { provider: 'affirm', scopes: [] },
+  sezzle: { provider: 'sezzle', scopes: [] },
+  mercadolibre: { provider: 'mercadolibre', scopes: [] },
+  adp: { provider: 'adp', scopes: [] },
+  sap: { provider: 'sap', scopes: [] },
+  oracle: { provider: 'oracle', scopes: [] },
+  netsuite: { provider: 'netsuite', scopes: [] },
+  podio: { provider: 'podio', scopes: [] },
+  weibo: { provider: 'weibo', scopes: [] },
+  naver: { provider: 'naver', scopes: [] },
+  '500px': { provider: '500px', scopes: [] },
+  dribbble: { provider: 'dribbble', scopes: [] },
+  'noun-project': { provider: 'noun-project', scopes: [] },
+  'google-cloud': { provider: 'google', scopes: ['https://www.googleapis.com/auth/cloud-platform'] },
+  'google-analytics': { provider: 'google', scopes: ['https://www.googleapis.com/auth/analytics.readonly'] },
 };
 
-/** Guess a provider slug from a connector credentialKey. */
+/**
+ * Catalog ids are `<category>-<name>` (e.g. `productivity-gmail`), while the
+ * provider table is keyed by the credentialKey (`gmail`) or the provider slug.
+ * Strip a leading category segment so catalog ids resolve too — this is what
+ * lets `resolve()` be called with either form.
+ */
+function stripCategoryPrefix(key: string): string {
+  const parts = key.split('-');
+  if (parts.length < 2) return key;
+  // Try the tail first (longest match wins): `productivity-google-drive` → `google-drive`.
+  for (let i = 1; i < parts.length; i++) {
+    const candidate = parts.slice(i).join('-');
+    if (CONNECTOR_OAUTH[candidate] || OAUTH_PROVIDERS[candidate]) return candidate;
+  }
+  return key;
+}
+
+/** Guess a provider slug from a connector credentialKey or catalog id. */
 function providerSlugFor(key: string): string | undefined {
   if (CONNECTOR_OAUTH[key]) return CONNECTOR_OAUTH[key].provider;
   if (OAUTH_PROVIDERS[key]) return key;
+
+  const tail = stripCategoryPrefix(key);
+  if (CONNECTOR_OAUTH[tail]) return CONNECTOR_OAUTH[tail].provider;
+  if (OAUTH_PROVIDERS[tail]) return tail;
+
+  // Fall back to a provider named after the first segment (e.g. `paypal-*`).
+  const head = key.split('-')[0];
+  if (OAUTH_PROVIDERS[head]) return head;
+
   return undefined;
 }
 
 export interface ResolvedOAuth {
   client: OAuthClient;
   provider: OAuthProviderDef;
+}
+
+/**
+ * Is a connector's OAuth provider known to the registry (so only a clientId is
+ * needed, not hand-written endpoints)? Used to report honest readiness without
+ * constructing a client.
+ */
+export function hasKnownOAuthProvider(key: string): boolean {
+  return providerSlugFor(key) !== undefined;
+}
+
+/** The provider slug for a connector key, if the registry knows it. */
+export function oauthProviderSlugFor(key: string): string | undefined {
+  return providerSlugFor(key);
 }
 
 export class OAuthConnector {
@@ -209,6 +810,7 @@ export class OAuthConnector {
   resolve(key: string, client: OAuthClient): ResolvedOAuth {
     const slug = providerSlugFor(key);
     const base = slug ? OAUTH_PROVIDERS[slug] : undefined;
+    const tail = stripCategoryPrefix(key);
 
     if (!base && (!client.authorizeUrl || !client.tokenUrl)) {
       throw new Error(
@@ -216,11 +818,15 @@ export class OAuthConnector {
       );
     }
 
+    // Scopes: an explicit client config wins, then the per-connector map
+    // (looked up by both the raw key and its category-stripped tail), then
+    // the provider default.
+    const mapped = CONNECTOR_OAUTH[key] ?? CONNECTOR_OAUTH[tail];
     const provider: OAuthProviderDef = {
       name: base?.name ?? key,
       authorizeUrl: client.authorizeUrl || base!.authorizeUrl,
       tokenUrl: client.tokenUrl || base!.tokenUrl,
-      scopes: client.scopes ?? (CONNECTOR_OAUTH[key]?.scopes ?? base?.scopes ?? []),
+      scopes: client.scopes ?? (mapped?.scopes ?? base?.scopes ?? []),
       extraAuthParams: base?.extraAuthParams,
       includeSecret: base?.includeSecret,
     };

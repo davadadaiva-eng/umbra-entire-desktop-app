@@ -5,13 +5,14 @@
  * ToolExecutor, and OAuthConnector for the full connect/discover/execute flow.
  */
 
-import { ConnectorStore, UserConnection } from './ConnectorStore';
+import { ConnectorStore, UserConnection, DeveloperCredential } from './ConnectorStore';
 import { ToolDefinition } from './ToolDefinition';
 import { HttpBridge } from '../agent/HttpBridge';
 import { ToolRetriever, ConnectorTool } from './ToolRetriever';
 import { ToolExecutor, ToolResult, ToolExecutorOptions } from './ToolExecutor';
 import { AgentConnectorBridge, ConnectorAction, AgentConnectorResult } from '../agent/AgentConnectorBridge';
-import { OAuthConnector, OAuthClient } from './OAuthConnector';
+import { OAuthConnector, OAuthClient, OAUTH_PROVIDERS, oauthProviderSlugFor } from './OAuthConnector';
+import { curatedConnectorForCatalogId } from './curatedTools';
 import { MCP_CATALOG, findCatalogEntry, catalogByCategory, catalogCount, McpCatalogEntry } from './McpCatalog';
 import { getLogger } from '../Logger';
 
@@ -76,14 +77,39 @@ export class ConnectorApi {
     },
   ) {
     this.store = store;
+    this.oauth = oauth || new OAuthConnector();
     this.retriever = new ToolRetriever();
-    this.executor = new ToolExecutor(store, executorOptions);
+    this.executor = new ToolExecutor(store, {
+      ...executorOptions,
+      // Let refresh resolve the real provider token endpoint + client instead
+      // of the executor's short fallback list.
+      oauthClient: (credentialKey: string) => {
+        const devCreds = store.getDeveloperCredentials(credentialKey);
+        try {
+          const resolved = this.oauth.resolve(credentialKey, {
+            clientId: devCreds?.clientId || 'unknown',
+            clientSecret: devCreds?.clientSecret || undefined,
+          });
+          return {
+            clientId: devCreds?.clientId || 'unknown',
+            clientSecret: devCreds?.clientSecret || undefined,
+            tokenUrl: resolved.provider.tokenUrl,
+          };
+        } catch {
+          return devCreds?.clientId
+            ? {
+                clientId: devCreds.clientId,
+                clientSecret: devCreds.clientSecret || undefined,
+                tokenUrl: '',
+              }
+            : undefined;
+        }
+      },
+    });
     this.bridge = new AgentConnectorBridge(store, {
       executeToolDefinition: (def, args, userId) => this.executor.executeTool(def, args, userId),
     });
-    this.oauth = oauth || new OAuthConnector();
-    this.toolSchemas = toolSchemas;
-  }
+    this.toolSchemas = toolSchemas;  }
 
   /** Get the AgentConnectorBridge for wiring into the agent runtime. */
   getAgentConnectorBridge(): AgentConnectorBridge {
@@ -224,11 +250,27 @@ export class ConnectorApi {
       specSource = 'url';
     }
 
-    // Defaults from the catalog entry when this connector is a known one.
+    // Defaults from the catalog entry when this connector is a known one;
+    // otherwise fall back to the spec's own `servers[0].url` (OpenAPI 3.x) or
+    // `host` base (Swagger 2.0 declared via baseUrl by the caller).
     const entry = findCatalogEntry(connectorId);
     const authMap: Record<string, ToolDefinition['auth_type']> = { none: 'none', apiKey: 'apiKey', bearer: 'bearer', oauth: 'oauth' };
     const authType = authMap[String(opts.authType ?? entry?.authType ?? 'none')] ?? undefined;
-    const baseUrl = opts.baseUrl ?? entry?.baseUrl ?? undefined;
+    const specServers = (spec && typeof spec === 'object'
+      ? (spec as { servers?: Array<string | { url?: string }> }).servers
+      : undefined) ?? [];
+    const firstServer = specServers[0];
+    const specBaseUrl = typeof firstServer === 'string'
+      ? firstServer
+      : (firstServer && typeof firstServer.url === 'string' ? firstServer.url : undefined);
+    // Only absolute URLs are routable — the executor concatenates
+    // `${base_url}${endpoint_template}`, so a spec's relative `servers[0].url`
+    // (e.g. "/api/v1") would produce an unusable request target.
+    const isAbsolute = (u: string) => /^https?:\/\/[^\s]+$/i.test(u);
+    const specBase = specBaseUrl && specBaseUrl.trim() && isAbsolute(specBaseUrl.trim())
+      ? specBaseUrl.trim() : undefined;
+    const declared = opts.baseUrl ?? entry?.baseUrl;
+    const baseUrl = declared && declared.trim() ? declared.trim() : specBase;
     const apiKeyHeader = opts.apiKeyHeader ?? entry?.apiKeyHeader ?? undefined;
 
     // Replace semantics: drop the connector's previous definitions first.
@@ -259,6 +301,145 @@ export class ConnectorApi {
       baseUrl,
       authType,
       catalogMatch: !!entry,
+    };
+  }
+
+  /**
+   * Per-connector readiness — what a user must actually do to connect this
+   * connector. The catalog advertises ~3,900 entries but most need a secret or
+   * a provider OAuth app before they can be called, so the UI reports the real
+   * state instead of implying everything is one click away.
+   *
+   *   ready          — no auth needed (local databases, Wikipedia, git)
+   *   connected      — already authorized for this user
+   *   needs_key      — paste an API key / bearer token (we know the endpoint)
+   *   needs_oauth_app— provider is known; user supplies clientId (+secret)
+   *   needs_setup    — no endpoint/tool schema known yet
+   */
+  getReadiness(connectorId: string, userId = 'default'): {
+    connectorId: string;
+    state: 'ready' | 'connected' | 'needs_key' | 'needs_oauth_app' | 'needs_setup';
+    authType: string;
+    hasBaseUrl: boolean;
+    hasTools: boolean;
+    provider?: string;
+    action: string;
+  } {
+    const entry = findCatalogEntry(connectorId);
+    const key = entry?.credentialKey || connectorId;
+    const hasBaseUrl = Boolean(
+      (entry?.baseUrl && entry.baseUrl.trim()) || curatedConnectorForCatalogId(connectorId),
+    );
+    const toolCount = this.toolSchemas ? this.toolSchemas.getForConnector(connectorId).length : 0;
+    const hasTools = toolCount > 0 || Boolean(curatedConnectorForCatalogId(connectorId));
+
+    const connection = this.store.getConnection(userId, connectorId);
+    if (connection?.connectionStatus === 'connected') {
+      return {
+        connectorId, state: 'connected', authType: entry?.authType ?? 'none',
+        hasBaseUrl, hasTools, action: 'Connected',
+      };
+    }
+
+    if (entry?.authType === 'none') {
+      return { connectorId, state: 'ready', authType: 'none', hasBaseUrl, hasTools, action: 'Connect' };
+    }
+
+    if (entry?.authType === 'oauth') {
+      const slug = oauthProviderSlugFor(key);
+      if (slug) {
+        const configured = this.store.getDeveloperCredentials(key) !== null;
+        return {
+          connectorId, state: 'needs_oauth_app', authType: 'oauth', hasBaseUrl, hasTools,
+          provider: OAUTH_PROVIDERS[slug]?.name ?? slug,
+          action: configured ? 'Authorize' : 'Add OAuth app credentials, then authorize',
+        };
+      }
+      return {
+        connectorId, state: 'needs_setup', authType: 'oauth', hasBaseUrl, hasTools,
+        action: 'No OAuth endpoints known for this provider',
+      };
+    }
+
+    if (hasBaseUrl) {
+      return {
+        connectorId, state: 'needs_key', authType: entry?.authType ?? 'apiKey',
+        hasBaseUrl, hasTools, action: 'Paste API key',
+      };
+    }
+
+    return {
+      connectorId, state: 'needs_setup', authType: entry?.authType ?? 'apiKey',
+      hasBaseUrl, hasTools, action: 'No endpoint known — ingest a spec first',
+    };
+  }
+
+  /** Readiness for every catalog entry, with aggregate counts. */
+  getReadinessSummary(userId = 'default'): {
+    counts: Record<string, number>;
+    connectors: ReturnType<ConnectorApi['getReadiness']>[];
+  } {
+    const connectors = MCP_CATALOG.map(c => this.getReadiness(c.id, userId));
+    const counts: Record<string, number> = {};
+    for (const c of connectors) counts[c.state] = (counts[c.state] ?? 0) + 1;
+    return { counts, connectors };
+  }
+
+  /**
+   * Ensure a connector has callable tool schemas, ingesting its OpenAPI spec
+   * on demand when it has none.
+   *
+   * This is what turns a name-only catalog row into a usable connector: the
+   * spec is fetched once, converted to ToolDefinitions, indexed for vector
+   * retrieval, and the derived `baseUrl` is persisted back onto the catalog
+   * entry so the executor can route calls.
+   *
+   * Safe to call repeatedly — already-ingested connectors short-circuit.
+   */
+  async ensureConnectorTools(connectorId: string, opts: { force?: boolean } = {}): Promise<{
+    connectorId: string;
+    ingested: number;
+    alreadyIndexed: boolean;
+    baseUrl?: string;
+    source: 'curated' | 'spec' | 'none';
+  }> {
+    const existing = this.toolSchemas?.getForConnector(connectorId) ?? [];
+    if (existing.length > 0 && !opts.force) {
+      return { connectorId, ingested: existing.length, alreadyIndexed: true, source: 'curated' };
+    }
+
+    // Curated tools are in-process, not in the definition store — check them too.
+    const curated = curatedConnectorForCatalogId(connectorId);
+    if (curated && !opts.force) {
+      return { connectorId, ingested: 0, alreadyIndexed: true, baseUrl: curated.baseUrl, source: 'curated' };
+    }
+
+    const entry = findCatalogEntry(connectorId);
+    if (!entry) throw new Error(`Connector "${connectorId}" not found`);
+    if (!this.toolSchemas) throw new Error('Tool ingestion store not configured on this node');
+
+    const specUrl = entry.specUrl;
+    if (!specUrl) {
+      throw new Error(
+        `No tool schema or OpenAPI spec is known for "${entry.name}". ` +
+        `Add one at /api/connectors/ingest-openapi with a specUrl.`,
+      );
+    }
+
+    const result = await this.ingestOpenApiSpec({
+      connectorId,
+      specUrl,
+      baseUrl: entry.baseUrl || undefined,
+      authType: entry.authType,
+      apiKeyHeader: entry.apiKeyHeader,
+    });
+
+    return {
+      connectorId,
+      ingested: result.ingested,
+      alreadyIndexed: false,
+      baseUrl: result.baseUrl,
+      source: 'spec',
     };
   }
 
@@ -368,8 +549,11 @@ export class ConnectorApi {
         scopes: devCreds.scopes,
       };
 
-      const redirectUri = opts.redirectUri || `http://localhost:8787/api/connectors/${id}/callback`;
-      const { authorizeUrl, state } = this.oauth.begin(id, client, redirectUri);
+      const redirectUri = opts.redirectUri || `http://localhost:8787/api/mcp/oauth/callback`;
+      // Resolve against the CREDENTIAL KEY — the provider table is keyed
+      // `gmail`, not `productivity-gmail`.
+      const key = connector.credentialKey || id;
+      const { authorizeUrl, state } = this.oauth.begin(key, client, redirectUri);
 
       return {
         action: 'oauth_redirect',
@@ -394,23 +578,31 @@ export class ConnectorApi {
     code: string,
     state: string,
     userId?: string,
-  ): Promise<{ success: boolean; message: string }> {
+  ): Promise<{ success: boolean; message: string; connectorId?: string; expiresAt?: number }> {
     const uid = userId || 'default';
 
     try {
       const { key, tokens } = await this.oauth.complete(code, state);
 
+      // `key` is the credentialKey; map it back to the catalog id so the
+      // executor finds the connection under the same id the UI reads.
+      const entry = findCatalogEntry(connectorId);
+      const resolvedId = entry?.credentialKey === key ? connectorId
+        : MCP_CATALOG.find(c => (c.credentialKey || c.id) === key)?.id ?? connectorId;
+
       this.store.saveConnection({
         userId: uid,
-        connectorId: key,
+        connectorId: resolvedId,
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken,
         expiresIn: Math.floor((tokens.expiresAt - Date.now()) / 1000),
       });
 
-      getLogger().info({ connectorId: key, userId: uid }, 'OAuth connection completed');
+      getLogger().info({ connectorId: resolvedId, credentialKey: key, userId: uid }, 'OAuth connection completed');
       return {
         success: true,
+        connectorId: resolvedId,
+        expiresAt: tokens.expiresAt,
         message: `Connected successfully. Token expires at ${new Date(tokens.expiresAt).toISOString()}`,
       };
     } catch (err) {
@@ -546,5 +738,32 @@ export class ConnectorApi {
   async saveDeveloperCredential(slug: string, clientId: string, clientSecret: string, scopes: string[] = []): Promise<{ saved: boolean }> {
     this.store.saveDeveloperCredentials(slug, clientId, clientSecret, scopes);
     return { saved: true };
+  }
+
+  /** Look up stored developer credentials for a connector slug (credentialKey). */
+  getDeveloperCredentials(slug: string): DeveloperCredential | null {
+    return this.store.getDeveloperCredentials(slug);
+  }
+
+  /** Persist an OAuth token set for a user (called by the OAuth flow). */
+  saveOAuthTokens(opts: {
+    userId: string;
+    connectorId: string;
+    accessToken: string;
+    refreshToken?: string;
+    apiKey?: string;
+    expiresIn: number;
+  }): UserConnection {
+    return this.store.saveConnection(opts);
+  }
+
+  /** Read decrypted OAuth tokens for a user (what ToolExecutor uses per request). */
+  getOAuthTokens(userId: string, connectorId: string): { accessToken?: string; refreshToken?: string; apiKey?: string } | undefined {
+    return this.store.getDecryptedTokens(userId, connectorId);
+  }
+
+  /** Raw connection row — carries tokenExpiresAt for expiry checks. */
+  getConnectionRow(userId: string, connectorId: string): UserConnection | null {
+    return this.store.getConnection(userId, connectorId);
   }
 }
