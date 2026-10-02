@@ -20,14 +20,14 @@ export interface AIProvider {
 
 export const AI_PROVIDERS: AIProvider[] = [
   // Umbra lineup — one OpenRouter key funds every slot (see backend pricing.ts).
-  { id: 'openrouter', label: 'OpenRouter', needsKey: true, models: ['google/gemini-2.5-flash', 'google/gemini-2.5-pro', 'moonshotai/kimi-k3', 'moonshotai/kimi-k2-thinking', 'z-ai/glm-5-long', 'muse/muse-spark-1.3', 'anthropic/claude-sonnet-5', 'qwen/qwen3-max'], baseUrl: 'https://openrouter.ai/api/v1/chat/completions' },
+  { id: 'openrouter', label: 'OpenRouter', needsKey: true, models: ['google/gemini-2.5-flash', 'google/gemini-2.5-pro', 'moonshotai/kimi-k3', 'moonshotai/kimi-k2-thinking', 'z-ai/glm-5', 'meta/muse-spark-1.3', 'anthropic/claude-sonnet-5', 'qwen/qwen3-max'], baseUrl: 'https://openrouter.ai/api/v1/chat/completions' },
   { id: 'free', label: 'Umbra Free', needsKey: false, models: ['openai', 'mistral', 'qwen-coder'], baseUrl: 'https://text.pollinations.ai/openai' },
   { id: 'openai', label: 'OpenAI', needsKey: true, models: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'], baseUrl: 'https://api.openai.com/v1/chat/completions' },
   { id: 'anthropic', label: 'Anthropic (Claude)', needsKey: true, models: ['claude-sonnet-4-5', 'claude-haiku-4-5', 'claude-opus-4-1'] },
   { id: 'gemini', label: 'Google Gemini', needsKey: true, models: ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-2.5-pro'] },
   { id: 'groq', label: 'Groq (fast)', needsKey: true, models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'], baseUrl: 'https://api.groq.com/openai/v1/chat/completions' },
   { id: 'mistral', label: 'Mistral', needsKey: true, models: ['mistral-small-latest', 'mistral-medium-latest', 'open-mistral-nemo'], baseUrl: 'https://api.mistral.ai/v1/chat/completions' },
-  { id: 'ollama', label: 'Ollama (local)', needsKey: false, models: ['llama3.2', 'qwen2.5', 'mistral', 'phi4'], customModel: true },
+  { id: 'ollama', label: 'Ollama (local)', needsKey: false, models: ['SparkLLM/Spark-X2.5-4B', 'llama3.2', 'qwen2.5', 'mistral', 'phi4'], customModel: true },
 ];
 
 export function providerById(id: string): AIProvider {
@@ -104,7 +104,7 @@ function isTransientError(e: unknown): boolean {
   if (e instanceof QuotaExceededError) return true;
   if (e instanceof TypeError) return true;
   if (e instanceof DOMException && e.name === 'AbortError') return true;
-  if (e instanceof Error && /HTTP 401/.test(e.message)) return true;
+  // 401 = bad/missing key: surface immediately, do NOT silently fall back.
   if (e instanceof Error && /Empty response/.test(e.message)) return true;
   return false;
 }

@@ -1,0 +1,86 @@
+<!doctype html>
+<!--
+  Umbra OS — verification code email template (Supabase-ready)
+  ─────────────────────────────────────────────────────────────
+  HOW TO USE (Supabase dashboard):
+  1. Authentication → Email Templates → "Magic link or OTP"
+     (and repeat for "Confirm signup").
+  2. Subject:  {{ .Token }} is your Umbra OS verification code
+  3. Delete the template body, paste this whole file.
+  4. Keep the {{ .Token }} placeholder exactly as-is — Supabase
+     replaces it with the 6-digit code at send time.
+
+  Kept email-client safe on purpose: table layout, inline styles only,
+  no webfonts, no JavaScript, max-width 560px, dark Umbra branding.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Your Umbra OS verification code</title>
+</head>
+<body style="margin:0;padding:0;background-color:#050608;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#050608;padding:32px 16px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;background-color:#0d1117;border:1px solid #1f2937;border-radius:16px;overflow:hidden;">
+
+          <!-- Header / logo -->
+          <tr>
+            <td align="center" style="padding:36px 32px 8px 32px;">
+              <div style="width:52px;height:52px;border-radius:50%;background:linear-gradient(135deg,#3B82F6,#1D4ED8);color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:24px;font-weight:bold;line-height:52px;text-align:center;">U</div>
+              <div style="margin-top:14px;font-family:Arial,Helvetica,sans-serif;font-size:13px;letter-spacing:4px;color:#6b7280;">UMBRA&nbsp;OS</div>
+            </td>
+          </tr>
+
+          <!-- Title -->
+          <tr>
+            <td align="center" style="padding:12px 32px 0 32px;">
+              <h1 style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:24px;font-weight:700;color:#ffffff;">Verify it&rsquo;s really you</h1>
+              <p style="margin:10px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#9ca3af;">
+                Enter this 6-digit code in the Umbra desktop app to finish signing in.
+                It expires in a few minutes.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Code -->
+          <tr>
+            <td align="center" style="padding:28px 32px 8px 32px;">
+              <div style="display:inline-block;background-color:#111827;border:1px solid #2563EB;border-radius:12px;padding:18px 36px;font-family:'Courier New',Courier,monospace;font-size:36px;font-weight:bold;letter-spacing:10px;color:#ffffff;">{{ .Token }}</div>
+            </td>
+          </tr>
+
+          <!-- Hint -->
+          <tr>
+            <td align="center" style="padding:8px 32px 0 32px;">
+              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#6b7280;">
+                Copy the code — don&rsquo;t share it with anyone. Umbra staff will never ask for it.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Divider -->
+          <tr>
+            <td style="padding:28px 32px 0 32px;">
+              <div style="height:1px;background-color:#1f2937;line-height:1px;">&nbsp;</div>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td align="center" style="padding:20px 32px 32px 32px;">
+              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.6;color:#4b5563;">
+                If you didn&rsquo;t request this code, ignore this email — your account is safe.
+                <br />
+                This is an automated message from Umbra OS, your invisible AI computer assistant.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

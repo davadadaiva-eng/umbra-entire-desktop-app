@@ -13,6 +13,7 @@ import {
   Loader2, XCircle, RotateCcw,
 } from 'lucide-react';
 import GlitterWrap from './GlitterWrap';
+import WireTerrain from './WireTerrain';
 
 const viewMap: { id: View; label: string; keys: string[] }[] = [
   { id: 'agent', label: 'the agent page', keys: ['agent'] },
@@ -1463,7 +1464,11 @@ export function AgentView() {
       onPointerUp={onWorkspacePointerUp}
       onPointerCancel={onWorkspacePointerUp}
     >
-      <div className="absolute inset-0 z-0 pointer-events-none">
+      <div className="absolute inset-0 z-0 pointer-events-none" aria-hidden="true">
+        <WireTerrain background="#000000" lineColor="#4F42E3" accent="#131110" sunSize={0} />
+      </div>
+
+      <div className="absolute inset-0 z-[1] pointer-events-none" aria-hidden="true" style={{ opacity: 0.5 }}>
         <GlitterWrap
           particleCount={280}
           color1="#ffffff"
@@ -1493,7 +1498,7 @@ export function AgentView() {
       >
         <div ref={sphereRef} className="absolute inset-0" style={{ transformOrigin: 'center' }}>
           <div ref={pulseRef} className="absolute inset-0" style={{ transformOrigin: 'center' }}>
-            <div className="absolute" style={{ left: 'calc(50% - 10vmin)', top: '50%' }}>
+            <div className="absolute" style={{ left: 'calc(50% - 10vmin)', top: '42%' }}>
               {crew.map((agent, i) => {
                 const o = i - focusIdx;
                 const isMain = !agent;
@@ -1633,7 +1638,7 @@ export function AgentView() {
             className="absolute flex items-center justify-center z-40"
             style={{
               left: 'calc(50% - 50vmin - 56px)',
-              top: 'calc(50% - 2vmin)',
+              top: 'calc(42% - 2vmin)',
               transform: 'translateY(-50%)',
               width: 40,
               height: 40,
@@ -1657,7 +1662,7 @@ export function AgentView() {
             className="absolute flex items-center justify-center z-40"
             style={{
               right: 'calc(50% - 50vmin - 56px)',
-              top: 'calc(50% - 2vmin)',
+              top: 'calc(42% - 2vmin)',
               transform: 'translateY(-50%)',
               width: 40,
               height: 40,

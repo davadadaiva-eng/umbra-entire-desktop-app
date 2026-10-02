@@ -201,4 +201,5 @@ export function removeAllListeners() {
   listeners.clear();
   anyEventListeners.clear();
   snapshotHandler = null;
+  disconnectHandlers.clear();
 }

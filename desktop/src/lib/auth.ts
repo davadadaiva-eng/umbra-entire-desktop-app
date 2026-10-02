@@ -109,6 +109,58 @@ export async function resetPassword(email: string): Promise<AuthResult> {
   return { ok: true };
 }
 
+// ── Google sign-in (Supabase OAuth, desktop PKCE loopback) ──────────────
+// In Electron the system browser finishes the Google consent screen and
+// Supabase redirects to a one-shot localhost callback owned by the main
+// process (see electron/main.cjs `umbra:oauth-callback-start`). The auth
+// code is handed back to this renderer, which exchanges it for a session.
+// supabase-js stores the PKCE verifier in localStorage when the URL is
+// created, so creation + exchange must happen in this same renderer.
+export const OAUTH_CALLBACK_URL = 'http://127.0.0.1:12121/auth/callback';
+
+export function hasDesktopOAuthBridge(): boolean {
+  try {
+    const w = window as unknown as { umbraDesktop?: { openExternal?: unknown } };
+    return typeof w.umbraDesktop?.openExternal === 'function';
+  } catch {
+    return false;
+  }
+}
+
+export interface OAuthUrlResult {
+  ok: boolean;
+  url?: string;
+  error?: string;
+}
+
+export async function googleOAuthUrl(): Promise<OAuthUrlResult> {
+  if (!supabase) return noClient();
+  if (hasDesktopOAuthBridge()) {
+    const { data, error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { skipBrowserRedirect: true, redirectTo: OAUTH_CALLBACK_URL },
+    });
+    if (error) return { ok: false, error: fmtError(error, error.message) };
+    if (!data?.url) return { ok: false, error: 'Could not start Google sign-in.' };
+    return { ok: true, url: data.url };
+  }
+  // Plain browser (npm run dev): classic redirect flow; supabase-js picks up
+  // the session from the URL on load via detectSessionInUrl.
+  const { error } = await supabase.auth.signInWithOAuth({
+    provider: 'google',
+    options: { redirectTo: window.location.origin },
+  });
+  if (error) return { ok: false, error: fmtError(error, error.message) };
+  return { ok: true };
+}
+
+export async function exchangeOAuthCode(code: string): Promise<AuthResult> {
+  if (!supabase) return noClient();
+  const { error } = await supabase.auth.exchangeCodeForSession(code);
+  if (error) return { ok: false, error: fmtError(error, error.message) };
+  return { ok: true };
+}
+
 export interface AuthSession {
   email: string;
   name: string;

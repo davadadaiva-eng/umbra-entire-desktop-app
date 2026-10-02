@@ -180,8 +180,9 @@ async function nodeFetchResponseJson(res) {
     }
   } catch { /* ignore */ }
   let body = null;
+  let text = '';
   try {
-    const text = await res.text();
+    text = await res.text();
     body = text ? JSON.parse(text) : null;
   } catch {
     body = text;
@@ -334,6 +335,70 @@ function registerIpc() {
     } catch {
       return false;
     }
+  });
+
+  // One-shot localhost OAuth callback for Supabase Google sign-in.
+  // The renderer creates the OAuth URL with redirectTo pointing here; the
+  // system browser lands on /auth/callback?code=... after consent. We forward
+  // the code to the renderer (which owns the PKCE verifier) and show a
+  // "return to the app" page. Server closes itself after the first hit.
+  let oauthServer = null;
+  const OAUTH_PORT = 12121;
+  function oauthSuccessPage(ok) {
+    return `<!doctype html><html><head><meta charset="utf-8"><title>UmbraOS</title>` +
+      `<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#050608;color:#fff;font-family:system-ui,sans-serif}` +
+      `.c{text-align:center}.t{font-size:20px;font-weight:600;margin-bottom:8px}.s{font-size:14px;color:#888}</style></head><body><div class="c">` +
+      (ok
+        ? `<div class="t">Signed in with Google</div><div class="s">Return to the Umbra app — you can close this tab.</div>`
+        : `<div class="t">Sign-in did not complete</div><div class="s">Return to the Umbra app and try again — you can close this tab.</div>`) +
+      `</div></body></html>`;
+  }
+  ipcMain.handle('umbra:oauth-callback-start', async () => {
+    try {
+      try { if (oauthServer) oauthServer.close(); } catch { /* ignore */ }
+      oauthServer = null;
+      const http = require('http');
+      const server = http.createServer((req, res) => {
+        try {
+          const u = new URL(req.url || '/', `http://127.0.0.1:${OAUTH_PORT}`);
+          if (u.pathname === '/auth/callback') {
+            const code = u.searchParams.get('code');
+            const err = u.searchParams.get('error');
+            if (code && mainWin && !mainWin.isDestroyed()) {
+              mainWin.webContents.send('umbra:oauth-code', { code });
+            }
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(oauthSuccessPage(!err && !!code));
+            setTimeout(() => {
+              try { server.close(); } catch { /* ignore */ }
+              if (oauthServer === server) oauthServer = null;
+            }, 500);
+          } else {
+            res.writeHead(404);
+            res.end();
+          }
+        } catch {
+          try { res.writeHead(500); res.end(); } catch { /* ignore */ }
+        }
+      });
+      await new Promise((resolve, reject) => {
+        server.on('error', reject);
+        server.listen(OAUTH_PORT, '127.0.0.1', resolve);
+      });
+      oauthServer = server;
+      // Safety: never leave the listener open longer than 10 minutes.
+      setTimeout(() => {
+        try { if (oauthServer === server) { server.close(); oauthServer = null; } } catch { /* ignore */ }
+      }, 10 * 60 * 1000);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  ipcMain.handle('umbra:oauth-callback-stop', async () => {
+    try { if (oauthServer) oauthServer.close(); } catch { /* ignore */ }
+    oauthServer = null;
+    return true;
   });
 
   ipcMain.handle('umbra:read-image-file', async (_event, filePath) => {

@@ -3,13 +3,14 @@ import gsap from 'gsap';
 import { useAppStore } from '../stores/appStore';
 import {
   getMcpConnectors, getMcpCatalog,
-  connectMcp, disconnectMcp, mcpOauthStart, mcpSyncRegistry,
+  connectMcp, disconnectMcp, mcpOauthStart, mcpOauthStatus, mcpSyncRegistry,
   connectorDiscover, connectorExecute,
   saveConnectorCredential,
   listToolSchemas, getConnectorTools, getToolsHealth, ingestConnectorOpenApi,
+  ensureConnectorTools,
   type McpCatalogEntry, type ConnectorDiscoverResult,
   type ConnectorToolDefinition, type ApiToolsHealth, type ToolSchemasResult,
-  type IngestOpenApiResult,
+  type IngestOpenApiResult, type EnsureToolsResult,
 } from '../lib/backend';
 import {
   Search, Plug, Cloud, Database, MessageSquare, CreditCard, Code2, Globe,
@@ -55,6 +56,8 @@ export function ConnectorsView() {
   const offsetRef = useRef(0);
 
   const [connectingId, setConnectingId] = useState<string | null>(null);
+  /** Connector id we're waiting on an external browser authorization for. */
+  const [awaitingOauth, setAwaitingOauth] = useState<string | null>(null);
   const [connectModal, setConnectModal] = useState<{ entry: McpCatalogEntry; credential: string; baseUrl: string } | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [addAll, setAddAll] = useState<{ running: boolean; added: number; noKey: number; oauth: number; failed: number } | null>(null);
@@ -101,6 +104,13 @@ export function ConnectorsView() {
   const [ingestResult, setIngestResult] = useState<IngestOpenApiResult | null>(null);
   const [ingestError, setIngestError] = useState('');
 
+  // One-click enable for name-only catalog rows (Tool Schemas tab)
+  const [ensureId, setEnsureId] = useState('');
+  const [ensureForce, setEnsureForce] = useState(false);
+  const [ensuring, setEnsuring] = useState(false);
+  const [ensureResult, setEnsureResult] = useState<EnsureToolsResult | null>(null);
+  const [ensureError, setEnsureError] = useState('');
+
   interface ConnectedItem { id: string; name: string; category: string; connected: boolean; tools?: number; }
 
   useEffect(() => {
@@ -133,6 +143,41 @@ export function ConnectorsView() {
   useEffect(() => {
     void loadConnected();
   }, [loadConnected]);
+
+  // OAuth completion watcher.
+  //
+  // The authorize step happens in the system browser, and the callback returns
+  // JSON to that browser — the desktop window never learns it finished. Without
+  // this poll the user authorizes, sees a JSON blob, and the Connectors list
+  // is unchanged, so the flow looks broken even when it worked.
+  useEffect(() => {
+    if (!awaitingOauth) return;
+    let cancelled = false;
+    const started = Date.now();
+    const TIMEOUT_MS = 5 * 60_000;
+    const INTERVAL_MS = 2000;
+
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const status = await mcpOauthStatus(awaitingOauth);
+        if (!cancelled && status.connected) {
+          setAwaitingOauth(null);
+          await loadConnected();
+          setError('');
+          return;
+        }
+      } catch { /* backend busy — keep polling */ }
+      if (Date.now() - started < TIMEOUT_MS) {
+        window.setTimeout(tick, INTERVAL_MS);
+      } else if (!cancelled) {
+        setAwaitingOauth(null);
+        setError('Authorization timed out — the connector was not connected.');
+      }
+    };
+    void tick();
+    return () => { cancelled = true; };
+  }, [awaitingOauth, loadConnected]);
 
   // Tool-framework health (retrieval mode) + initial schema page on mount
   useEffect(() => {
@@ -370,6 +415,26 @@ export function ConnectorsView() {
     setIngesting(false);
   };
 
+  // One-click enable: ingest the connector's known spec when it has no
+  // tools yet (idempotent — the backend short-circuits when already indexed).
+  const handleEnsure = async () => {
+    const connectorId = ensureId.trim();
+    if (!connectorId || ensuring) return;
+    setEnsuring(true);
+    setEnsureError('');
+    setEnsureResult(null);
+    try {
+      const { result } = await ensureConnectorTools(connectorId, { ...(ensureForce ? { force: true } : {}) });
+      setEnsureResult(result);
+      // Refresh the browser + health strip so the new schemas show immediately.
+      void getToolsHealth().then(setToolsHealth);
+      setSchemaRefresh((n) => n + 1);
+    } catch (e) {
+      setEnsureError((e as Error).message);
+    }
+    setEnsuring(false);
+  };
+
   // Toggle connected
   const toggleConnect = async (id: string) => {
     const item = connected.find((c) => c.id === id);
@@ -397,6 +462,9 @@ export function ConnectorsView() {
             ? await (window as any).umbraDesktop.openExternal(authorizeUrl)
             : false;
           if (!opened) window.open(authorizeUrl, '_blank', 'width=600,height=700');
+          // The callback lands in the browser, not here — start watching so
+          // the list updates the moment the backend exchanges the code.
+          setAwaitingOauth(entry.id);
           setConnectModal(null);
         } catch (e) {
           const msg = (e as Error).message || '';
@@ -440,6 +508,7 @@ export function ConnectorsView() {
         ? await (window as any).umbraDesktop.openExternal(authorizeUrl)
         : false;
       if (!opened) window.open(authorizeUrl, '_blank', 'width=600,height=700');
+      setAwaitingOauth(oauthSetupModal.entry.id);
       setOauthSetupModal(null);
     } catch (e) {
       setError(`Save failed: ${(e as Error).message}`);
@@ -673,6 +742,36 @@ export function ConnectorsView() {
                 <Upload size={12} /> Ingest OpenAPI
               </button>
             </div>
+            {/* One-click enable for name-only catalog rows */}
+            <div className="flex items-center gap-2 mb-4 flex-wrap">
+              <div className="flex-1 flex items-center gap-2 px-3 rounded-xl min-w-52" style={{ height: 38, background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)' }}>
+                <Zap size={13} style={{ color: 'var(--text-faint)' }} />
+                <input value={ensureId} onChange={(e) => setEnsureId(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') void handleEnsure(); }}
+                  placeholder="Enable catalog tools — e.g. apisguru-stripe…"
+                  className="bg-transparent outline-none text-sm flex-1" style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }} />
+              </div>
+              <label className="flex items-center gap-1.5 text-[11px] font-medium cursor-pointer" style={{ color: 'var(--text-dim)', fontFamily: 'var(--font)' }}>
+                <input type="checkbox" checked={ensureForce} onChange={(e) => setEnsureForce(e.target.checked)} />
+                Force re-ingest
+              </label>
+              <button onClick={() => void handleEnsure()} disabled={!ensureId.trim() || ensuring}
+                className="flex items-center gap-1.5 px-4 rounded-xl text-[11px] font-medium transition-all hover:opacity-90 flex-shrink-0 disabled:opacity-50"
+                style={{ height: 38, background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)', color: 'var(--text-dim)', fontFamily: 'var(--font)' }}>
+                {ensuring ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
+                {ensuring ? 'Enabling…' : 'Ensure tools'}
+              </button>
+            </div>
+            {ensureResult && (
+              <p className="text-[11px] font-medium mb-4" style={{ color: '#7EE2A8' }}>
+                {ensureResult.alreadyIndexed
+                  ? `${ensureResult.connectorId} already indexed (${ensureResult.ingested} tools${ensureResult.source ? ` · ${ensureResult.source}` : ''})`
+                  : `${ensureResult.connectorId}: ingested ${ensureResult.ingested} tools${ensureResult.baseUrl ? ` · ${ensureResult.baseUrl}` : ''}`}
+              </p>
+            )}
+            {ensureError && (
+              <p className="text-[11px] font-medium mb-4" style={{ color: '#FF8A8A' }}>Ensure failed: {ensureError}</p>
+            )}
             {schemaLoading && (
               <div className="flex items-center justify-center py-12 gap-2">
                 <Loader2 size={15} className="animate-spin" style={{ color: avatar.accent }} />
@@ -799,6 +898,13 @@ export function ConnectorsView() {
                       {isConn ? (
                         <span className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-[11px] font-medium" style={{ background: '#22C55E16', color: '#22C55E', border: '1px solid #22C55E33', fontFamily: 'var(--font)' }}>
                           <Check size={12} /> Connected
+                        </span>
+                      ) : awaitingOauth === entry.id ? (
+                        // The authorize step runs in the system browser — tell
+                        // the user where to go instead of appearing frozen.
+                        <span className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-[11px] font-medium" style={{ background: '#F59E0B16', color: '#F59E0B', border: '1px solid #F59E0B33', fontFamily: 'var(--font)' }}>
+                          <Loader2 size={12} className="animate-spin" />
+                          Finish in your browser…
                         </span>
                       ) : isNoAuth ? (
                         <button onClick={() => handleConnect(entry)} disabled={isConnecting}

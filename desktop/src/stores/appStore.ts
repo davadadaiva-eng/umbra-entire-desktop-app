@@ -1,9 +1,11 @@
 import { create } from 'zustand';
 import type { STTConfig } from '../lib/stt';
-import { supabase, signIn, signUp, signOut, sendVerificationCode, verifyEmailCode, sessionToAuthView } from '../lib/auth';
+import { supabase, signIn, signUp, signOut, sendVerificationCode, verifyEmailCode, sessionToAuthView, googleOAuthUrl, exchangeOAuthCode, hasDesktopOAuthBridge } from '../lib/auth';
 import type { AuthResult } from '../lib/auth';
 import { isBackendAvailable, getStatus, getConsent, type BackendStatus, type Task } from '../lib/backend';
-import { connect, disconnect, onEvent, onSnapshot, onAnyEvent, onDisconnect } from '../lib/backendWs';
+import { connect, disconnect, onEvent, onSnapshot, onAnyEvent, onDisconnect, removeAllListeners, isConnected } from '../lib/backendWs';
+
+let backendWired = false;
 
 export type View = 'agent' | 'brain' | 'devices' | 'smarthome' | 'skills' | 'vault' | 'connectors' | 'meetingbot' | 'meetings' | 'recall' | 'usage' | 'phone' | 'settings';
 
@@ -467,6 +469,7 @@ interface AppState {
   signup: (name: string, email: string, password: string) => Promise<AuthResult>;
   sendCode: (email: string) => Promise<AuthResult>;
   verifyCode: (email: string, code: string) => Promise<AuthResult>;
+  loginWithGoogle: () => Promise<AuthResult>;
   setTalkAlways: (on: boolean) => void;
   finishOnboarding: () => Promise<void>;
   logout: () => Promise<void>;
@@ -617,6 +620,9 @@ export const useAppStore = create<AppState>((set, get) => {
   },
 
   connectBackend: () => {
+    if (backendWired && isConnected()) return;
+    removeAllListeners();
+    backendWired = true;
     connect();
     onSnapshot((status) => {
       set({ backendOnline: true, backendStatus: status as unknown as BackendStatus });
@@ -734,6 +740,8 @@ export const useAppStore = create<AppState>((set, get) => {
   },
 
   disconnectBackend: () => {
+    backendWired = false;
+    removeAllListeners();
     disconnect();
     set({ backendOnline: false, backendStatus: null });
   },
@@ -826,6 +834,19 @@ export const useAppStore = create<AppState>((set, get) => {
 
   login: async (email: string, password: string) => {
     const res = await signIn(email, password);
+    // Email verification mode: correct password but address not yet verified
+    // → land on the CodeVerificationScreen instead of showing an error.
+    if (!res.ok && res.emailNotConfirmed) {
+      const trimmed = email.trim();
+      const fallback = trimmed.split('@')[0] || 'User';
+      set({
+        isAuthenticated: true,
+        user: { email: trimmed, name: fallback.charAt(0).toUpperCase() + fallback.slice(1) },
+        emailVerified: false,
+        isOnboarded: false,
+      });
+      return { ok: true };
+    }
     if (res.ok) {
       if (import.meta.env.DEV && email.trim().toLowerCase() === 'davide@gmail.com' && password === 'davide12') {
         const u = { email: 'davide@gmail.com', name: 'Davide' };
@@ -862,8 +883,12 @@ export const useAppStore = create<AppState>((set, get) => {
     const res = await signUp(name, email, password);
     if (!res.ok || !supabase) return res;
     // Sign up succeeded. If Supabase didn't hand us a session right away
-    // (e.g. "Confirm email" is on), try a normal password sign-in so the
-    // user lands in the app instead of on a verification screen.
+    // ("Confirm email" is ON), land on the CodeVerificationScreen instead.
+    const unverifiedUser = () => {
+      const trimmed = email.trim();
+      const display = name.trim() || trimmed.split('@')[0] || 'User';
+      return { email: trimmed, name: display.charAt(0).toUpperCase() + display.slice(1) };
+    };
     const { data } = await supabase.auth.getSession();
     if (data?.session) {
       const v = sessionToAuthView(data.session);
@@ -879,6 +904,8 @@ export const useAppStore = create<AppState>((set, get) => {
       reloadUserStorage();
       return res;
     }
+    // No session → "Confirm email" is ON. Try a password sign-in: if that
+    // also reports email-not-confirmed, route to the verification screen.
     const loginRes = await signIn(email, password);
     if (loginRes.ok) {
       const { data: sessionData } = await supabase.auth.getSession();
@@ -893,8 +920,18 @@ export const useAppStore = create<AppState>((set, get) => {
       });
       migrateLegacyKeysToUser(userId);
       reloadUserStorage();
+      return res;
     }
-    return loginRes.ok ? res : loginRes;
+    if (loginRes.emailNotConfirmed) {
+      set({
+        isAuthenticated: true,
+        user: unverifiedUser(),
+        emailVerified: false,
+        isOnboarded: false,
+      });
+      return res;
+    }
+    return loginRes;
   },
 
   sendCode: (email) => sendVerificationCode(email),
@@ -916,6 +953,70 @@ export const useAppStore = create<AppState>((set, get) => {
       reloadUserStorage();
     }
     return res;
+  },
+
+  loginWithGoogle: async () => {
+    const urlRes = await googleOAuthUrl();
+    if (!urlRes.ok || !urlRes.url) return { ok: false, error: urlRes.error ?? 'Could not start Google sign-in.' };
+    if (!hasDesktopOAuthBridge()) {
+      // Browser dev fallback: full-page redirect; the session is picked up
+      // on load by initializeAuth.
+      window.location.href = urlRes.url;
+      return { ok: true };
+    }
+    const bridge = (window as unknown as {
+      umbraDesktop: {
+        openExternal(u: string): Promise<boolean>;
+        oauthCallbackStart(): Promise<boolean>;
+        oauthCallbackStop(): Promise<boolean>;
+        onOAuthCode(cb: (p: unknown) => void): () => void;
+      };
+    }).umbraDesktop;
+    try { await bridge.oauthCallbackStart(); } catch { /* ignore */ }
+    let opened = false;
+    try { opened = await bridge.openExternal(urlRes.url); } catch { opened = false; }
+    if (!opened) {
+      try { await bridge.oauthCallbackStop(); } catch { /* ignore */ }
+      return { ok: false, error: 'Could not open your browser for Google sign-in.' };
+    }
+    const code = await new Promise<string | null>((resolve) => {
+      let done = false;
+      let off: (() => void) | null = null;
+      try {
+        off = bridge.onOAuthCode((p) => {
+          if (done) return;
+          done = true;
+          try { off?.(); } catch { /* ignore */ }
+          const c = (p as { code?: unknown } | null)?.code;
+          resolve(typeof c === 'string' && c ? c : null);
+        });
+      } catch { resolve(null); return; }
+      window.setTimeout(() => {
+        if (done) return;
+        done = true;
+        try { off?.(); } catch { /* ignore */ }
+        resolve(null);
+      }, 5 * 60 * 1000);
+    });
+    try { await bridge.oauthCallbackStop(); } catch { /* ignore */ }
+    if (!code) return { ok: false, error: 'Google sign-in timed out — try again.' };
+    const ex = await exchangeOAuthCode(code);
+    if (!ex.ok || !supabase) return ex;
+    const { data } = await supabase.auth.getSession();
+    const v = sessionToAuthView(data?.session);
+    if (!data?.session || !v.user) return { ok: false, error: 'Google sign-in completed but no session was created.' };
+    const userId = storageUserIdFromUser(v.user);
+    set({
+      isAuthenticated: true,
+      // Google addresses arrive pre-verified; Supabase marks them confirmed.
+      user: v.user,
+      emailVerified: true,
+      isOnboarded: v.isOnboarded,
+      storageUserId: userId,
+    });
+    migrateLegacyKeysToUser(userId);
+    reloadUserStorage();
+    return { ok: true };
   },
 
   finishOnboarding: async () => {

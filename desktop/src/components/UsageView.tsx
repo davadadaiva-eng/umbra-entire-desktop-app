@@ -144,9 +144,20 @@ export function UsageView() {
     }
   };
 
-  const plan = 'free';
+  const planTier = planUsage ? String((planUsage.plan ?? planUsage.tier ?? (planUsage.usage as Record<string, unknown> | undefined)?.plan ?? 'free') as string) : 'free';
 
-  const planTier = planUsage ? String((planUsage.plan ?? planUsage.tier ?? (planUsage.usage as Record<string, unknown> | undefined)?.plan ?? plan) as string) : plan;
+  // Live plan catalog from the backend (ModelRouter.allPlans via /api/plan/usage).
+  // Falls back to the static cards below while the backend is offline.
+  const backendPlans = Array.isArray(planUsage?.plans)
+    ? (planUsage.plans as Array<{ tier: string; name: string; priceUsd: number; budgetUsd: number; models?: Record<string, string[]> }>)
+        .filter((p) => p.tier === 'pro' || p.tier === 'ultimate' || p.tier === 'enterprise')
+    : null;
+  const shortModelId = (id: string) => {
+    const slug = id.split('/').pop() ?? id;
+    return slug.replace(/:free$/, ' (free)');
+  };
+  const planModelsLine = (m?: Record<string, string[]>) =>
+    m ? [...new Set(Object.values(m).flat())].slice(0, 4).map(shortModelId).join(' · ') : '';
   const usageNode = (planUsage?.usage ?? planUsage?.data ?? {}) as Record<string, unknown>;
   const backendCalls = planUsage ? String(usageNode.calls ?? planUsage.calls ?? planUsage.totalCalls ?? '—') : null;
   const backendTokens = planUsage ? String(usageNode.tokens ?? planUsage.tokens ?? planUsage.totalTokens ?? '—') : null;
@@ -318,7 +329,7 @@ export function UsageView() {
               {[
                 { t: 'Context saturation', d: 'tax-ai peaked at 1.98M tokens/day — consider narrower router pruning.', icon: <Clock size={12} />, tone: '#f59e0b' },
                 { t: 'Cost spike detected', d: 'Voice calls jumped 31% on July 27 — review AgentPhone routing.', icon: <TrendingUp size={12} />, tone: '#ef4444' },
-                { t: `Budget · ${plan}`, d: 'You are at 41% of monthly budget · 22 days remaining.', icon: <ArrowUpRight size={12} />, tone: '#22c55e' },
+                { t: `Budget · ${planTier}`, d: 'You are at 41% of monthly budget · 22 days remaining.', icon: <ArrowUpRight size={12} />, tone: '#22c55e' },
               ].map((x) => (
                 <div key={x.t} className="flex items-start gap-3 rounded-lg p-2.5" style={{ background: 'rgba(255,255,255,0.022)', border: '1px solid var(--hairline)' }}>
                   <span className="mt-0.5 flex-shrink-0" style={{ color: x.tone }}>{x.icon}</span>
@@ -340,31 +351,37 @@ export function UsageView() {
             <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }}>Plan & Billing</p>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-            {[
+            {(backendPlans ?? [
               {
                 tier: 'pro',
                 name: 'Pro',
+                priceUsd: 19.99,
+                budgetUsd: 5,
                 desc: '$19.99/mo — €5 AI models · CX33 cloud (€6.70)',
-                models: 'Gemini 2.5 Flash (frontend + tools) · GLM Long (backend) · Kimi Thinking (reasoning) · Muse Spark 1.3 (agentic code)',
+                models: 'gemini-2.5-flash · z-ai/glm-5 · kimi-k2-thinking · muse-spark-1.3',
               },
               {
                 tier: 'ultimate',
                 name: 'Advanced',
+                priceUsd: 38,
+                budgetUsd: 10,
                 desc: '$38/mo — $10 AI models · CX43 cloud (€10)',
-                models: 'Flash + Kimi K3 (reasoning) · Claude Sonnet 5 (heavy backend) · Gemini 2.5 Pro (vision) · Spark 1.3 / Qwen Max (code)',
+                models: 'gemini-2.5-flash · kimi-k3 · claude-sonnet-5 · gemini-2.5-pro · muse-spark-1.3',
               },
               {
                 tier: 'enterprise',
                 name: 'Enterprise',
+                priceUsd: 89.99,
+                budgetUsd: 30,
                 desc: '$89.99/mo — $30 AI models · CPX42 cloud (€29.99) · $15 telco',
-                models: 'Everything unlocked: Claude Sonnet 5 · Kimi K3 · Muse Spark 1.3 · Gemini 2.5 Pro · no downgrades',
+                models: 'claude-sonnet-5 · kimi-k3 · muse-spark-1.3 · gemini-2.5-pro',
               },
-            ].map((p) => (
+            ]).map((p) => (
               <div key={p.tier} className="rounded-xl p-4" style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)' }}>
                 <div className="flex items-center justify-between gap-2">
                   <div>
                     <p className="text-sm font-bold" style={{ color: 'var(--text-primary)', fontFamily: 'var(--font)' }}>{p.name}</p>
-                    <p className="text-[11px] font-light" style={{ color: 'var(--text-dim)' }}>{p.desc}</p>
+                    <p className="text-[11px] font-light" style={{ color: 'var(--text-dim)' }}>{'desc' in p && p.desc ? String(p.desc) : `$${p.priceUsd}/mo — $${p.budgetUsd} AI models`}</p>
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
                     <button
@@ -385,7 +402,7 @@ export function UsageView() {
                     </button>
                   </div>
                 </div>
-                <p className="text-[10px] font-light mt-2 leading-snug" style={{ color: 'var(--text-faint)' }}>{p.models}</p>
+                <p className="text-[10px] font-light mt-2 leading-snug" style={{ color: 'var(--text-faint)' }}>{typeof p.models === 'string' ? p.models : planModelsLine(p.models)}</p>
               </div>
             ))}
           </div>

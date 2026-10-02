@@ -327,6 +327,31 @@ export const mcpOauthStatus = async (id: string) => {
   return res.oauth;
 };
 
+/** What a user must actually do to connect a connector (backend-computed). */
+export type ConnectorReadiness = {
+  connectorId: string;
+  state: 'ready' | 'connected' | 'needs_key' | 'needs_oauth_app' | 'needs_setup';
+  authType: string;
+  hasBaseUrl: boolean;
+  hasTools: boolean;
+  provider?: string;
+  action: string;
+};
+
+export const getConnectorReadiness = async (id: string) => {
+  const res = await backendFetch<{ readiness: ConnectorReadiness }>(
+    `/api/connectors/${encodeURIComponent(id)}/readiness`
+  );
+  return res.readiness;
+};
+
+export const getConnectorReadinessSummary = async () => {
+  const res = await backendFetch<{ readiness: { counts: Record<string, number>; connectors: ConnectorReadiness[] } }>(
+    `/api/connectors/readiness`
+  );
+  return res.readiness;
+};
+
 // Registry sync pulls servers from Smithery + the official MCP registry over
 // the network and can take minutes — use a long timeout so it isn't aborted.
 export const mcpSyncRegistry = async () => {
@@ -1125,6 +1150,25 @@ export const ingestConnectorOpenApi = (opts: IngestOpenApiOptions) =>
     timeout: 120000,
   });
 
+export interface EnsureToolsResult {
+  connectorId: string;
+  ingested: number;
+  alreadyIndexed: boolean;
+  baseUrl?: string;
+  source: 'curated' | 'spec' | 'none';
+}
+
+// POST /api/connectors/:id/ensure-tools — one-click enable for name-only
+// catalog rows. Ingests the connector's known OpenAPI spec when it has no
+// tools yet (idempotent — short-circuits when already indexed); the backend
+// refreshes the vector registry without a restart.
+export const ensureConnectorTools = (id: string, opts?: { force?: boolean }) =>
+  backendFetch<{ result: EnsureToolsResult }>(`/api/connectors/${encodeURIComponent(id)}/ensure-tools`, {
+    method: 'POST',
+    body: JSON.stringify({ ...(opts?.force !== undefined ? { force: opts.force } : {}) }),
+    timeout: 120000,
+  });
+
 export const syncConnectors = async () => {
   const res = await backendFetch<{ result?: { synced?: number; total?: number; added?: number } }>('/api/connectors/sync', { method: 'POST', timeout: 120000 });
   // Backend is canonical: POST /api/connectors/sync returns { result: { synced } }
@@ -1328,6 +1372,14 @@ export interface SmartHomePlatformInfo {
   connected: boolean;
   tokenMasked?: string;
   lastError?: string;
+  /** 'oauth' when the platform offers "Sign in with …"; 'token' when it is paste-only. */
+  authMode: 'oauth' | 'token';
+  /** Button label, e.g. "Sign in with Samsung SmartThings". Only set for authMode 'oauth'. */
+  oauthLabel?: string;
+  /** An OAuth app is registered, so pressing the button will actually work. */
+  oauthConfigured: boolean;
+  /** The platform cannot be connected at all without a registered OAuth app. */
+  requiresClientApp: boolean;
 }
 export interface SmartHomeDeviceAny {
   id: string;              // '<platform>:<nativeId>'
@@ -1354,3 +1406,73 @@ export const disconnectSmartHomePlatform = (key: string) =>
     `/api/smart/platforms/${encodeURIComponent(key)}/disconnect`,
     { method: 'POST' },
   );
+
+// ── Smart Home — OAuth sign-in (cloud platforms) ─────────────────────────
+// The backend owns the PKCE verifier and the pending flow, so the desktop
+// only has to open the consent URL and then wait for the callback route to
+// land the session in the vault.
+export interface SmartHomeOauthStart {
+  platform: string;
+  authorizeUrl: string;
+  state: string;
+}
+export const startSmartHomeOauth = (key: string, redirectUri?: string) =>
+  backendFetch<SmartHomeOauthStart>(
+    `/api/smart/platforms/${encodeURIComponent(key)}/oauth/start`,
+    { method: 'POST', body: JSON.stringify(redirectUri ? { redirectUri } : {}) },
+  );
+
+/** The loopback redirect the backend hands to the vendor by default. */
+export const smartHomeOauthRedirect = (key: string, apiBase?: string) => {
+  const base = apiBase || 'http://127.0.0.1:8787';
+  return `${base}/api/smart/platforms/${encodeURIComponent(key)}/oauth/callback`;
+};
+
+/**
+ * Confirm a sign-in landed. The vendor redirects the *browser* to the
+ * callback, so the desktop never sees the response — it polls the platform
+ * list until the card reports itself connected.
+ */
+export const smartHomeOauthSettled = async (
+  key: string,
+  timeoutMs = 120_000,
+  intervalMs = 1500,
+): Promise<SmartHomePlatformInfo | null> => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const { platforms } = await getSmartHomePlatforms();
+    const entry = platforms.find((p) => p.key === key);
+    if (entry?.configured) return entry;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return null;
+};
+
+// ── Smart Home — device routines (multi-platform) ────────────────────────
+export interface SmartHomeSchedule {
+  id: string;
+  /** Namespaced id `<platform>:<nativeId>`, or a bare legacy SmartThings id. */
+  deviceId: string;
+  deviceName: string;
+  command: 'on' | 'off';
+  kind: 'everyMinutes' | 'at';
+  everyMinutes?: number;
+  /** Daily time "HH:MM" (24h, local) for `kind: 'at'`. */
+  at?: string;
+  lastRun?: number;
+  createdAt: number;
+  enabled: boolean;
+}
+
+export const getSmartHomeSchedules = () =>
+  backendFetch<{ schedules: SmartHomeSchedule[] }>('/api/smart/schedules');
+export const addSmartHomeSchedule = (rule: Omit<SmartHomeSchedule, 'id' | 'lastRun' | 'createdAt' | 'enabled'>) =>
+  backendFetch<{ schedule: SmartHomeSchedule }>('/api/smart/schedules', {
+    method: 'POST',
+    body: JSON.stringify(rule),
+  });
+export const cancelSmartHomeSchedule = (id: string) =>
+  backendFetch<{ cancelled: boolean }>('/api/smart/schedules/cancel', {
+    method: 'POST',
+    body: JSON.stringify({ id }),
+  });

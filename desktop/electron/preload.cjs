@@ -29,4 +29,11 @@ contextBridge.exposeInMainWorld('umbraDesktop', {
     ipcRenderer.invoke('umbra:local-voice-probe-stream', url, timeoutMs, signalToken),
   localVoiceFetchStream: (url, init) => ipcRenderer.invoke('umbra:local-voice-fetch-stream', url, init),
   openExternal: (url) => ipcRenderer.invoke('umbra:open-external', url),
+  oauthCallbackStart: () => ipcRenderer.invoke('umbra:oauth-callback-start'),
+  oauthCallbackStop: () => ipcRenderer.invoke('umbra:oauth-callback-stop'),
+  onOAuthCode: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('umbra:oauth-code', listener);
+    return () => ipcRenderer.removeListener('umbra:oauth-code', listener);
+  },
 });

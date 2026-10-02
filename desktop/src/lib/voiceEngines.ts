@@ -105,6 +105,10 @@ export function isPiperOnline(timeoutMs = 1500): Promise<boolean> {
   return probe(`${PIPER_BASE}/health`, timeoutMs);
 }
 
+export function isFasterWhisperOnline(timeoutMs = 1500): Promise<boolean> {
+  return probe(`${FASTER_WHISPER_BASE}/health`, timeoutMs);
+}
+
 export async function localEnginesOnline(timeoutMs = 1500): Promise<LocalEngineState> {
   const [voicestudio, voicebox, piper] = await Promise.all([
     isVoiceStudioOnline(timeoutMs),
@@ -236,7 +240,24 @@ export async function transcribeLocal(blob: Blob): Promise<string> {
       errors.push('voicebox: unreachable');
     }
   }
-  if (errors.length === 0) errors.push('neither VoiceStudio nor voicebox is running');
+  if (await isFasterWhisperOnline(1200)) {
+    try {
+      const form = new FormData();
+      form.append('file', blob, audioFileName(blob));
+      const r = useDesktopVoiceFetch ? await voiceFetch(`${FASTER_WHISPER_BASE}/transcribe`, { method: 'POST', body: form }) : await window.fetch(`${FASTER_WHISPER_BASE}/transcribe`, { method: 'POST', body: form });
+      if (r.ok) {
+        const j = (typeof r.body === 'object' && r.body !== null && 'text' in r.body) ? (r.body as { text?: string }).text : undefined;
+        const text = (j ?? '').trim();
+        if (text) return text;
+        errors.push('faster-whisper: no speech recognized');
+      } else {
+        errors.push(`faster-whisper: HTTP ${r.status}`);
+      }
+    } catch {
+      errors.push('faster-whisper: unreachable');
+    }
+  }
+  if (errors.length === 0) errors.push('neither VoiceStudio, voicebox nor faster-whisper is running (start: node scripts/start-all.mjs)');
   throw new Error(`Local speech-to-text unavailable (${errors.join('; ')})`);
 }
 

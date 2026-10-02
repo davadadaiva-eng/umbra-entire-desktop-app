@@ -105,17 +105,32 @@ services from the app itself.
 
 ## Login
 
-Cloud auth via Supabase (email + password). Sign up on the login screen
-and you are signed in immediately — there is NO email verification step
-in the app right now (the verification screens still exist but are
-unused). Duplicate emails are rejected in-app with a message. The session
+Cloud auth via Supabase (email + password + 6-digit email verification
+code). Sign up (or sign in with an unverified address) and the app sends a
+code and shows the verification screen; enter the code to finish signing
+in. Duplicate emails are rejected in-app with a message. The session
 survives restarts (localStorage + Supabase session). Set
 `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` in `.env` to enable it.
 
-**Note:** for signup to return a session directly, the Supabase project
-should have "Confirm email" OFF (Authentication → Sign In / Up → Email).
-If it is ON, signup shows the "Email not confirmed" error which tells you
-how to fix it.
+**Note:** email verification needs "Confirm email" ON in the Supabase
+project (Authentication → Sign In / Up → Email). The code emails are
+configured in the Supabase dashboard (Authentication → Email Templates):
+set the "Magic link or OTP" and "Confirm signup" bodies code-only
+(e.g. subject `{{ .Token }} is your Umbra OS verification code`, body
+containing `<p style="font-size:30px">{{ .Token }}</p>` — see
+`supabase-email-template.html` in this folder for a ready-to-paste
+branded template).
+
+**Google sign-in:** enable the Google provider in Supabase
+(Authentication → Sign In / Up → Providers) and add the desktop loopback
+URL `http://127.0.0.1:12121/auth/callback` to Authentication → URL
+Configuration → Redirect URLs. In the packaged app, "Continue with
+Google" opens the system browser and a one-shot localhost callback
+(`electron/main.cjs` `umbra:oauth-callback-start`) hands the auth code
+back to the app, which exchanges it via PKCE (`loginWithGoogle` in
+`src/stores/appStore.ts`). Google addresses arrive pre-verified, so no
+code step is needed. In plain browser dev (`npm run dev`) it falls back
+to the classic redirect flow.
 
 ## Supabase email setup (verification codes)
 
@@ -180,13 +195,13 @@ currently disabled). The code-only emails are configured in the Supabase
   `VITE_SUPABASE_ANON_KEY`); session is restored on startup. See
   `src/lib/auth.ts` and the `login`/`signup`/`signOut`/`initializeAuth`
   actions in `src/stores/appStore.ts`.
-- Email verification is **disabled** in the app for now (plain login/signup;
-  signup auto-signs-in via `appStore.signup`). The old OTP flow
-  (`sendCode` → `signInWithOtp` → `verifyCode` → `verifyOtp`) still
-  exists in `src/lib/auth.ts` + `src/stores/appStore.ts` and the
-  `CodeVerificationScreen`/`VerifyCodeBox` components remain, but nothing
-  routes to them. Re-enable by restoring the `App.tsx` gate and the
-  `LoginScreen` pendingEmail flow if needed later.
+- Email verification is **enabled**: `App.tsx` gates authenticated but
+  unverified users to `CodeVerificationScreen`, and `appStore.login` /
+  `appStore.signup` route `email_not_confirmed` results there
+  (`sendCode` → `signInWithOtp` → `verifyCode` → `verifyOtp` in
+  `src/lib/auth.ts` + `src/stores/appStore.ts`). If you ever want to
+  disable it again, turn "Confirm email" OFF in Supabase and remove the
+  `!emailVerified` gate in `App.tsx`.
 
 ## Where to continue / good next steps
 

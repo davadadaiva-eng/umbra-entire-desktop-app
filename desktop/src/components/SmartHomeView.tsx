@@ -5,14 +5,21 @@ import {
   getSmartHomePlatforms,
   connectSmartHomePlatform,
   disconnectSmartHomePlatform,
+  startSmartHomeOauth,
+  smartHomeOauthSettled,
   fetchSmartHomeDevicesViaBackend,
   smartHomeSwitch,
+  getSmartHomeSchedules,
+  addSmartHomeSchedule,
+  cancelSmartHomeSchedule,
   type SmartHomePlatformInfo,
   type SmartHomeDeviceAny,
+  type SmartHomeSchedule,
 } from '../lib/backend';
 import {
   Lightbulb, Plug, ToggleLeft, Thermometer, Lock, Radio, Camera, Speaker, HelpCircle, RefreshCw,
   Loader2, House, Wifi, WifiOff, X, Eye, EyeOff, CheckCircle2, Link2, Unlink, LayoutGrid, Rows3,
+  Clock, Plus, Trash2, ChevronDown, ChevronRight, Power, KeyRound,
 } from 'lucide-react';
 
 const KIND_ICONS: Record<string, typeof Lightbulb> = {
@@ -43,6 +50,56 @@ const FILTERS: { id: FilterId; label: string }[] = [
 /** Platforms that additionally need a server URL to connect. */
 const URL_PLATFORMS = new Set(['homeassistant', 'hubitat', 'openhab', 'tuya']);
 
+// ── Routines: next-run maths ───────────────────────────────────────────────
+
+/** When will this rule next fire, given `now`? `null` if it never will. */
+function nextRunAt(rule: SmartHomeSchedule, now: number): Date | null {
+  if (!rule.enabled) return null;
+  if (rule.kind === 'at' && rule.at) {
+    const [hh, mm] = rule.at.split(':').map((n) => parseInt(n, 10) || 0);
+    const d = new Date(now);
+    const t = new Date(d.getFullYear(), d.getMonth(), d.getDate(), hh, mm, 0, 0);
+    // Already past today's slot → tomorrow.
+    if (t.getTime() <= now) t.setDate(t.getDate() + 1);
+    return t;
+  }
+  if (rule.kind === 'everyMinutes') {
+    const interval = Math.max(1, rule.everyMinutes || 1) * 60_000;
+    // A rule that has never run is treated as starting now.
+    let t = (rule.lastRun || now) + interval;
+    while (t <= now) t += interval;
+    return new Date(t);
+  }
+  return null;
+}
+
+/** Compact "in 42s" / "in 3m 10s" / "in 2h 5m" relative label. */
+function formatCountdown(ms: number): string {
+  if (ms <= 0) return 'now';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+/** "Daily at 19:00" / "Every 30 min" — the rule's cadence in words. */
+function formatCadence(rule: SmartHomeSchedule): string {
+  return rule.kind === 'at' ? `Daily at ${rule.at}` : `Every ${rule.everyMinutes || 1} min`;
+}
+
+/** "Today 19:00" / "Tomorrow 07:30" / "Fri 08:00" for a next-run timestamp. */
+function formatNextRun(at: Date, now: number): string {
+  const time = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+  const startOfToday = new Date(now).setHours(0, 0, 0, 0);
+  if (at.getTime() < startOfToday) return time;
+  if (at.getTime() < startOfToday + 86_400_000) return `Today ${time}`;
+  if (at.getTime() < startOfToday + 172_800_000) return `Tomorrow ${time}`;
+  return at.toLocaleDateString(undefined, { weekday: 'short' }) + ' ' + time;
+}
+
 export function SmartHomeView() {
   const { avatar, addJournal } = useAppStore();
   const [platforms, setPlatforms] = useState<SmartHomePlatformInfo[]>([]);
@@ -63,6 +120,24 @@ export function SmartHomeView() {
   const [showPat, setShowPat] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [disconnectingKey, setDisconnectingKey] = useState<string | null>(null);
+  /** Platform key currently sitting in an OAuth consent round trip. */
+  const [signingInKey, setSigningInKey] = useState<string | null>(null);
+
+  // Routines (device schedules)
+  const [schedules, setSchedules] = useState<SmartHomeSchedule[]>([]);
+  const [showSchedules, setShowSchedules] = useState(false);
+  const [showScheduleForm, setShowScheduleForm] = useState(false);
+  const [addingSchedule, setAddingSchedule] = useState(false);
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
+  const [schedForm, setSchedForm] = useState({
+    deviceId: '',
+    command: 'on' as 'on' | 'off',
+    kind: 'at' as 'at' | 'everyMinutes',
+    at: '19:00',
+    everyMinutes: 30,
+  });
+  /** Ticks once a second so next-run countdowns stay live without refetching. */
+  const [now, setNow] = useState(() => Date.now());
 
   const headerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -87,6 +162,14 @@ export function SmartHomeView() {
       } else {
         setDevices([]);
       }
+      // Schedules are independent of the device list — a failing fetch here
+      // shouldn't blank the whole view.
+      try {
+        const schedRes = await getSmartHomeSchedules();
+        setSchedules(schedRes.schedules || []);
+      } catch {
+        setSchedules([]);
+      }
     } catch (e) {
       setError((e as Error).message || 'Failed to reach the Umbra backend');
       setPlatforms([]);
@@ -100,6 +183,15 @@ export function SmartHomeView() {
   useEffect(() => {
     void load(false);
   }, [load]);
+
+  // Live countdown clock for the routines panel. Only ticks when there is
+  // something to count down, so the device grid isn't re-rendered every second.
+  useEffect(() => {
+    if (schedules.length === 0) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [schedules.length]);
 
   // Entrance animation matching the other views.
   useEffect(() => {
@@ -142,6 +234,41 @@ export function SmartHomeView() {
     }
   };
 
+  /**
+   * Cloud platforms with a registered OAuth app sign in through the vendor
+   * instead of a pasted token. The backend holds the PKCE verifier, so the
+   * desktop just opens the consent URL and then polls until the vendor's
+   * loopback redirect has landed the session in the vault.
+   */
+  const handleSignIn = async (p: SmartHomePlatformInfo) => {
+    setSigningInKey(p.key);
+    try {
+      const { authorizeUrl } = await startSmartHomeOauth(p.key);
+      // Electron blocks window.open, so prefer the OS browser (same path the
+      // MCP connector sign-in uses).
+      const opened = (window as unknown as { umbraDesktop?: { openExternal(u: string): Promise<boolean> } })
+        .umbraDesktop?.openExternal
+        ? await (window as unknown as { umbraDesktop: { openExternal(u: string): Promise<boolean> } })
+            .umbraDesktop.openExternal(authorizeUrl)
+        : false;
+      if (!opened) window.open(authorizeUrl, '_blank', 'width=600,height=700');
+
+      setToast({ type: 'success', text: `Finish signing in to ${p.label} in your browser…` });
+      const settled = await smartHomeOauthSettled(p.key);
+      if (settled) {
+        showToast('success', `Signed in to ${p.label}`);
+        addJournal('action', `Smart home: signed in to ${p.key} via OAuth`);
+        await load(false);
+      } else {
+        showToast('error', `Sign-in to ${p.label} did not complete — try again`);
+      }
+    } catch (e) {
+      showToast('error', (e as Error).message || 'Sign-in failed');
+    } finally {
+      setSigningInKey(null);
+    }
+  };
+
   const handleDisconnect = async (key: string) => {
     setDisconnectingKey(key);
     try {
@@ -174,6 +301,53 @@ export function SmartHomeView() {
         nextSet.delete(device.id);
         return nextSet;
       });
+    }
+  };
+
+  // ── Routines ──
+
+  /** Devices a routine can target: anything with a switch. */
+  const schedulableDevices = useMemo(
+    () => devices.filter((d) => d.switchCapable),
+    [devices],
+  );
+
+  const handleAddSchedule = async () => {
+    const device = devices.find((d) => d.id === schedForm.deviceId);
+    if (!device) { showToast('error', 'Pick a device for the routine'); return; }
+    setAddingSchedule(true);
+    try {
+      const res = await addSmartHomeSchedule({
+        deviceId: device.id,
+        deviceName: device.name,
+        command: schedForm.command,
+        kind: schedForm.kind,
+        at: schedForm.kind === 'at' ? schedForm.at : undefined,
+        everyMinutes: schedForm.kind === 'everyMinutes' ? schedForm.everyMinutes : undefined,
+      });
+      setSchedules((cur) => [...cur, res.schedule]);
+      showToast('success', `Routine created — ${device.name} ${schedForm.command}`);
+      addJournal('action', `Smart home: routine created for ${device.name} (${device.platformLabel})`);
+      setShowScheduleForm(false);
+      setSchedForm((f) => ({ ...f, deviceId: '' }));
+    } catch (e) {
+      showToast('error', (e as Error).message || 'Could not create routine');
+    } finally {
+      setAddingSchedule(false);
+    }
+  };
+
+  const handleCancelSchedule = async (id: string) => {
+    setCancellingId(id);
+    try {
+      await cancelSmartHomeSchedule(id);
+      setSchedules((cur) => cur.filter((s) => s.id !== id));
+      showToast('success', 'Routine cancelled');
+      addJournal('action', 'Smart home: routine cancelled');
+    } catch (e) {
+      showToast('error', (e as Error).message || 'Could not cancel routine');
+    } finally {
+      setCancellingId(null);
     }
   };
 
@@ -398,6 +572,36 @@ export function SmartHomeView() {
               </button>
             </div>
             <div className="flex flex-col gap-2">
+              {connectTarget.authMode === 'oauth' && (
+                <button
+                  onClick={() => void handleSignIn(connectTarget)}
+                  disabled={!connectTarget.oauthConfigured || signingInKey === connectTarget.key}
+                  className="flex items-center justify-center gap-2 rounded-xl text-sm font-medium disabled:opacity-60"
+                  style={{ height: 40, background: avatar.accent, color: '#fff', border: 'none', fontFamily: 'var(--font)', cursor: connectTarget.oauthConfigured ? 'pointer' : 'not-allowed' }}
+                  title={connectTarget.oauthConfigured
+                    ? 'Sign in through the vendor and grant device access'
+                    : 'Set the platform OAuth client id/secret in backend/.env to enable sign-in'}
+                >
+                  {signingInKey === connectTarget.key
+                    ? <Loader2 size={14} className="animate-spin" />
+                    : <KeyRound size={14} />}
+                  {connectTarget.oauthLabel || 'Sign in'}
+                </button>
+              )}
+              {connectTarget.authMode === 'oauth' && (
+                <p className="text-[11px] font-light" style={{ color: 'var(--text-faint)' }}>
+                  {connectTarget.oauthConfigured
+                    ? 'Opens the vendor consent page in your browser. Tokens stay encrypted in the vault on this machine.'
+                    : `Sign-in needs a registered ${connectTarget.label} OAuth app — add its client id and secret to backend/.env, then restart. You can still paste a personal access token below.`}
+                </p>
+              )}
+              {connectTarget.authMode === 'oauth' && (
+                <div className="flex items-center gap-2 my-1">
+                  <div className="h-px flex-1" style={{ background: 'var(--hairline-strong)' }} />
+                  <span className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-faint)' }}>or paste a token</span>
+                  <div className="h-px flex-1" style={{ background: 'var(--hairline-strong)' }} />
+                </div>
+              )}
               {URL_PLATFORMS.has(connectTarget.key) && (
                 <div className="flex items-center gap-2 rounded-xl px-3" style={{ height: 40, background: 'var(--surface-2)', border: '1px solid var(--hairline-strong)' }}>
                   <input
@@ -450,9 +654,13 @@ export function SmartHomeView() {
             {available.map((p) => (
               <button
                 key={p.key}
-                onClick={() => openConnect(p)}
-                className="sm-card card card-hover p-4 flex flex-col text-left"
-                style={{ background: 'var(--surface-1)' }}
+                onClick={() => (p.authMode === 'oauth' && p.oauthConfigured ? void handleSignIn(p) : openConnect(p))}
+                disabled={p.authMode === 'oauth' && p.oauthConfigured && signingInKey === p.key}
+                className="sm-card card card-hover p-4 flex flex-col text-left disabled:opacity-60"
+                style={{ background: 'var(--surface-1)', cursor: p.authMode === 'oauth' && p.oauthConfigured ? 'pointer' : undefined }}
+                title={p.authMode === 'oauth'
+                  ? (p.oauthConfigured ? 'Sign in with the vendor' : 'Needs a registered OAuth app in backend/.env — click to paste a token instead')
+                  : undefined}
               >
                 <div className="flex items-center justify-between mb-3">
                   <div className="w-9 h-9 rounded-full flex items-center justify-center" style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline)' }}>
@@ -464,7 +672,11 @@ export function SmartHomeView() {
                 <p className="text-[11px] font-light mt-1 leading-snug" style={{ color: 'var(--text-dim)', display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
                   {p.help}
                 </p>
-                <span className="text-[10px] font-medium mt-auto pt-2" style={{ color: avatar.accent }}>Connect →</span>
+                <span className="text-[10px] font-medium mt-auto pt-2" style={{ color: avatar.accent }}>
+                  {p.authMode === 'oauth' && p.oauthConfigured
+                    ? (signingInKey === p.key ? 'Waiting for consent…' : `${p.oauthLabel || 'Sign in'} →`)
+                    : 'Connect →'}
+                </span>
               </button>
             ))}
           </div>
@@ -552,6 +764,235 @@ export function SmartHomeView() {
                 );
               })}
             </div>
+          </div>
+        )}
+
+        {/* ═══ ROUTINES ═══ */}
+        {connected.length > 0 && (
+          <div className="card mb-4" style={{ background: 'var(--surface-1)' }}>
+            <button
+              onClick={() => setShowSchedules((s) => !s)}
+              className="w-full flex items-center gap-2.5 px-4 py-3 text-left"
+              style={{ fontFamily: 'var(--font)', cursor: 'pointer' }}
+            >
+              {showSchedules
+                ? <ChevronDown size={13} style={{ color: 'var(--text-faint)' }} />
+                : <ChevronRight size={13} style={{ color: 'var(--text-faint)' }} />}
+              <Clock size={14} style={{ color: avatar.accent }} />
+              <span className="text-[11px] font-bold uppercase tracking-[0.18em]" style={{ color: 'var(--text-primary)' }}>
+                Routines
+              </span>
+              <span className="text-[10px] font-light" style={{ color: 'var(--text-faint)' }}>
+                {schedules.length === 0 ? 'none yet' : `${schedules.length} scheduled`}
+              </span>
+              {!showSchedules && schedules.length > 0 && (
+                <span className="text-[10px] font-light ml-auto truncate" style={{ color: 'var(--text-dim)' }}>
+                  {(() => {
+                    const soonest = schedules
+                      .map((s) => nextRunAt(s, now))
+                      .filter((d): d is Date => d !== null)
+                      .sort((a, b) => a.getTime() - b.getTime())[0];
+                    return soonest ? `next ${formatNextRun(soonest, now)}` : '';
+                  })()}
+                </span>
+              )}
+            </button>
+
+            {showSchedules && (
+              <div className="px-4 pb-4">
+                {schedules.length === 0 ? (
+                  <p className="text-xs font-light py-3" style={{ color: 'var(--text-dim)' }}>
+                    No routines yet. Create one to have Umbra switch a device on or off automatically.
+                  </p>
+                ) : (
+                  <div className="flex flex-col gap-1.5 mb-3">
+                    {schedules.map((s) => {
+                      const next = nextRunAt(s, now);
+                      const device = devices.find((d) => d.id === s.deviceId);
+                      return (
+                        <div
+                          key={s.id}
+                          className="flex items-center gap-3 rounded-lg px-3 py-2.5"
+                          style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline)' }}
+                        >
+                          <span
+                            className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0"
+                            style={{
+                              background: s.command === 'on' ? `${avatar.accent}1c` : 'var(--surface-3)',
+                              border: `1px solid ${s.command === 'on' ? `${avatar.accent}44` : 'var(--hairline-strong)'}`,
+                            }}
+                          >
+                            <Power size={12} style={{ color: s.command === 'on' ? avatar.accent : 'var(--text-faint)' }} />
+                          </span>
+
+                          <div className="min-w-0 flex-1">
+                            <p className="text-xs font-medium truncate" style={{ color: 'var(--text-primary)' }}>
+                              {s.deviceName} <span style={{ color: 'var(--text-faint)' }}>{s.command}</span>
+                            </p>
+                            <p className="text-[10px] font-light truncate mt-0.5" style={{ color: 'var(--text-dim)' }}>
+                              {formatCadence(s)}
+                              {device ? ` · ${device.platformLabel}` : ''}
+                            </p>
+                          </div>
+
+                          <div className="text-right flex-shrink-0">
+                            <p className="text-[11px] font-medium" style={{ color: next ? avatar.accent : 'var(--text-faint)' }}>
+                              {next ? formatNextRun(next, now) : 'paused'}
+                            </p>
+                            {next && (
+                              <p className="text-[10px] font-light" style={{ color: 'var(--text-faint)' }}>
+                                in {formatCountdown(next.getTime() - now)}
+                              </p>
+                            )}
+                          </div>
+
+                          <button
+                            onClick={() => void handleCancelSchedule(s.id)}
+                            disabled={cancellingId === s.id}
+                            title="Cancel routine"
+                            className="flex-shrink-0 rounded-lg p-1.5"
+                            style={{
+                              background: 'transparent',
+                              color: 'var(--text-faint)',
+                              border: '1px solid var(--hairline)',
+                              cursor: cancellingId === s.id ? 'default' : 'pointer',
+                              opacity: cancellingId === s.id ? 0.5 : 1,
+                            }}
+                          >
+                            {cancellingId === s.id
+                              ? <Loader2 size={12} className="animate-spin" />
+                              : <Trash2 size={12} />}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* ── Create form ── */}
+                {!showScheduleForm ? (
+                  <button
+                    onClick={() => setShowScheduleForm(true)}
+                    disabled={schedulableDevices.length === 0}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-[11px] font-medium"
+                    style={{
+                      background: `${avatar.accent}1c`,
+                      color: avatar.accent,
+                      border: `1px solid ${avatar.accent}44`,
+                      fontFamily: 'var(--font)',
+                      cursor: schedulableDevices.length === 0 ? 'default' : 'pointer',
+                      opacity: schedulableDevices.length === 0 ? 0.5 : 1,
+                    }}
+                  >
+                    <Plus size={12} /> New routine
+                  </button>
+                ) : (
+                  <div
+                    className="rounded-lg p-3.5 flex flex-col gap-2.5"
+                    style={{ background: 'var(--surface-2)', border: `1px solid ${avatar.accent}33` }}
+                  >
+                    <select
+                      value={schedForm.deviceId}
+                      onChange={(e) => setSchedForm((f) => ({ ...f, deviceId: e.target.value }))}
+                      className="w-full rounded-lg px-2.5 py-2 text-xs"
+                      style={{ background: 'var(--surface-1)', color: 'var(--text-primary)', border: '1px solid var(--hairline-strong)', fontFamily: 'var(--font)' }}
+                    >
+                      <option value="">Select a device…</option>
+                      {schedulableDevices.map((d) => (
+                        <option key={d.id} value={d.id}>{d.name} — {d.platformLabel}</option>
+                      ))}
+                    </select>
+
+                    <div className="flex flex-wrap gap-2">
+                      <div className="flex rounded-lg overflow-hidden" style={{ border: '1px solid var(--hairline-strong)' }}>
+                        {(['on', 'off'] as const).map((c) => (
+                          <button
+                            key={c}
+                            onClick={() => setSchedForm((f) => ({ ...f, command: c }))}
+                            className="px-3 py-1.5 text-[11px] font-medium"
+                            style={{
+                              background: schedForm.command === c ? `${avatar.accent}1c` : 'transparent',
+                              color: schedForm.command === c ? avatar.accent : 'var(--text-faint)',
+                              fontFamily: 'var(--font)',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            Turn {c}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="flex rounded-lg overflow-hidden" style={{ border: '1px solid var(--hairline-strong)' }}>
+                        {([['at', 'Daily'], ['everyMinutes', 'Interval']] as const).map(([k, label]) => (
+                          <button
+                            key={k}
+                            onClick={() => setSchedForm((f) => ({ ...f, kind: k }))}
+                            className="px-3 py-1.5 text-[11px] font-medium"
+                            style={{
+                              background: schedForm.kind === k ? `${avatar.accent}1c` : 'transparent',
+                              color: schedForm.kind === k ? avatar.accent : 'var(--text-faint)',
+                              fontFamily: 'var(--font)',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+
+                      {schedForm.kind === 'at' ? (
+                        <input
+                          type="time"
+                          value={schedForm.at}
+                          onChange={(e) => setSchedForm((f) => ({ ...f, at: e.target.value }))}
+                          className="rounded-lg px-2.5 py-1.5 text-[11px]"
+                          style={{ background: 'var(--surface-1)', color: 'var(--text-primary)', border: '1px solid var(--hairline-strong)', fontFamily: 'var(--font)' }}
+                        />
+                      ) : (
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[11px] font-light" style={{ color: 'var(--text-faint)' }}>every</span>
+                          <input
+                            type="number"
+                            min={1}
+                            value={schedForm.everyMinutes}
+                            onChange={(e) => setSchedForm((f) => ({ ...f, everyMinutes: Math.max(1, Number(e.target.value) || 1) }))}
+                            className="rounded-lg px-2 py-1.5 text-[11px] w-16"
+                            style={{ background: 'var(--surface-1)', color: 'var(--text-primary)', border: '1px solid var(--hairline-strong)', fontFamily: 'var(--font)' }}
+                          />
+                          <span className="text-[11px] font-light" style={{ color: 'var(--text-faint)' }}>min</span>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => void handleAddSchedule()}
+                        disabled={addingSchedule}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium"
+                        style={{
+                          background: 'var(--accent-gradient)',
+                          color: '#fff',
+                          border: 'none',
+                          fontFamily: 'var(--font)',
+                          cursor: addingSchedule ? 'wait' : 'pointer',
+                          opacity: addingSchedule ? 0.7 : 1,
+                        }}
+                      >
+                        {addingSchedule && <Loader2 size={11} className="animate-spin" />}
+                        Create routine
+                      </button>
+                      <button
+                        onClick={() => setShowScheduleForm(false)}
+                        className="px-3 py-1.5 rounded-lg text-[11px] font-medium"
+                        style={{ background: 'transparent', color: 'var(--text-faint)', border: '1px solid var(--hairline-strong)', fontFamily: 'var(--font)', cursor: 'pointer' }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 

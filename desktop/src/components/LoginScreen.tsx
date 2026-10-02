@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { useAppStore } from '../stores/appStore';
-import { resetPassword } from '../lib/auth';
+import { resetPassword, supabaseConfigured } from '../lib/auth';
 
 type Mode = 'signin' | 'signup';
 
@@ -69,7 +69,7 @@ const DOT_FRAG = `
 `;
 
 export function LoginScreen() {
-  const { login, signup, isAuthReady } = useAppStore();
+  const { login, signup, loginWithGoogle, isAuthReady } = useAppStore();
   const [mode, setMode] = useState<Mode>('signin');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -303,6 +303,18 @@ export function LoginScreen() {
 
   const socialNotReady = () => setError('Social sign-in isn’t configured yet — use email instead.');
 
+  const handleGoogle = async () => {
+    setError('');
+    setInfo('Opening Google in your browser — finish signing in there, then come back to Umbra.');
+    setIsLoading(true);
+    const res = await loginWithGoogle();
+    setIsLoading(false);
+    if (!res.ok) {
+      setInfo('');
+      setError(res.error ?? 'Google sign-in failed.');
+    }
+  };
+
   if (!isAuthReady) {
     return (
       <div className="fixed inset-0 flex items-center justify-center" style={{ background: '#000' }}>
@@ -391,6 +403,12 @@ export function LoginScreen() {
       <span style={{ color: '#888' }}>Terms of Service</span> and <span style={{ color: '#888' }}>Privacy Policy</span>.
     </div>
   );
+
+  const configWarning = !supabaseConfigured ? (
+    <p style={{ fontSize: '0.8rem', color: '#FFB74D', textAlign: 'center', minHeight: 18, marginBottom: 6 }}>
+      Cloud login is not configured — set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in desktop/.env and restart.
+    </p>
+  ) : null;
 
   const statusLine = error || info ? (
     <p style={{ fontSize: '0.8rem', color: error ? '#FF6B6B' : '#81C784', textAlign: 'center', minHeight: 18, marginBottom: 0 }}>
@@ -485,6 +503,7 @@ export function LoginScreen() {
                 placeholder="Password"
                 required
               />
+              {configWarning}
               {statusLine}
               {CTA}
             </form>
@@ -495,7 +514,7 @@ export function LoginScreen() {
 
             <div style={{ height: 1, background: '#222', width: '100%', margin: '0.85rem 0' }} />
 
-            <button type="button" onClick={socialNotReady} style={socialBtn}>
+            <button type="button" onClick={() => void handleGoogle()} disabled={isLoading} style={socialBtn}>
               {GoogleIcon}Continue with Google
             </button>
             <button type="button" onClick={socialNotReady} style={socialBtn}>
@@ -544,13 +563,14 @@ export function LoginScreen() {
                 placeholder="Password"
                 required
               />
+              {configWarning}
               {statusLine}
               {CTA}
             </form>
 
             <div style={{ height: 1, background: '#222', width: '100%', margin: '0.85rem 0' }} />
 
-            <button type="button" onClick={socialNotReady} style={socialBtn}>
+            <button type="button" onClick={() => void handleGoogle()} disabled={isLoading} style={socialBtn}>
               {GoogleIcon}Sign up with Google
             </button>
             <button type="button" onClick={socialNotReady} style={socialBtn}>

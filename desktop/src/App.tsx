@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import gsap from 'gsap';
 import { useAppStore } from './stores/appStore';
 import { LoginScreen } from './components/LoginScreen';
+import { CodeVerificationScreen } from './components/CodeVerificationScreen';
 import { OnboardingScreen } from './components/OnboardingScreen';
 import { TitleBar } from './components/TitleBar';
 import { Sidebar } from './components/Sidebar';
@@ -59,7 +60,7 @@ function ViewRenderer() {
 }
 
 export default function App() {
-  const { isAuthenticated, isOnboarded, isAuthReady, currentView, initializeAuth, connectBackend } = useAppStore();
+  const { isAuthenticated, isOnboarded, isAuthReady, emailVerified, currentView, initializeAuth, connectBackend, disconnectBackend } = useAppStore();
 
   useEffect(() => {
     void initializeAuth();
@@ -67,7 +68,10 @@ export default function App() {
 
   useEffect(() => {
     connectBackend();
-  }, [connectBackend]);
+    return () => {
+      disconnectBackend?.();
+    };
+  }, [connectBackend, disconnectBackend]);
 
   if (!isAuthReady) {
     return (
@@ -82,6 +86,10 @@ export default function App() {
 
   if (!isAuthenticated) {
     return <LoginScreen />;
+  }
+
+  if (!emailVerified) {
+    return <CodeVerificationScreen />;
   }
 
   if (!isOnboarded) {
