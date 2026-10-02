@@ -51,9 +51,19 @@ export class CdpSession {
       const ws = new WebSocket(this.wsUrl, { perMessageDeflate: false, maxPayload: 256 * 1024 * 1024 });
       this.ws = ws;
 
+      // Closing/terminating a CONNECTING socket makes `ws` abort the handshake
+      // and emit 'error' — via process.nextTick (ws 8.x abortHandshake), i.e.
+      // after the try/catch below and after cleanup() removed onError. An
+      // 'error' event with no listener escalates to uncaughtException and
+      // kills the process, so a no-op listener stays attached for the
+      // socket's whole life; onError (below) handles the connect phase.
+      const swallow = (): void => {};
+      ws.on('error', swallow);
+
       const timer = setTimeout(() => {
         cleanup();
-        try { ws.close(); } catch { /* already closing */ }
+        try { ws.terminate(); } catch { /* already closed */ }
+        if (this.ws === ws) this.ws = null;
         reject(new Error(`CDP connect timeout after ${this.callTimeoutMs}ms`));
       }, this.callTimeoutMs);
 
@@ -130,6 +140,9 @@ export class CdpSession {
   close(): void {
     this.failPending(new Error('CDP session closed'));
     if (this.ws) {
+      // Safe in any readyState: connect() keeps a no-op 'error' listener
+      // attached, so the handshake-abort emission from closing a CONNECTING
+      // socket is handled instead of crashing the process on the next tick.
       try { this.ws.close(); } catch { /* already closing */ }
       this.ws = null;
     }
