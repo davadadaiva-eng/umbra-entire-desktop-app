@@ -984,6 +984,14 @@ export class UmbraOS {
     try {
       this.toolIngestion = new ToolIngestion(path.join(config.paths.dataDir, 'connectors.db'));
       this.toolIngestion.loadCurated();
+      // Generic fallback: every catalog entry gets a `call_api` definition so
+      // the whole catalog (3,892 entries) is discoverable AND executable, not
+      // just the curated/OpenAPI-covered subset. Idempotent (skips indexed).
+      try {
+        this.toolIngestion.seedGenericTools(MCP_CATALOG as never);
+      } catch (seedErr) {
+        getLogger().warn({ err: (seedErr as Error).message }, 'Generic tool seeding skipped');
+      }
       this.toolVectorRegistry = new VectorToolRegistry(
         path.join(config.paths.dataDir, 'tool-vectors.db'),
       );

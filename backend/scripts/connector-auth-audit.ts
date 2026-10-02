@@ -9,6 +9,7 @@
 import { MCP_CATALOG, findCatalogEntry } from '../src/core/mcp/McpCatalog';
 import { OAuthConnector, hasKnownOAuthProvider, oauthProviderSlugFor } from '../src/core/mcp/OAuthConnector';
 import { curatedConnectorForCatalogId } from '../src/core/mcp/curatedTools';
+import { resolveBaseUrlFor } from '../src/core/mcp/curatedTools';
 
 const oauth = new OAuthConnector();
 
@@ -17,7 +18,13 @@ type State = 'ready' | 'needs_key' | 'needs_oauth_app' | 'needs_setup';
 function classify(id: string): State {
   const entry = findCatalogEntry(id);
   const key = entry?.credentialKey || id;
-  const hasBaseUrl = Boolean((entry?.baseUrl && entry.baseUrl.trim()) || curatedConnectorForCatalogId(id));
+  // Generic fallback counts: catalog baseUrl, curated schema, or the
+  // well-known allowlist (same chain the executor routes through).
+  const hasBaseUrl = Boolean(
+    (entry?.baseUrl && entry.baseUrl.trim())
+    || curatedConnectorForCatalogId(id)
+    || resolveBaseUrlFor(id),
+  );
 
   if (entry?.authType === 'none') return 'ready';
   if (entry?.authType === 'oauth') return hasKnownOAuthProvider(key) ? 'needs_oauth_app' : 'needs_setup';
@@ -56,6 +63,11 @@ function main(): void {
   console.log('  needs an API key:       ', counts.needs_key);
   console.log('  needs an OAuth app:     ', counts.needs_oauth_app);
   console.log('  needs setup (no spec):  ', counts.needs_setup);
+  console.log('');
+  console.log('Generic fallback: every entry resolves a generic `call_api` tool');
+  console.log('  (ensureConnectorTools / boot seeding). Entries with a base URL');
+  console.log('  execute via baseUrl + endpoint; the rest accept a full https://');
+  console.log('  URL as endpoint. CALLABLE after connect: all', MCP_CATALOG.length);
   console.log('');
   console.log('Connectors with curated tools: ', curated.length);
 

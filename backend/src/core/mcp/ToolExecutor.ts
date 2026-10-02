@@ -32,6 +32,7 @@ import { ConnectorStore } from './ConnectorStore';
 import { MCP_CATALOG, findCatalogEntry } from './McpCatalog';
 import { ToolDefinition, validateToolArgs } from './ToolDefinition';
 import { curatedConnectorForCatalogId } from './curatedTools';
+import { resolveBaseUrlFor } from './curatedTools';
 import { InjectionGuard } from '../agent/InjectionGuard';
 import { getLogger } from '../Logger';
 
@@ -103,7 +104,8 @@ const TOKEN_ENDPOINTS: Record<string, string> = {
 };
 
 // Well-known base URLs (explicit allowlist — no domain guessing).
-const KNOWN_BASE_URLS: Record<string, string> = {
+// NOTE: keep in sync with GENERIC_BASE_URLS in curatedTools.ts.
+export const KNOWN_BASE_URLS: Record<string, string> = {
   gmail: 'https://gmail.googleapis.com',
   'google-calendar': 'https://www.googleapis.com',
   'google-drive': 'https://www.googleapis.com',
@@ -124,6 +126,32 @@ const KNOWN_BASE_URLS: Record<string, string> = {
   onedrive: 'https://graph.microsoft.com',
   teams: 'https://graph.microsoft.com',
   'search-research-wikipedia': 'https://en.wikipedia.org',
+  // Extended public-API allowlist (mirrors GENERIC_BASE_URLS in curatedTools).
+  gitlab: 'https://gitlab.com/api/v4',
+  bitbucket: 'https://api.bitbucket.org/2.0',
+  jira: 'https://api.atlassian.com',
+  confluence: 'https://api.atlassian.com',
+  trello: 'https://api.trello.com/1',
+  asana: 'https://app.asana.com/api/1.0',
+  monday: 'https://api.monday.com/v2',
+  'monday-com': 'https://api.monday.com/v2',
+  clickup: 'https://api.clickup.com/api/v2',
+  todoist: 'https://api.todoist.com/api/v1',
+  telegram: 'https://api.telegram.org',
+  whatsapp: 'https://graph.facebook.com/v18.0',
+  zulip: 'https://api.zulip.com/v1',
+  webex: 'https://webexapis.com/v1',
+  box: 'https://api.box.com/2.0',
+  airtable: 'https://api.airtable.com/v0',
+  hubspot: 'https://api.hubapi.com',
+  openai: 'https://api.openai.com/v1',
+  anthropic: 'https://api.anthropic.com/v1',
+  shopify: 'https://api.shopify.com',
+  zoom: 'https://api.zoom.us/v2',
+  paypal: 'https://api-m.paypal.com/v1',
+  twilio: 'https://api.twilio.com/2010-04-01',
+  tiktok: 'https://open.tiktokapis.com/v2',
+  linkedin: 'https://api.linkedin.com/v2',
 };
 
 // ── ToolExecutor ────────────────────────────────────────────────────
@@ -343,11 +371,19 @@ export class ToolExecutor {
       }
     }
 
-    // 4. Resolve base URL — catalog, curated schema, or explicit allowlist.
-    //    NO domain guessing: unknown connectors fail with a feedable error.
+    // 4. Resolve base URL — catalog, curated schema, well-known allowlist
+    //    (suffix-matched, so `project-management-notion` finds `notion`),
+    //    or user-supplied override. NO domain guessing.
+    //    A full `https://…` endpoint always works even with no base URL —
+    //    the user supplies the target inline (used by name-only rows).
+    const isFullUrl = endpoint.startsWith('http://') || endpoint.startsWith('https://');
     const curated = curatedConnectorForCatalogId(connectorId);
-    const baseUrl = connector.baseUrl || curated?.baseUrl || KNOWN_BASE_URLS[connectorId] || '';
-    if (!baseUrl) {
+    const baseUrl = connector.baseUrl
+      || curated?.baseUrl
+      || KNOWN_BASE_URLS[connectorId]
+      || resolveBaseUrlFor(connectorId)
+      || '';
+    if (!baseUrl && !isFullUrl) {
       return {
         success: false,
         connector: connectorId,
@@ -358,10 +394,10 @@ export class ToolExecutor {
         data: null,
         error:
           `Connector "${connectorId}" has no API base URL configured. ` +
-          `Set baseUrl on the connector (Settings → Connectors) or use one of its schema-validated tools.`,
+          `Pass a full https:// URL as endpoint, set baseUrl on the connector (Settings → Connectors), or use one of its schema-validated tools.`,
       };
     }
-    const url = endpoint.startsWith('http') ? endpoint : `${baseUrl}${endpoint}`;
+    const url = isFullUrl ? endpoint : `${baseUrl}${endpoint}`;
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',

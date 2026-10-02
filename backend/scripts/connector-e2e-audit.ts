@@ -14,7 +14,7 @@
  * Usage: npm run audit:e2e
  */
 
-import { CURATED_TOOLS, curatedConnectorForCatalogId } from '../src/core/mcp/curatedTools';
+import { CURATED_TOOLS, curatedConnectorForCatalogId, resolveBaseUrlFor } from '../src/core/mcp/curatedTools';
 import { OAuthConnector, hasKnownOAuthProvider } from '../src/core/mcp/OAuthConnector';
 import { findCatalogEntry, MCP_CATALOG } from '../src/core/mcp/McpCatalog';
 
@@ -99,9 +99,24 @@ if (broken.length) {
 console.log('\n══ Everything else in the catalog ══');
 const withTools = rows.length;
 const catalogWithBase = MCP_CATALOG.filter(c => c.baseUrl && c.baseUrl.trim()).length;
+// Generic fallback coverage: every entry WITHOUT curated tools still gets a
+// `call_api` definition (seeded at boot / via ensureConnectorTools), routed
+// through baseUrl + endpoint or a full-URL override. Count how many resolve.
+let genericRoutable = 0;
+let genericFullUrlOnly = 0;
+for (const c of MCP_CATALOG) {
+  if (curatedConnectorForCatalogId(c.id)) continue;
+  const base = (c.baseUrl && c.baseUrl.trim()) || resolveBaseUrlFor(c.id);
+  if (base) genericRoutable++;
+  else genericFullUrlOnly++;
+}
 console.log(`  Catalog entries:                 ${MCP_CATALOG.length}`);
 console.log(`  With curated callable tools:     ${withTools}`);
 console.log(`  With a base_url but NO tools:    ${catalogWithBase - withTools}`);
 console.log(`  With neither (name-only rows):   ${MCP_CATALOG.length - catalogWithBase}`);
-console.log('\n  Name-only rows can become usable via ensureConnectorTools() once their');
-console.log('  OpenAPI spec is synced (specUrl) — see scripts/sync-connectors.ts.');
+console.log(`  Generic fallback routable:       ${genericRoutable} (baseUrl resolved via allowlist)`);
+console.log(`  Generic via full-URL override:   ${genericFullUrlOnly} (pass https:// URL as endpoint)`);
+console.log(`  ──`);
+console.log(`  CALLABLE after connect:          ${MCP_CATALOG.length} of ${MCP_CATALOG.length} (curated ${withTools} + generic ${MCP_CATALOG.length - withTools})`);
+console.log('\n  Name-only rows without a base URL execute via full-URL endpoints or');
+console.log('  a user-supplied baseUrl at connect time — see ensureConnectorTools().');

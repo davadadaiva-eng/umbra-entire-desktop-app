@@ -12,7 +12,7 @@ import { ToolRetriever, ConnectorTool } from './ToolRetriever';
 import { ToolExecutor, ToolResult, ToolExecutorOptions } from './ToolExecutor';
 import { AgentConnectorBridge, ConnectorAction, AgentConnectorResult } from '../agent/AgentConnectorBridge';
 import { OAuthConnector, OAuthClient, OAUTH_PROVIDERS, oauthProviderSlugFor } from './OAuthConnector';
-import { curatedConnectorForCatalogId } from './curatedTools';
+import { curatedConnectorForCatalogId, genericToolFor } from './curatedTools';
 import { MCP_CATALOG, findCatalogEntry, catalogByCategory, catalogCount, McpCatalogEntry } from './McpCatalog';
 import { getLogger } from '../Logger';
 
@@ -60,6 +60,7 @@ export class ConnectorApi {
     count(): number;
     deleteForConnector(connectorId: string): number;
     ingestOpenApi(connectorId: string, spec: unknown, opts?: Record<string, unknown>): number;
+    upsertDefinitions?(defs: ToolDefinition[]): number;
   };
 
   constructor(
@@ -74,6 +75,7 @@ export class ConnectorApi {
       count(): number;
       deleteForConnector(connectorId: string): number;
       ingestOpenApi(connectorId: string, spec: unknown, opts?: Record<string, unknown>): number;
+      upsertDefinitions?(defs: ToolDefinition[]): number;
     },
   ) {
     this.store = store;
@@ -331,7 +333,13 @@ export class ConnectorApi {
       (entry?.baseUrl && entry.baseUrl.trim()) || curatedConnectorForCatalogId(connectorId),
     );
     const toolCount = this.toolSchemas ? this.toolSchemas.getForConnector(connectorId).length : 0;
-    const hasTools = toolCount > 0 || Boolean(curatedConnectorForCatalogId(connectorId));
+    // A connector is callable when it has stored/curated definitions OR the
+    // generic REST path can route it (known base URL → `baseUrl + endpoint`;
+    // otherwise a full https:// URL works as endpoint override). The generic
+    // `call_api` fallback guarantees the first half for every entry.
+    const hasTools = toolCount > 0
+      || Boolean(curatedConnectorForCatalogId(connectorId))
+      || hasBaseUrl;
 
     const connection = this.store.getConnection(userId, connectorId);
     if (connection?.connectionStatus === 'connected') {
@@ -401,7 +409,7 @@ export class ConnectorApi {
     ingested: number;
     alreadyIndexed: boolean;
     baseUrl?: string;
-    source: 'curated' | 'spec' | 'none';
+    source: 'curated' | 'spec' | 'generic' | 'none';
   }> {
     const existing = this.toolSchemas?.getForConnector(connectorId) ?? [];
     if (existing.length > 0 && !opts.force) {
@@ -420,10 +428,31 @@ export class ConnectorApi {
 
     const specUrl = entry.specUrl;
     if (!specUrl) {
-      throw new Error(
-        `No tool schema or OpenAPI spec is known for "${entry.name}". ` +
-        `Add one at /api/connectors/ingest-openapi with a specUrl.`,
+      // No OpenAPI spec known — synthesize the generic `call_api` fallback so
+      // the connector is still discoverable AND executable (generic REST path:
+      // `baseUrl + endpoint`, or a full https:// URL override when no base
+      // URL is known yet). This is what makes every catalog entry callable.
+      const generic = genericToolFor({
+        id: connectorId,
+        name: entry.name,
+        category: entry.category,
+        baseUrl: entry.baseUrl || undefined,
+        authType: entry.authType,
+        credentialKey: entry.credentialKey,
+        apiKeyHeader: entry.apiKeyHeader,
+      });
+      const stored = this.toolSchemas.upsertDefinitions?.([generic]) ?? 0;
+      getLogger().info(
+        { connectorId, baseUrl: generic.base_url },
+        'Generic fallback tool ensured (no OpenAPI spec known)',
       );
+      return {
+        connectorId,
+        ingested: stored > 0 ? stored : 1,
+        alreadyIndexed: false,
+        baseUrl: generic.base_url,
+        source: 'generic',
+      };
     }
 
     const result = await this.ingestOpenApiSpec({

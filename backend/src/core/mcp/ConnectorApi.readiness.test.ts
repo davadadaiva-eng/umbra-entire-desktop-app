@@ -109,11 +109,22 @@ describe('ensureConnectorTools', () => {
     expect(r.baseUrl).toBe('https://gmail.googleapis.com');
   });
 
-  it('reports a clear error when a connector has neither tools nor a spec', async () => {
+  it('generates a generic fallback when a connector has neither tools nor a spec', async () => {
     // A real catalog entry with authType oauth but no curated tools and no
-    // specUrl — the honest error, not a silent no-op.
-    await expect(api.ensureConnectorTools('automotive-mobility-mercedes-benz'))
-      .rejects.toThrow(/No tool schema or OpenAPI spec/);
+    // specUrl — ensureConnectorTools synthesizes the generic `call_api`
+    // fallback instead of failing, so every connector stays callable.
+    const r = await api.ensureConnectorTools('automotive-mobility-mercedes-benz');
+    expect(r.alreadyIndexed).toBe(false);
+    expect(r.source).toBe('generic');
+    expect(r.ingested).toBeGreaterThan(0);
+
+    const tools = ingestionRead(api, 'automotive-mobility-mercedes-benz');
+    expect(tools.length).toBeGreaterThan(0);
+    expect(tools[0].name).toBe('call_api');
+
+    // Idempotent — second call short-circuits on the generic.
+    const again = await api.ensureConnectorTools('automotive-mobility-mercedes-benz');
+    expect(again.alreadyIndexed).toBe(true);
   });
 
   it('reports a clear error for an id that is not in the catalog', async () => {

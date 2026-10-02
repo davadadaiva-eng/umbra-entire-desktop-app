@@ -29,7 +29,7 @@ import {
   parseToolDefinition,
   makeToolId,
 } from './ToolDefinition';
-import { CURATED_TOOLS } from './curatedTools';
+import { CURATED_TOOLS, genericToolFor } from './curatedTools';
 
 // ── OpenAPI parsing types (structural subset — real specs are messy) ──
 
@@ -198,6 +198,47 @@ export class ToolIngestion {
   /** Load/refresh the curated tool set. Returns number stored. */
   loadCurated(): number {
     return this.upsertDefinitions(CURATED_TOOLS);
+  }
+
+  /**
+   * Seed the generic `call_api` fallback for every catalog entry that has no
+   * stored definitions yet. Idempotent — entries with tools are skipped
+   * (unless `force` re-seeds them). This is what makes the whole catalog
+   * callable: discovery finds ≥1 definition per connector and the executor's
+   * generic REST path routes the call.
+   *
+   * Returns { seeded, skipped }.
+   */
+  seedGenericTools(
+    entries: Array<{
+      id: string; name: string; category: string; baseUrl?: string;
+      authType?: ToolDefinition['auth_type']; credentialKey?: string; apiKeyHeader?: string;
+    }>,
+    opts: { force?: boolean } = {},
+  ): { seeded: number; skipped: number } {
+    let seeded = 0;
+    let skipped = 0;
+    const batch: ToolDefinition[] = [];
+    for (const e of entries) {
+      if (!opts.force && this.getForConnector(e.id).length > 0) { skipped++; continue; }
+      try {
+        batch.push(genericToolFor({
+          id: e.id,
+          name: e.name,
+          category: e.category,
+          baseUrl: e.baseUrl || undefined,
+          authType: e.authType,
+          credentialKey: e.credentialKey,
+          apiKeyHeader: e.apiKeyHeader,
+        }));
+        seeded++;
+      } catch {
+        skipped++;
+      }
+    }
+    if (batch.length) this.upsertDefinitions(batch);
+    getLogger().info({ seeded, skipped }, 'Generic fallback tools seeded');
+    return { seeded, skipped };
   }
 
   // ── Source 2: OpenAPI / Swagger ───────────────────────────────────

@@ -16,7 +16,7 @@
  * and validation enforces their presence before any request is built.
  */
 
-import { ToolDefinition, JsonSchemaObject, makeToolId } from './ToolDefinition';
+import { ToolDefinition, JsonSchemaObject, JsonSchemaProperty, makeToolId } from './ToolDefinition';
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -707,4 +707,159 @@ export function curatedConnectorCount(): number {
 
 export function curatedToolCount(): number {
   return CURATED_TOOLS.length;
+}
+
+// ── Generic fallback (makes EVERY catalog connector callable) ─────────
+
+/** Tool name for the synthesized generic fallback. */
+export const GENERIC_TOOL_NAME = 'call_api';
+
+/**
+ * Well-known public API base URLs for top connectors whose catalog rows
+ * intentionally carry no baseUrl (user-supplied/self-hosted by default).
+ * Mirrors the executor's allowlist so discovery and execution agree.
+ * NOTE: keep in sync with KNOWN_BASE_URLS in ToolExecutor.ts.
+ */
+const GENERIC_BASE_URLS: Record<string, string> = {
+  gitlab: 'https://gitlab.com/api/v4',
+  bitbucket: 'https://api.bitbucket.org/2.0',
+  sourcegraph: 'https://sourcegraph.com/.api',
+  notion: 'https://api.notion.com/v1',
+  linear: 'https://api.linear.app/graphql',
+  jira: 'https://api.atlassian.com',
+  confluence: 'https://api.atlassian.com',
+  trello: 'https://api.trello.com/1',
+  asana: 'https://app.asana.com/api/1.0',
+  monday: 'https://api.monday.com/v2',
+  'monday-com': 'https://api.monday.com/v2',
+  clickup: 'https://api.clickup.com/api/v2',
+  todoist: 'https://api.todoist.com/api/v1',
+  telegram: 'https://api.telegram.org',
+  whatsapp: 'https://graph.facebook.com/v18.0',
+  mattermost: 'https://api.mattermost.com',
+  zulip: 'https://api.zulip.com/v1',
+  webex: 'https://webexapis.com/v1',
+  'google-drive': 'https://www.googleapis.com',
+  'google-calendar': 'https://www.googleapis.com',
+  'google-docs': 'https://docs.googleapis.com',
+  'google-sheets': 'https://sheets.googleapis.com',
+  onedrive: 'https://graph.microsoft.com/v1.0',
+  teams: 'https://graph.microsoft.com/v1.0',
+  dropbox: 'https://api.dropboxapi.com/2',
+  box: 'https://api.box.com/2.0',
+  airtable: 'https://api.airtable.com/v0',
+  hubspot: 'https://api.hubapi.com',
+  salesforce: 'https://api.salesforce.com',
+  zendesk: 'https://api.zendesk.com/api/v2',
+  intercom: 'https://api.intercom.io',
+  mailchimp: 'https://api.mailchimp.com/3.0',
+  sendgrid: 'https://api.sendgrid.com/v3',
+  openai: 'https://api.openai.com/v1',
+  anthropic: 'https://api.anthropic.com/v1',
+  'hugging-face': 'https://api-inference.huggingface.co',
+  huggingface: 'https://api-inference.huggingface.co',
+  pinecone: 'https://api.pinecone.io',
+  shopify: 'https://api.shopify.com',
+  zoom: 'https://api.zoom.us/v2',
+  youtube: 'https://www.googleapis.com/youtube/v3',
+  tiktok: 'https://open.tiktokapis.com/v2',
+  linkedin: 'https://api.linkedin.com/v2',
+  instagram: 'https://graph.instagram.com',
+  facebook: 'https://graph.facebook.com/v18.0',
+  reddit: 'https://oauth.reddit.com',
+  twitch: 'https://api.twitch.tv/helix',
+  paypal: 'https://api-m.paypal.com/v1',
+  square: 'https://connect.squareup.com/v2',
+  plaid: 'https://production.plaid.com',
+  twilio: 'https://api.twilio.com/2010-04-01',
+  sendinblue: 'https://api.sendinblue.com/v3',
+  elasticsearch: 'https://api.elastic.co',
+  datadog: 'https://api.datadoghq.com/api/v1',
+  pagerduty: 'https://api.pagerduty.com',
+  opsgenie: 'https://api.opsgenie.com/v2',
+  newrelic: 'https://api.newrelic.com/v2',
+  weather: 'https://api.openweathermap.org/data/2.5',
+};
+
+/**
+ * Resolve the best-known base URL for a catalog connector id:
+ * curated schema → generic allowlist (suffix match) → undefined.
+ * Never throws; undefined means "user must supply baseUrl or full URL".
+ */
+export function resolveBaseUrlFor(catalogId: string): string | undefined {
+  const curated = curatedConnectorForCatalogId(catalogId);
+  if (curated?.baseUrl) return curated.baseUrl;
+  const parts = catalogId.split('-');
+  for (let i = 0; i < parts.length; i++) {
+    const candidate = parts.slice(i).join('-');
+    const hit = GENERIC_BASE_URLS[candidate];
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+export interface GenericEntry {
+  id: string;
+  name: string;
+  category: string;
+  baseUrl?: string;
+  authType?: ToolDefinition['auth_type'];
+  credentialKey?: string;
+  apiKeyHeader?: string;
+}
+
+/**
+ * Build the generic `call_api` fallback ToolDefinition for any catalog
+ * connector. Guarantees every catalog entry is discoverable AND executable:
+ *   - discovery: retrieval always finds ≥1 definition per connector,
+ *   - execution: the legacy generic REST path routes
+ *     `baseUrl + endpoint` (or a full `https://…` endpoint override when no
+ *     base URL is known yet).
+ *
+ * Schema quality is `generic` so retrieval prefers curated/openapi tools.
+ */
+export function genericToolFor(entry: GenericEntry): ToolDefinition {
+  const baseUrl = (entry.baseUrl && entry.baseUrl.trim()) || resolveBaseUrlFor(entry.id);
+  const def: ToolDefinition = {
+    tool_id: makeToolId(entry.id, GENERIC_TOOL_NAME),
+    connector_id: entry.id,
+    name: GENERIC_TOOL_NAME,
+    natural_language_description:
+      `Generic API call to ${entry.name} (${entry.category}). ` +
+      `Pass endpoint like "/v1/items" with method GET/POST/PUT/PATCH/DELETE; ` +
+      `extra fields become query params (GET/DELETE) or JSON body. ` +
+      `A full https:// URL works as endpoint when no base URL is configured.`,
+    category: entry.category || 'Other',
+    parameters_schema: {
+      type: 'object',
+      properties: {
+        endpoint: {
+          type: 'string',
+          description: 'API path (e.g. "/v1/items") or full https:// URL override.',
+        },
+        method: {
+          type: 'string',
+          description: 'HTTP method.',
+          enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+          default: 'GET',
+        } as JsonSchemaProperty,
+        payload: {
+          type: 'object',
+          description: 'Optional query params (GET/DELETE) or JSON body (POST/PUT/PATCH).',
+        } as JsonSchemaProperty,
+      },
+      required: ['endpoint'],
+      additionalProperties: true,
+    },
+    auth_type: entry.authType ?? 'none',
+    transport: 'rest',
+    endpoint_template: '/',
+    http_method: 'POST',
+    schema_quality: 'generic',
+    source: 'generic',
+  };
+  if (baseUrl) def.base_url = baseUrl;
+  if (entry.credentialKey) def.credential_service = entry.credentialKey;
+  if (entry.apiKeyHeader) def.api_key_header = entry.apiKeyHeader;
+  return def;
 }

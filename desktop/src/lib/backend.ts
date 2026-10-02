@@ -1155,13 +1155,14 @@ export interface EnsureToolsResult {
   ingested: number;
   alreadyIndexed: boolean;
   baseUrl?: string;
-  source: 'curated' | 'spec' | 'none';
+  source: 'curated' | 'spec' | 'generic' | 'none';
 }
 
 // POST /api/connectors/:id/ensure-tools — one-click enable for name-only
 // catalog rows. Ingests the connector's known OpenAPI spec when it has no
-// tools yet (idempotent — short-circuits when already indexed); the backend
-// refreshes the vector registry without a restart.
+// tools yet, otherwise synthesizes the generic `call_api` fallback so every
+// connector stays callable (idempotent — short-circuits when already indexed);
+// the backend refreshes the vector registry without a restart.
 export const ensureConnectorTools = (id: string, opts?: { force?: boolean }) =>
   backendFetch<{ result: EnsureToolsResult }>(`/api/connectors/${encodeURIComponent(id)}/ensure-tools`, {
     method: 'POST',
