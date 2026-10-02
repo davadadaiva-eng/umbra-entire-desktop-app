@@ -19,109 +19,16 @@
  * identically; device ids are namespaced as `<key>:<nativeId>` upstream.
  */
 
-import { HttpBridge } from '../agent/HttpBridge';
 import { getLogger } from '../Logger';
 import type { SwitchCommand } from './SmartThingsService';
 import type { SmartHomePlatform, SmartHomeDeviceV2 } from './SmartHomePlatform';
+import { GoogleSdmAdapter } from './GoogleSdmAdapter';
+import { SMART_HOME_OAUTH } from './SmartHomeOAuth';
+import { TokenPlatformAdapter } from './TokenPlatformAdapter';
+// Re-exported so existing importers (and the type position
+// `ConstructorParameters<typeof TokenPlatformAdapter>`) keep working.
+export { TokenPlatformAdapter };
 
-/** Shared token-adapter base — persisted via the Umbra credential vault. */
-export abstract class TokenPlatformAdapter implements SmartHomePlatform {
-  abstract readonly key: string;
-  abstract readonly label: string;
-  abstract readonly help: string;
-  readonly credentialsUrl?: string;
-  lastError?: string;
-
-  protected token = '';
-  protected baseUrl = '';
-
-  constructor(
-    protected vault?: { find(s: string): { secret: string } | undefined; set(e: { service: string; username: string; secret: string }, id?: string): unknown; remove(s: string): boolean; isUnlocked: boolean },
-    protected vaultKey?: string,
-  ) {
-    this.token = this.loadToken();
-  }
-
-  protected loadToken(): string {
-    try {
-      return this.vault?.find(this.vaultKey || this.key)?.secret?.trim() || '';
-    } catch {
-      return '';
-    }
-  }
-
-  isConfigured(): boolean {
-    return Boolean(this.token);
-  }
-
-  getMaskedToken(): string {
-    if (!this.token) return '';
-    return this.token.length <= 8 ? '••••' : `${this.token.slice(0, 4)}••••${this.token.slice(-4)}`;
-  }
-
-  async setToken(token: string, url?: string): Promise<{ ok: boolean; deviceCount?: number; tokenMasked?: string }> {
-    const t = token.trim();
-    if (!t) throw new Error('token is required');
-    if (url?.trim()) this.baseUrl = url.trim().replace(/\/+$/, '');
-    const prev = this.token;
-    const prevUrl = this.baseUrl;
-    this.token = t;
-    try {
-      const devices = await this.getDevices({ withStates: false });
-      if (this.vault?.isUnlocked) {
-        this.vault.set({ service: this.vaultKey || this.key, username: 'pat', secret: t });
-      }
-      this.lastError = undefined;
-      return { ok: true, deviceCount: devices.length, tokenMasked: this.getMaskedToken() };
-    } catch (e) {
-      this.token = prev;
-      this.baseUrl = prevUrl;
-      throw e;
-    }
-  }
-
-  async clearToken(): Promise<void> {
-    try {
-      if (this.vault?.isUnlocked) this.vault.remove(this.vaultKey || this.key);
-    } catch { /* ignore */ }
-    this.token = '';
-  }
-
-  /** curl-backed HTTP via HttpBridge (bypasses Node v24 TLS quirks). */
-  protected async request<T>(method: 'GET' | 'POST' | 'PUT', url: string, opts?: { headers?: Record<string, string>; body?: unknown; timeoutMs?: number }): Promise<T> {
-    let res;
-    try {
-      res = await HttpBridge.request({
-        url,
-        method,
-        headers: opts?.headers || {},
-        body: opts?.body,
-        timeoutMs: opts?.timeoutMs ?? 15000,
-      });
-    } catch (e) {
-      const host = new URL(url).host;
-      throw new Error(`Could not reach ${host} — check the server URL and that the hub is online (${String((e as Error).message || '').split('\n')[0].slice(0, 140)})`);
-    }
-    if (res.status < 200 || res.status >= 300) {
-      throw new Error(this.humanizeHttpError(res.status, res.text || `HTTP ${res.status}`));
-    }
-    try {
-      return (res.text ? JSON.parse(res.text) : {}) as T;
-    } catch {
-      return res.text as unknown as T;
-    }
-  }
-
-  protected humanizeHttpError(status: number, raw: string): string {
-    if (status === 401) return `Token rejected (401) — regenerate at ${this.credentialsUrl || 'the vendor console'}`;
-    if (status === 403) return `Token missing scope/permission (403) — recreate with required scopes`;
-    if (status === 404) return `Endpoint not found (404) — check the base URL`;
-    return raw;
-  }
-
-  abstract getDevices(opts?: { withStates?: boolean }): Promise<SmartHomeDeviceV2[]>;
-  abstract sendCommand(nativeId: string, command: SwitchCommand): Promise<void>;
-}
 
 // ── SmartThings ──────────────────────────────────────────────────
 
@@ -139,6 +46,8 @@ export class SmartThingsAdapter extends TokenPlatformAdapter {
   readonly label = 'Samsung SmartThings';
   readonly help = 'Create a personal access token with Devices (Read + Control) and Rooms (Read) scopes.';
   readonly credentialsUrl = 'https://account.smartthings.com/tokens';
+  /** Cloud platform — supports "Sign in with SmartThings" when an OAuth app is registered. */
+  protected override oauth = SMART_HOME_OAUTH['smartthings'];
 
   constructor(vault?: ConstructorParameters<typeof TokenPlatformAdapter>[0]) {
     super(vault, 'smartthings');
@@ -152,7 +61,7 @@ export class SmartThingsAdapter extends TokenPlatformAdapter {
 
   async getDevices(opts?: { withStates?: boolean }): Promise<SmartHomeDeviceV2[]> {
     const page = await this.request<{ items?: StDevice[] }>('GET', `${this.baseUrl}/v1/devices?max=200`, {
-      headers: { Authorization: `Bearer ${this.token}` },
+      headers: { Authorization: await this.authHeader() },
     });
     const devices = (page.items || []).map((d) => this.normalize(d));
     if (opts?.withStates) {
@@ -169,7 +78,7 @@ export class SmartThingsAdapter extends TokenPlatformAdapter {
 
   async sendCommand(nativeId: string, command: SwitchCommand): Promise<void> {
     await this.request('POST', `${this.baseUrl}/v1/devices/${encodeURIComponent(nativeId)}/commands`, {
-      headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: await this.authHeader(), 'Content-Type': 'application/json' },
       body: { commands: [{ component: 'main', capability: 'switch', command, arguments: [] }] },
     });
     getLogger().info({ platform: this.key, nativeId, command }, 'SmartThingsAdapter: command sent');
@@ -207,7 +116,7 @@ export class SmartThingsAdapter extends TokenPlatformAdapter {
       const st = await this.request<{ switch?: { value?: unknown } }>(
         'GET',
         `${this.baseUrl}/v1/devices/${encodeURIComponent(nativeId)}/components/main/status`,
-        { headers: { Authorization: `Bearer ${this.token}` } },
+        { headers: { Authorization: await this.authHeader() } },
       );
       const v = st?.switch?.value;
       if (v === 'on' || v === true) return 'on';
@@ -331,7 +240,7 @@ export class OpenhabAdapter extends TokenPlatformAdapter {
     const items = await this.request<OpenhabItem[]>(
       'GET',
       `${this.baseUrl}/rest/items?tags=Switchable`,
-      this.auth(),
+      await this.auth(),
     );
     return (items || [])
       .filter((i) => i.type === 'Switch' || i.type === 'Dimmer' || i.type === 'Group')
@@ -352,16 +261,16 @@ export class OpenhabAdapter extends TokenPlatformAdapter {
 
   async sendCommand(nativeId: string, command: SwitchCommand): Promise<void> {
     await this.request('POST', `${this.baseUrl}/rest/items/${encodeURIComponent(nativeId)}`, {
-      ...this.auth(),
-      headers: { ...(this.auth().headers || {}), 'Content-Type': 'text/plain' },
+      headers: { ...(await this.auth()).headers, 'Content-Type': 'text/plain' },
       body: command === 'on' ? 'ON' : 'OFF',
     });
     getLogger().info({ platform: this.key, nativeId, command }, 'OpenhabAdapter: command sent');
   }
 
-  private auth(): { headers: Record<string, string> } {
+  private async auth(): Promise<{ headers: Record<string, string> }> {
     const headers: Record<string, string> = {};
-    if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    const auth = await this.authHeader();
+    if (auth) headers.Authorization = auth;
     return { headers };
   }
 }
@@ -409,7 +318,7 @@ export class TuyaAdapter extends TokenPlatformAdapter {
     const res = await this.request<{ result?: { list?: TuyaDevice[] } }>(
       'GET',
       `${this.apiBase}/v1.0/devices`,
-      { headers: { Authorization: `Bearer ${this.token}` } },
+      { headers: { Authorization: await this.authHeader() } },
     );
     return (res.result?.list || []).map((d) => ({
       id: `tuya:${d.id}`,
@@ -428,7 +337,7 @@ export class TuyaAdapter extends TokenPlatformAdapter {
 
   async sendCommand(nativeId: string, command: SwitchCommand): Promise<void> {
     await this.request('POST', `${this.apiBase}/v1.0/devices/${encodeURIComponent(nativeId)}/commands`, {
-      headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: await this.authHeader(), 'Content-Type': 'application/json' },
       body: { commands: [{ code: 'switch_1', value: command === 'on' }] },
     });
     getLogger().info({ platform: this.key, nativeId, command }, 'TuyaAdapter: command sent');
@@ -466,7 +375,7 @@ export class HiveAdapter extends TokenPlatformAdapter {
     const res = await this.request<{ nodes?: Array<{ id: string; name: string; type: string; attributes?: Record<string, { value?: unknown }> }> }>(
       'GET',
       `${this.hiveBase}/nodes`,
-      { headers: { Authorization: `Bearer ${this.token}` } },
+      { headers: { Authorization: await this.authHeader() } },
     );
     return (res.nodes || []).map((n) => ({
       id: `hive:${n.id}`,
@@ -485,7 +394,7 @@ export class HiveAdapter extends TokenPlatformAdapter {
 
   async sendCommand(nativeId: string, command: SwitchCommand): Promise<void> {
     await this.request('PUT', `${this.hiveBase}/nodes/${encodeURIComponent(nativeId)}`, {
-      headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: await this.authHeader(), 'Content-Type': 'application/json' },
       body: { nodes: [{ attributes: { state: { targetValue: command.toUpperCase() } } }] },
     });
     getLogger().info({ platform: this.key, nativeId, command }, 'HiveAdapter: command sent');
@@ -523,7 +432,7 @@ export class HomeyAdapter extends TokenPlatformAdapter {
     const devices = await this.request<Array<{ _id: string; name: string; class?: string; zone?: string; capabilities?: string[]; capabilitiesObj?: Record<string, { value?: unknown }> }>>(
       'GET',
       `${this.homeyBase}/orm/manager/devices/device`,
-      { headers: { Authorization: `Bearer ${this.token}` } },
+      { headers: { Authorization: await this.authHeader() } },
     );
     return (devices || []).map((d) => ({
       id: `homey:${d._id}`,
@@ -542,7 +451,7 @@ export class HomeyAdapter extends TokenPlatformAdapter {
 
   async sendCommand(nativeId: string, command: SwitchCommand): Promise<void> {
     await this.request('PUT', `${this.homeyBase}/device/${encodeURIComponent(nativeId)}/capability/onoff`, {
-      headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: await this.authHeader(), 'Content-Type': 'application/json' },
       body: { value: command === 'on' },
     });
     getLogger().info({ platform: this.key, nativeId, command }, 'HomeyAdapter: command sent');
@@ -589,7 +498,7 @@ export class HomeAssistantAdapter extends TokenPlatformAdapter {
     const states = await this.request<HaState[]>(
       'GET',
       `${this.baseUrl}/api/states`,
-      { headers: { Authorization: `Bearer ${this.token}` } },
+      { headers: { Authorization: await this.authHeader() } },
     );
     return (states || [])
       .filter((s) => /^(switch|light|fan|input_boolean)\./.test(s.entity_id))
@@ -611,7 +520,7 @@ export class HomeAssistantAdapter extends TokenPlatformAdapter {
   async sendCommand(nativeId: string, command: SwitchCommand): Promise<void> {
     const domain = nativeId.split('.')[0] || 'switch';
     await this.request('POST', `${this.baseUrl}/api/services/${domain}/turn_${command}`, {
-      headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: await this.authHeader(), 'Content-Type': 'application/json' },
       body: { entity_id: nativeId },
     });
     getLogger().info({ platform: this.key, nativeId, command, domain }, 'HomeAssistantAdapter: command sent');
@@ -721,12 +630,24 @@ export class AppleHomeAdapter extends CliBridgeAdapter {
   }
 }
 
-/** Amazon Alexa via `alex-remote-control` or `alexa-cli`. */
+/**
+ * Amazon Alexa via `alexa-remote-control`.
+ *
+ * Amazon publishes NO API for reading or controlling devices that already sit
+ * in a user's Alexa account — the Smart Home API only goes the other way
+ * (expose your own device cloud to Alexa). So this stays a CLI bridge over the
+ * community tool, which signs in with your Amazon credentials.
+ *
+ * The hard part is not the command, it is the session: that login expires,
+ * trips 2FA, and fails with an opaque error. So this adapter's job is to turn
+ * those failures into something the user can act on.
+ */
 export class AlexaAdapter extends CliBridgeAdapter {
   readonly key = 'alexa';
   readonly label = 'Amazon Alexa';
-  readonly help = 'Requires the Alexa CLI (`npm i -g alexa-remote-control`) signed in to your Amazon account.';
+  readonly help = 'Requires `npm i -g alexa-remote-control`, then run `alexa-remote-control -a login` once to link your Amazon account.';
   readonly installHint = 'npm install -g alexa-remote-control';
+  readonly credentialsUrl = 'https://alexa-remote-control.thepetejs.dev/';
 
   constructor() {
     super('alexa-remote-control', 'npm install -g alexa-remote-control');
@@ -735,7 +656,11 @@ export class AlexaAdapter extends CliBridgeAdapter {
   async getDevices(): Promise<SmartHomeDeviceV2[]> {
     const out = await this.run(['-a', 'list']);
     const names = out.split('\n').map((l) => l.trim()).filter(Boolean);
-    return names.map((name, i) => ({
+    // `-a list` prints one device per line, optionally as "Name (Group)". The
+    // CLI cannot report which of them are switchable, so every device is
+    // offered an on/off control; a device that does not support it will say so
+    // on the command instead of failing silently.
+    return names.map((name) => ({
       id: `alexa:${name}`,
       nativeId: name,
       platform: this.key,
@@ -747,21 +672,50 @@ export class AlexaAdapter extends CliBridgeAdapter {
       switchCapable: true,
       switchState: null,
       online: true,
-      // i is only used to keep the list stable; unused.
-    } as SmartHomeDeviceV2)).filter((_, i) => i >= 0);
+    }));
   }
 
   async sendCommand(nativeId: string, command: SwitchCommand): Promise<void> {
     // Alexa CLI exposes device control via text commands; on/off map directly.
     await this.run(['-a', 'smarthome', '-d', nativeId, '-c', command === 'on' ? 'ON' : 'OFF']);
   }
+
+  /**
+   * Turn the CLI's failure modes into instructions.
+   *
+   * An expired or unlinked Amazon session is by far the most common problem
+   * and the raw output says nothing useful, so it gets a specific message.
+   */
+  protected override async run(args: string[], timeoutMs = 20000): Promise<string> {
+    try {
+      return await super.run(args, timeoutMs);
+    } catch (e) {
+      const raw = `${(e as Error).message || ''}`;
+      const lowered = raw.toLowerCase();
+      if (/cookie|login|log in|unauthor|401|403|expired|two-factor|2fa|otp|refresh/.test(lowered)) {
+        throw new Error(
+          'Amazon session expired or is not linked — run `alexa-remote-control -a login` in a terminal ' +
+          'and complete the 2FA prompt, then try again.',
+        );
+      }
+      if (/command not found|enoent/.test(lowered)) {
+        throw new Error('`alexa-remote-control` is not on PATH — run: npm install -g alexa-remote-control');
+      }
+      this.lastError = raw;
+      throw e;
+    }
+  }
 }
 
-/** Google Home via `glocal`/`gcloud` bridge or the Smart Device Management API. */
-export class GoogleHomeAdapter extends CliBridgeAdapter {
-  readonly key = 'googlehome';
-  readonly label = 'Google Home';
-  readonly help = 'Requires the Google Smart Device Management API (Project + OAuth) or a local `ghome` CLI bridge.';
+/**
+ * Local `ghome` (google-nest-sdm) CLI bridge — a fallback for people who
+ * already run it. The official cloud path is GoogleSdmAdapter; this exists
+ * because the CLI reaches some devices without a Device Access project.
+ */
+export class GoogleHomeCliAdapter extends CliBridgeAdapter {
+  readonly key = 'ghome';
+  readonly label = 'Google Home (local ghome bridge)';
+  readonly help = 'Optional fallback: requires the local `ghome` CLI (`pip install google-nest-sdm`) signed in to your Google account.';
   readonly installHint = 'pip install google-nest-sdm';
 
   constructor() {
@@ -773,7 +727,7 @@ export class GoogleHomeAdapter extends CliBridgeAdapter {
     try {
       const parsed = JSON.parse(out) as { devices?: Array<{ name?: string; id?: string; type?: string }> };
       return (parsed.devices || []).map((d) => ({
-        id: `googlehome:${d.id || d.name || ''}`,
+        id: `ghome:${d.id || d.name || ''}`,
         nativeId: d.id || d.name || '',
         platform: this.key,
         platformLabel: this.label,
@@ -838,30 +792,64 @@ export function buildSmartHomeHub(deps: {
   hub.register(new HomeyAdapter(deps.config?.homey, deps.vault));
   hub.register(new AppleHomeAdapter());
   hub.register(new AlexaAdapter());
-  hub.register(new GoogleHomeAdapter());
+  // Google Home: official SDM API (thermostats/cameras/doorbells/displays).
+  hub.register(new GoogleSdmAdapter());
+  // The local `ghome` bridge stays as a separate fallback platform for anyone
+  // who already runs it — it is not replaced, just no longer the only option.
+  hub.register(new GoogleHomeCliAdapter());
 
   return hub;
 }
 
-/** Bridges the legacy SmartThingsService into the platform interface. */
+/**
+ * Bridges the legacy SmartThingsService into the platform interface.
+ *
+ * Two credential paths, both first-class:
+ *  - pasted PAT → the legacy service, which the agent tools also call directly
+ *  - "Sign in with SmartThings" → an internal SmartThingsAdapter, because the
+ *    legacy service holds a single long-lived string and cannot refresh a
+ *    short-lived OAuth access token
+ * Once a session exists the adapter serves device reads and commands so the
+ * 401-refresh path can run; the PAT path is untouched otherwise.
+ */
 export class SmartThingsPlatformWrapper implements SmartHomePlatform {
   readonly key = 'smartthings';
   readonly label = 'Samsung SmartThings';
-  readonly help = 'Connected via your SmartThings PAT (stored encrypted in the vault).';
+  readonly help = 'Create a personal access token with Devices (Read + Control) and Rooms (Read) scopes.';
   readonly credentialsUrl = 'https://account.smartthings.com/tokens';
   lastError?: string;
+
+  private readonly oauthAdapter: SmartThingsAdapter;
 
   constructor(
     private svc: SmartThingsService,
     private vault?: ConstructorParameters<typeof TokenPlatformAdapter>[0],
-  ) {}
+  ) {
+    this.oauthAdapter = new SmartThingsAdapter(vault);
+  }
 
   isConfigured(): boolean {
-    return this.svc.isConfigured();
+    return this.svc.isConfigured() || this.oauthAdapter.isConfigured();
   }
 
   getMaskedToken(): string {
-    return this.svc.getMaskedToken();
+    return this.oauthAdapter.getMaskedToken() || this.svc.getMaskedToken();
+  }
+
+  getOAuthProvider(): { name: string; requiresClientApp?: boolean } | undefined {
+    return this.oauthAdapter.getOAuthProvider();
+  }
+
+  supportsOAuth(): boolean {
+    return this.oauthAdapter.supportsOAuth();
+  }
+
+  beginOAuth(redirectUri: string): { authorizeUrl: string; state: string } {
+    return this.oauthAdapter.beginOAuth(redirectUri);
+  }
+
+  async completeOAuth(code: string, state: string): Promise<{ ok: boolean; deviceCount: number; tokenMasked: string }> {
+    return this.oauthAdapter.completeOAuth(code, state);
   }
 
   async setToken(token: string): Promise<{ ok: boolean; deviceCount?: number; tokenMasked?: string }> {
@@ -874,9 +862,13 @@ export class SmartThingsPlatformWrapper implements SmartHomePlatform {
 
   async clearToken(): Promise<void> {
     this.svc.clearToken();
+    await this.oauthAdapter.clearToken();
   }
 
   async getDevices(opts?: { withStates?: boolean }): Promise<SmartHomeDeviceV2[]> {
+    if (this.oauthAdapter.isConfigured()) {
+      return this.oauthAdapter.getDevices(opts);
+    }
     const legacy = await this.svc.getSmartHomeDevices({ withStates: opts?.withStates !== false });
     return legacy.map((d) => ({
       ...d,
@@ -888,6 +880,10 @@ export class SmartThingsPlatformWrapper implements SmartHomePlatform {
   }
 
   async sendCommand(nativeId: string, command: SwitchCommand): Promise<void> {
+    if (this.oauthAdapter.isConfigured()) {
+      await this.oauthAdapter.sendCommand(nativeId, command);
+      return;
+    }
     await this.svc.sendCommand(nativeId, command);
   }
 }

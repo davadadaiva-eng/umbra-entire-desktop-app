@@ -55,6 +55,14 @@ export interface SmartHomePlatform {
   setToken?(token: string, url?: string): Promise<{ ok: boolean; deviceCount?: number; tokenMasked?: string }>;
   clearToken?(): Promise<void>;
   getMaskedToken?(): string;
+  /** Vendor offers an OAuth app (cloud platforms only). */
+  getOAuthProvider?(): { name: string; requiresClientApp?: boolean } | undefined;
+  /** An OAuth app is registered, so "Sign in with …" will actually work. */
+  supportsOAuth?(): boolean;
+  /** Start an OAuth flow — returns the consent URL to open in a browser. */
+  beginOAuth?(redirectUri: string): { authorizeUrl: string; state: string };
+  /** Finish an OAuth flow with the callback code + state. */
+  completeOAuth?(code: string, state: string): Promise<{ ok: boolean; deviceCount?: number; tokenMasked?: string }>;
   /** List + normalize devices. `withStates` enriches on/off state where supported. */
   getDevices(opts?: { withStates?: boolean }): Promise<SmartHomeDeviceV2[]>;
   /** Send a switch command to a native device id. */
@@ -73,6 +81,18 @@ export interface PlatformCatalogEntry {
   connected: boolean;
   tokenMasked?: string;
   lastError?: string;
+  /**
+   * 'oauth' when the vendor offers a real sign-in flow (cloud platforms),
+   * 'token' when the user must paste a long-lived token. Self-hosted platforms
+   * are permanently 'token' — that is the only mechanism those ecosystems offer.
+   */
+  authMode: 'oauth' | 'token';
+  /** Button label for the sign-in flow, e.g. "Sign in with Samsung SmartThings". */
+  oauthLabel?: string;
+  /** An OAuth app is registered and the sign-in flow will work. */
+  oauthConfigured: boolean;
+  /** The platform cannot connect at all without a registered OAuth app. */
+  requiresClientApp: boolean;
 }
 
 /**
@@ -89,16 +109,24 @@ export class SmartHomeHub {
 
   /** All catalog entries (for the UI connect cards). */
   catalog(): PlatformCatalogEntry[] {
-    return this.platforms.map((p) => ({
-      key: p.key,
-      label: p.label,
-      help: p.help,
-      credentialsUrl: p.credentialsUrl,
-      configured: p.isConfigured(),
-      connected: p.isConfigured(),
-      tokenMasked: p.getMaskedToken?.(),
-      lastError: p.lastError,
-    }));
+    return this.platforms.map((p) => {
+      const oauth = p.getOAuthProvider?.();
+      const oauthConfigured = p.supportsOAuth?.() ?? false;
+      return {
+        key: p.key,
+        label: p.label,
+        help: p.help,
+        credentialsUrl: p.credentialsUrl,
+        configured: p.isConfigured(),
+        connected: p.isConfigured(),
+        tokenMasked: p.getMaskedToken?.(),
+        lastError: p.lastError,
+        authMode: oauth ? 'oauth' : 'token',
+        oauthLabel: oauth ? `Sign in with ${oauth.name}` : undefined,
+        oauthConfigured,
+        requiresClientApp: oauth?.requiresClientApp ?? false,
+      };
+    });
   }
 
   /** Platform adapters that have credentials configured. */
