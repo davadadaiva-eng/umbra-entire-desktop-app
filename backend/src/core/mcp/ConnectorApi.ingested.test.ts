@@ -57,10 +57,19 @@ describeIfIngested('bulk-ingested connectors are callable', () => {
     const ingested = defs.filter(d => d.connector_id.startsWith('apisguru-'));
     expect(ingested.length).toBeGreaterThan(1000);
 
-    // Every ingested tool must be routable — a relative `servers[0].url`
+    // Spec/curated/MCP tools must be routable — a relative `servers[0].url`
     // (e.g. "/api/v1") would make `${base_url}${endpoint}` unusable.
-    const bad = ingested.filter(d => !d.base_url || !/^https?:\/\/[^\s]+$/.test(d.base_url));
-    expect(bad.slice(0, 5).map(d => `${d.tool_id}=${d.base_url}`)).toEqual([]);
+    const isGeneric = (d: any) => d.source === 'generic' || d.name === 'call_api';
+    const badSpec = ingested.filter(d => !isGeneric(d) && (!d.base_url || !/^https?:\/\/[^\s]+$/.test(d.base_url)));
+    expect(badSpec.slice(0, 5).map(d => `${d.tool_id}=${d.base_url}`)).toEqual([]);
+
+    // Generic `call_api` fallbacks may legitimately have NO base (connectors
+    // with nothing known — callable via full-URL override), but must never
+    // carry JUNK (`,`, `/v1`, `//host`, placeholders): junk is worse than
+    // null because it builds garbage URLs instead of a clear error.
+    const junkGeneric = ingested.filter(d =>
+      isGeneric(d) && d.base_url != null && !/^https?:\/\/[^\s]+$/.test(d.base_url));
+    expect(junkGeneric.slice(0, 5).map(d => `${d.tool_id}=${d.base_url}`)).toEqual([]);
   });
 
   it('picks up the baseUrl that was persisted back into the catalog', () => {

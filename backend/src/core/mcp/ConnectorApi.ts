@@ -12,7 +12,7 @@ import { ToolRetriever, ConnectorTool } from './ToolRetriever';
 import { ToolExecutor, ToolResult, ToolExecutorOptions } from './ToolExecutor';
 import { AgentConnectorBridge, ConnectorAction, AgentConnectorResult } from '../agent/AgentConnectorBridge';
 import { OAuthConnector, OAuthClient, OAUTH_PROVIDERS, oauthProviderSlugFor } from './OAuthConnector';
-import { curatedConnectorForCatalogId, genericToolFor } from './curatedTools';
+import { curatedConnectorForCatalogId, genericToolFor, normalizeBaseUrl } from './curatedTools';
 import { MCP_CATALOG, findCatalogEntry, catalogByCategory, catalogCount, McpCatalogEntry } from './McpCatalog';
 import { getLogger } from '../Logger';
 
@@ -330,7 +330,7 @@ export class ConnectorApi {
     const entry = findCatalogEntry(connectorId);
     const key = entry?.credentialKey || connectorId;
     const hasBaseUrl = Boolean(
-      (entry?.baseUrl && entry.baseUrl.trim()) || curatedConnectorForCatalogId(connectorId),
+      normalizeBaseUrl(entry?.baseUrl) || curatedConnectorForCatalogId(connectorId),
     );
     const toolCount = this.toolSchemas ? this.toolSchemas.getForConnector(connectorId).length : 0;
     // A connector is callable when it has stored/curated definitions OR the

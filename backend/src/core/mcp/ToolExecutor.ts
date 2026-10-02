@@ -13,8 +13,8 @@
  *      legacy generic REST path, kept for AgentConnectorBridge /
  *      ConnectorApi compatibility. The hallucinated-prone
  *      `https://api.<id>.com` guess is GONE: connectors without a known
- *      base URL fail with a clear, feedable error instead of hitting
- *      random domains.
+ *      base URL fail with a clear, feedable error unless the caller passes
+ *      a full `https://…` URL as the endpoint (user-supplied target).
  *
  * Shared guarantees on both paths:
  *   - credentials resolved from ConnectorStore (AES-256-GCM at rest),
@@ -32,7 +32,7 @@ import { ConnectorStore } from './ConnectorStore';
 import { MCP_CATALOG, findCatalogEntry } from './McpCatalog';
 import { ToolDefinition, validateToolArgs } from './ToolDefinition';
 import { curatedConnectorForCatalogId } from './curatedTools';
-import { resolveBaseUrlFor } from './curatedTools';
+import { resolveBaseUrlFor, GENERIC_BASE_URLS, GENERIC_TOOL_NAME, firstUsableBaseUrl } from './curatedTools';
 import { InjectionGuard } from '../agent/InjectionGuard';
 import { getLogger } from '../Logger';
 
@@ -103,56 +103,9 @@ const TOKEN_ENDPOINTS: Record<string, string> = {
   figma: 'https://www.figma.com/api/oauth/token',
 };
 
-// Well-known base URLs (explicit allowlist — no domain guessing).
-// NOTE: keep in sync with GENERIC_BASE_URLS in curatedTools.ts.
-export const KNOWN_BASE_URLS: Record<string, string> = {
-  gmail: 'https://gmail.googleapis.com',
-  'google-calendar': 'https://www.googleapis.com',
-  'google-drive': 'https://www.googleapis.com',
-  'google-docs': 'https://docs.googleapis.com',
-  'google-sheets': 'https://sheets.googleapis.com',
-  spotify: 'https://api.spotify.com',
-  discord: 'https://discord.com',
-  slack: 'https://slack.com',
-  github: 'https://api.github.com',
-  twitter: 'https://api.twitter.com',
-  stripe: 'https://api.stripe.com',
-  notion: 'https://api.notion.com',
-  linear: 'https://api.linear.app',
-  figma: 'https://api.figma.com',
-  twitch: 'https://api.twitch.tv',
-  dropbox: 'https://api.dropboxapi.com',
-  'microsoft-365': 'https://graph.microsoft.com',
-  onedrive: 'https://graph.microsoft.com',
-  teams: 'https://graph.microsoft.com',
-  'search-research-wikipedia': 'https://en.wikipedia.org',
-  // Extended public-API allowlist (mirrors GENERIC_BASE_URLS in curatedTools).
-  gitlab: 'https://gitlab.com/api/v4',
-  bitbucket: 'https://api.bitbucket.org/2.0',
-  jira: 'https://api.atlassian.com',
-  confluence: 'https://api.atlassian.com',
-  trello: 'https://api.trello.com/1',
-  asana: 'https://app.asana.com/api/1.0',
-  monday: 'https://api.monday.com/v2',
-  'monday-com': 'https://api.monday.com/v2',
-  clickup: 'https://api.clickup.com/api/v2',
-  todoist: 'https://api.todoist.com/api/v1',
-  telegram: 'https://api.telegram.org',
-  whatsapp: 'https://graph.facebook.com/v18.0',
-  zulip: 'https://api.zulip.com/v1',
-  webex: 'https://webexapis.com/v1',
-  box: 'https://api.box.com/2.0',
-  airtable: 'https://api.airtable.com/v0',
-  hubspot: 'https://api.hubapi.com',
-  openai: 'https://api.openai.com/v1',
-  anthropic: 'https://api.anthropic.com/v1',
-  shopify: 'https://api.shopify.com',
-  zoom: 'https://api.zoom.us/v2',
-  paypal: 'https://api-m.paypal.com/v1',
-  twilio: 'https://api.twilio.com/2010-04-01',
-  tiktok: 'https://open.tiktokapis.com/v2',
-  linkedin: 'https://api.linkedin.com/v2',
-};
+// Well-known base URLs — single source of truth lives in curatedTools.ts
+// (GENERIC_BASE_URLS). This alias is kept so existing imports keep working.
+export const KNOWN_BASE_URLS: Record<string, string> = GENERIC_BASE_URLS;
 
 // ── ToolExecutor ────────────────────────────────────────────────────
 
@@ -262,6 +215,14 @@ export class ToolExecutor {
       };
     }
 
+    // 2b. Generic `call_api` fallback — the args carry the request
+    // (`endpoint` + `method` + `payload`), not the definition. Route exactly
+    // like the legacy generic path: `baseUrl + endpoint`, with a full
+    // `https://…` endpoint working even when no base URL is known.
+    if (def.name === GENERIC_TOOL_NAME) {
+      return this.executeGenericTool(def, args, userId, { started, base, authHeaders: auth.headers, options });
+    }
+
     if (!def.base_url) {
       return {
         ...base,
@@ -294,6 +255,76 @@ export class ToolExecutor {
       base,
     });
     return this.finish({ ...result, connector: def.connector_id, endpoint: url, method: def.http_method ?? 'POST' });
+  }
+
+  /**
+   * Execute a generic `call_api` ToolDefinition. The definition is only an
+   * envelope — `args.endpoint` (path or full https:// URL), `args.method`,
+   * and `args.payload` describe the request. Base URL resolution mirrors the
+   * legacy path (definition → catalog → curated → well-known allowlist), and
+   * a full-URL endpoint always works even with no base URL configured.
+   */
+  private async executeGenericTool(
+    def: ToolDefinition,
+    args: Record<string, unknown>,
+    userId: string,
+    ctx: {
+      started: number;
+      base: Pick<ToolResult, 'connector' | 'endpoint' | 'method'>;
+      authHeaders: Record<string, string>;
+      options: ExecuteOptions;
+    },
+  ): Promise<ToolResult> {
+    const { started, base, authHeaders, options } = ctx;
+    const endpoint = String(args.endpoint ?? '/');
+    const method = String(args.method ?? 'GET').toUpperCase();
+    const payload = (args.payload && typeof args.payload === 'object'
+      ? args.payload as Record<string, unknown>
+      : {}) as Record<string, unknown>;
+
+    const isFullUrl = endpoint.startsWith('http://') || endpoint.startsWith('https://');
+    const catalog = findCatalogEntry(def.connector_id);
+    const curated = curatedConnectorForCatalogId(def.connector_id);
+    // Junk catalog values (`,`, `/v1`, …) are skipped, not trusted.
+    const baseUrl = firstUsableBaseUrl(
+      def.base_url,
+      catalog?.baseUrl,
+      curated?.baseUrl,
+      KNOWN_BASE_URLS[def.connector_id],
+      resolveBaseUrlFor(def.connector_id),
+    ) || '';
+    if (!baseUrl && !isFullUrl) {
+      return {
+        ...base,
+        success: false,
+        status: 0,
+        latencyMs: Date.now() - started,
+        data: null,
+        error:
+          `Connector "${def.connector_id}" has no API base URL configured. ` +
+          `Pass a full https:// URL as endpoint, set baseUrl on the connector (Settings → Connectors), or use one of its schema-validated tools.`,
+      };
+    }
+    const url = isFullUrl ? endpoint : `${baseUrl}${endpoint}`;
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      ...authHeaders,
+      ...options.headers,
+    };
+
+    const result = await this.httpWithRetry({
+      url,
+      method,
+      headers,
+      body: method === 'GET' ? undefined : payload,
+      timeoutMs: options.timeoutMs ?? 30_000,
+      started,
+      base: { connector: def.connector_id, endpoint: url, method },
+      params: method === 'GET' ? (payload as Record<string, string>) : undefined,
+    });
+    return this.finish({ ...result, connector: def.connector_id, endpoint: url, method });
   }
 
   // ══════════════════════════════════════════════════════════════════
@@ -378,11 +409,13 @@ export class ToolExecutor {
     //    the user supplies the target inline (used by name-only rows).
     const isFullUrl = endpoint.startsWith('http://') || endpoint.startsWith('https://');
     const curated = curatedConnectorForCatalogId(connectorId);
-    const baseUrl = connector.baseUrl
-      || curated?.baseUrl
-      || KNOWN_BASE_URLS[connectorId]
-      || resolveBaseUrlFor(connectorId)
-      || '';
+    // Junk catalog values (`,`, `/v1`, …) are skipped, not trusted.
+    const baseUrl = firstUsableBaseUrl(
+      connector.baseUrl,
+      curated?.baseUrl,
+      KNOWN_BASE_URLS[connectorId],
+      resolveBaseUrlFor(connectorId),
+    ) || '';
     if (!baseUrl && !isFullUrl) {
       return {
         success: false,

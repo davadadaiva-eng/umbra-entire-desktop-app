@@ -717,10 +717,20 @@ export const GENERIC_TOOL_NAME = 'call_api';
 /**
  * Well-known public API base URLs for top connectors whose catalog rows
  * intentionally carry no baseUrl (user-supplied/self-hosted by default).
- * Mirrors the executor's allowlist so discovery and execution agree.
- * NOTE: keep in sync with KNOWN_BASE_URLS in ToolExecutor.ts.
+ * Single source of truth — ToolExecutor's KNOWN_BASE_URLS is an alias of
+ * this map so discovery and execution can never drift apart again.
  */
-const GENERIC_BASE_URLS: Record<string, string> = {
+export const GENERIC_BASE_URLS: Record<string, string> = {
+  gmail: 'https://gmail.googleapis.com',
+  spotify: 'https://api.spotify.com/v1',
+  discord: 'https://discord.com/api/v10',
+  slack: 'https://slack.com/api',
+  github: 'https://api.github.com',
+  twitter: 'https://api.twitter.com/2',
+  stripe: 'https://api.stripe.com/v1',
+  figma: 'https://api.figma.com/v1',
+  'microsoft-365': 'https://graph.microsoft.com/v1.0',
+  'search-research-wikipedia': 'https://en.wikipedia.org',
   gitlab: 'https://gitlab.com/api/v4',
   bitbucket: 'https://api.bitbucket.org/2.0',
   sourcegraph: 'https://sourcegraph.com/.api',
@@ -798,6 +808,47 @@ export function resolveBaseUrlFor(catalogId: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Normalize a catalog/advertised base URL into a usable absolute origin.
+ * The catalog carries junk in the wild: `,`, `Your API URL`, relative paths
+ * (`/v1`, `/`, `/api`), and protocol-relative hosts (`//api.foo.com`). Only
+ * absolute http(s) URLs are routable (`baseUrl + endpoint`), so:
+ *   - absolute http(s) URL → trimmed as-is,
+ *   - protocol-relative `//host/path` → `https://host/path`,
+ *   - scheme-less `host.tld/path` → `https://host.tld/path`,
+ *   - anything else (relative paths, placeholders, garbage) → undefined.
+ * Never throws; undefined means "no usable base URL known".
+ */
+export function normalizeBaseUrl(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const v = raw.trim().replace(/\/+$/, '');
+  if (!v) return undefined;
+  if (/^https?:\/\/[^\s/$.?#].[^\s]*$/i.test(v)) return v;
+  if (v.startsWith('//')) {
+    const rest = v.slice(2);
+    if (/^[^\s/$.?#].[^\s]*\.[^\s/]+/.test(rest)) return `https://${rest}`;
+    return undefined;
+  }
+  // Scheme-less host: must contain a dot, no spaces, no leading slash.
+  if (!v.startsWith('/') && !v.includes(' ') && /^[^\s/$.?#].[^\s]*\.[^\s/]{2,}/.test(v)) {
+    return `https://${v}`;
+  }
+  return undefined;
+}
+
+/**
+ * First usable absolute base URL among candidates (definition → catalog →
+ * curated → allowlist). Skips junk so a garbage catalog value falls through
+ * to the next source instead of producing unroutable URLs.
+ */
+export function firstUsableBaseUrl(...candidates: Array<string | undefined>): string | undefined {
+  for (const c of candidates) {
+    const n = normalizeBaseUrl(c);
+    if (n) return n;
+  }
+  return undefined;
+}
+
 export interface GenericEntry {
   id: string;
   name: string;
@@ -819,7 +870,10 @@ export interface GenericEntry {
  * Schema quality is `generic` so retrieval prefers curated/openapi tools.
  */
 export function genericToolFor(entry: GenericEntry): ToolDefinition {
-  const baseUrl = (entry.baseUrl && entry.baseUrl.trim()) || resolveBaseUrlFor(entry.id);
+  // Ignore junk catalog values (`,`, `/v1`, …) — fall back to the allowlist
+  // so we never persist an unroutable base_url; undefined stays undefined
+  // (full-URL override still works at execution time).
+  const baseUrl = normalizeBaseUrl(entry.baseUrl) || resolveBaseUrlFor(entry.id);
   const def: ToolDefinition = {
     tool_id: makeToolId(entry.id, GENERIC_TOOL_NAME),
     connector_id: entry.id,
