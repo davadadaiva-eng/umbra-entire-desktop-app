@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+session_data/
+output/
+models/
+*.log
+.git/

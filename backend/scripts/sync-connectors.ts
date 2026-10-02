@@ -28,6 +28,8 @@ interface ExternalCatalogEntry {
   kind: 'verified' | 'template';
   description: string;
   docs?: string;
+  /** OpenAPI/Swagger spec URL (APIs.guru) — lets the runtime ingest tools. */
+  specUrl?: string;
 }
 
 interface ApisGuruList {
@@ -160,6 +162,9 @@ async function fetchApisGuruCatalog(): Promise<ExternalCatalogEntry[]> {
         credentialKey: slug(providerKey),
         kind: 'verified',
         description,
+        // Persist the spec URL so the runtime can ingest real tools on demand
+        // instead of leaving this row as a name-only catalog entry.
+        specUrl: apiInfo.specUrl || apiInfo.swaggerUrl,
       });
     } catch (err) {
       // Skip individual entry errors silently

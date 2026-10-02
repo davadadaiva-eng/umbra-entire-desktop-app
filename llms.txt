@@ -160,7 +160,14 @@ Base URL: `http://127.0.0.1:8787` (bound to loopback only by default). CORS: `*`
 | GET | `/api/connectors/search?q=` | Search connectors |
 | GET | `/api/connectors/:id` | Get connector |
 | POST | `/api/connectors/:id/connect` | `{ apiKey?, redirectUri? }` | Connect |
+| GET | `/api/connectors/:id/callback?code=&state=` | OAuth callback completion |
 | GET | `/api/connectors/:id/status` | Connection status |
+| GET | `/api/connectors/:id/readiness` | What the user must do to connect it |
+| GET | `/api/connectors/readiness` | Readiness for every catalog entry + counts |
+| GET | `/api/connectors/:id/tools` | Stored tool schemas for one connector |
+| GET | `/api/connectors/tools/schemas?q=&connectorId=&limit=&offset=` | Schema browser |
+| POST | `/api/connectors/:id/ensure-tools` | `{ force? }` | One-click enable: ingest known spec when tools missing (idempotent) |
+| POST | `/api/connectors/ingest-openapi` | `{ connectorId, spec?/specUrl?, baseUrl?, authType?, apiKeyHeader?, replace?, maxTools? }` | Ingest OpenAPI spec |
 | POST | `/api/connectors/:id/disconnect` | Disconnect |
 | POST | `/api/connectors/execute` | `{ connectorId, endpoint, method, payload?, userId? }` | Execute action |
 | POST | `/api/connectors/tools` | `{ query, limit? }` | Relevant tools for query |
@@ -242,9 +249,11 @@ Base URL: `http://127.0.0.1:8787` (bound to loopback only by default). CORS: `*`
 | Method | Path | Body | Description |
 | --- | --- | --- | --- |
 | GET | `/api/smart/status` | — | Legacy SmartThings status |
-| GET | `/api/smart/platforms` | — | Platform catalog (10 platforms: SmartThings, Home Assistant, Hubitat, openHAB, Tuya/Smart Life, Hive, Homey, Apple Home, Alexa, Google Home) |
+| GET | `/api/smart/platforms` | — | Platform catalog (11 platforms: SmartThings, Home Assistant, Hubitat, openHAB, Tuya/Smart Life, Hive, Homey, Apple Home, Alexa, Google Home, Google Home/ghome fallback) |
 | POST | `/api/smart/platforms/:key/connect` | `{ token, url? }` | Connect a platform (validated before vault persistence) |
 | POST | `/api/smart/platforms/:key/disconnect` | — | Disconnect a platform |
+| POST | `/api/smart/platforms/:key/oauth/start` | `{ redirectUri? }` | Begin OAuth sign-in (cloud platforms; returns `{ authorizeUrl, state }`) |
+| GET | `/api/smart/platforms/:key/oauth/callback` | — (query: `code`, `state`) | Vendor redirect target; validates and persists the session |
 | POST | `/api/smart/token` | `{ token }` | Legacy: save SmartThings PAT |
 | DELETE | `/api/smart/token` | — | Legacy: clear PAT |
 | GET | `/api/smart/devices` | — | Devices across all connected platforms |
@@ -340,6 +349,8 @@ Configuration lives in `~/.umbra/config.json` (created on first boot with defaul
 | `hermes` | External agent engine config (binary path, timeout, auto-delegate) |
 | `smartthings` | Samsung SmartThings PAT and API URL |
 | `smartHome` | Per-platform pre-seeded credentials (e.g. `smartHome.homeassistant = { url, token }`) |
+| env `UMBRA_SMARTTHINGS_CLIENT_ID` / `_CLIENT_SECRET` | Enable "Sign in with Samsung SmartThings". Without them the card falls back to a pasted PAT |
+| env `UMBRA_GOOGLE_CLIENT_ID` + `UMBRA_GOOGLE_PROJECT_ID` | Enable "Sign in with Google Home" via the Smart Device Management API (Google devices only — thermostats, cameras, doorbells, displays). OAuth-only; there is no Google PAT. |
 | `hotkeys` | Overlay, pause, toggle-preview key combos |
 | `hotkeys` | Overlay, pause, toggle-preview key combos |
 | `realDesktop` | Chrome path, CDP port, window dimensions for real desktop control |

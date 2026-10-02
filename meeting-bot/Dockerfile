@@ -28,6 +28,12 @@ RUN groupadd -r appuser && useradd -r -g appuser -m -s /bin/bash appuser
 RUN mkdir -p /app /app/output /app/session_data \
     && chown -R appuser:appuser /app
 
+# Named volumes (whisper-models, piper-models) inherit the ownership of their
+# mount point on first use, so these MUST exist and be owned by appuser in
+# the image or model downloads fail with permission errors.
+RUN mkdir -p /home/appuser/.cache/huggingface /home/appuser/.piper/models \
+    && chown -R appuser:appuser /home/appuser
+
 # ── Application code ─────────────────────────────────────────────────────────
 # Copy requirements first for layer caching, then install everything from the
 # single pinned requirements file (playwright included, so the Chromium

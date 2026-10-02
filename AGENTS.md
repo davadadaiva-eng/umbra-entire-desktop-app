@@ -36,6 +36,9 @@ The root has no dependencies — `concurrently` is a devDependency only.
 # From the repo root — starts backend + desktop in parallel
 npm run dev
 
+# Backend + faster-whisper STT + piper TTS with health checks and clean teardown
+npm run start:all        # flags: --no-voice, --no-stt, --no-tts, --fast
+
 # Or backend only:
 cd backend && npm run dev        # ts-node, port 8787
 
@@ -61,7 +64,7 @@ The backend uses `oxlint` over `src/`. The desktop also uses `oxlint`.
 
 ### Test suites
 
-- **Backend**: `cd backend && npm test` — Jest, 562 tests / 62 suites covering agent, metering, MCP, voice, meetings, skills, graphify, p2P, API, billing, tenants, auth, cloud, wallet, routing.
+- **Backend**: `cd backend && npm test` — Jest, 1043 tests / 88 suites covering agent, metering, MCP, voice, meetings, skills, graphify, p2P, API, billing, tenants, auth, cloud, wallet, routing.
 - **Desktop**: `cd desktop && npm run test:run` — Vitest.
 
 ### Scripts (backend)
@@ -70,6 +73,7 @@ The backend uses `oxlint` over `src/`. The desktop also uses `oxlint`.
 | --- | --- |
 | `npm run build` | TypeScript → `dist/` |
 | `npm run dev` | ts-node live run |
+| `npm run start:all` (root) | STT + TTS + backend in one shot (desktop mode, health-checked) |
 | `npm start` | Run from `dist/` |
 | `npm test` | Jest test suite |
 | `npm run lint` | oxlint over `src/` |

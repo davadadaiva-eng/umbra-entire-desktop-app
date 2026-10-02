@@ -108,6 +108,29 @@ Every action also checks the emergency-stop file first.
 
 Errors: `{ "error": "<message>" }` with status 400/404/500.
 
+### Connectors & tool schemas
+
+| Method | Path | Body | Description |
+| --- | --- | --- | --- |
+| GET | `/api/connectors?q=&category=&limit=&offset=` | — | List connectors (search, category, pagination) |
+| GET | `/api/connectors/categories` | — | Connector categories with counts |
+| GET | `/api/connectors/search?q=` | — | Search connectors |
+| GET | `/api/connectors/readiness` | — | Readiness for every catalog entry + counts (`ready`/`connected`/`needs_key`/`needs_oauth_app`/`needs_setup`) |
+| GET | `/api/connectors/:id` | — | Get a single connector |
+| GET | `/api/connectors/:id/readiness` | — | What the user must do to connect it (`action` names the next step) |
+| POST | `/api/connectors/:id/connect` | `{ apiKey?, redirectUri? }` | Start OAuth (returns `{ authorizeUrl, state }`) or save API key |
+| GET | `/api/connectors/:id/callback?code=&state=` | — | OAuth callback completion |
+| GET | `/api/connectors/:id/status` | — | Connection status |
+| POST | `/api/connectors/:id/disconnect` | — | Disconnect connector |
+| GET | `/api/connectors/:id/tools` | — | Stored tool schemas for one connector + connection state |
+| GET | `/api/connectors/tools/schemas?q=&connectorId=&limit=&offset=` | — | Tool-schema browser |
+| POST | `/api/connectors/:id/ensure-tools` | `{ force? }` | One-click enable: ingest the known spec when tools are missing (idempotent) |
+| POST | `/api/connectors/ingest-openapi` | `{ connectorId, spec?/specUrl?, baseUrl?, authType?, apiKeyHeader?, replace?, maxTools? }` | Ingest an OpenAPI/Swagger spec |
+| POST | `/api/connectors/tools` | `{ query, limit? }` | Tools relevant to a query (LLM function calling) |
+| POST | `/api/connectors/execute` | `{ connectorId, endpoint, method, payload?, userId? }` | Execute a connector action |
+| POST | `/api/connectors/sync` | — | Sync connector catalog |
+| POST | `/api/connectors/credential` | `{ slug, clientId, clientSecret, scopes }` | Save developer (OAuth app / API key) credentials |
+
 ### Telco (SMS & calls — Telnyx)
 
 | Method | Path | Body | Description |

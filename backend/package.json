@@ -9,6 +9,8 @@
     "dev": "ts-node src/index.ts",
     "test": "jest --config jest.config.js",
     "lint": "oxlint src/",
+    "audit:connectors": "ts-node --transpile-only scripts/connector-auth-audit.ts",
+    "audit:e2e": "ts-node --transpile-only scripts/connector-e2e-audit.ts",
     "check:docs": "node scripts/check-doc-counts.js",
     "benchmark": "node scripts/benchmark.js",
     "redteam": "node scripts/redteam.js",

@@ -3,6 +3,7 @@ dist
 .git
 .env
 .env.*
+!.env.example
 *.db
 *.db-journal
 *.db-wal
@@ -12,6 +13,10 @@ logs
 .DS_Store
 Thumbs.db
 *.tmp
+
+# meeting-bot runtime data (cookies = full account access, never commit)
+meeting-bot/session_data/
+meeting-bot/output/
 coverage
 .umbra
 release
@@ -25,3 +30,6 @@ __pycache__
 # local backend dev logs (started by hand)
 backend-dev.log
 backend-dev.err.log
+
+# local Tesseract traineddata (~5MB, downloaded/cached, not source)
+eng.traineddata

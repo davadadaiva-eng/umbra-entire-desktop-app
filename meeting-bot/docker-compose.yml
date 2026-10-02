@@ -6,8 +6,17 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: meeting-bot
+    # Loopback-only by default: reach it via SSH tunnel
+    # (ssh -L 8000:localhost:8000 vps) or through the optional Caddy proxy
+    # service below (COMPOSE_PROFILES=proxy). NEVER publish 8000 directly.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
+    # Internal-only: how the Caddy reverse proxy reaches the API
+    expose:
+      - "8000"
+    env_file:
+      - path: .env
+        required: false
     volumes:
       - whisper-models:/home/appuser/.cache/huggingface
       - piper-models:/home/appuser/.piper/models
@@ -19,6 +28,8 @@ services:
       - LLM_API_KEY=${LLM_API_KEY:-}
       - LLM_API_URL=${LLM_API_URL:-https://openrouter.ai/api/v1/chat/completions}
       - LLM_MODEL=${LLM_MODEL:-deepseek/deepseek-chat}
+      - API_TOKEN=${API_TOKEN:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
       - DISPLAY=:99
     # Resource limits are advisory; tune per plan in production
     deploy:
@@ -27,7 +38,45 @@ services:
           memory: 4G
           cpus: "2.0"
     restart: unless-stopped
+    # Disk safety on small VPS disks: cap each container's log files
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # Optional TLS reverse proxy, started only with COMPOSE_PROFILES=proxy
+  # (set in .env). Terminates HTTPS for meeting-bot with automatic
+  # Let's Encrypt certificates; requires ports 80+443 reachable and a DNS
+  # A record pointing DOMAIN at this host. Without the profile this service
+  # never starts and nothing is exposed on 80/443.
+  caddy:
+    image: caddy:2-alpine
+    container_name: meeting-bot-caddy
+    profiles: ["proxy"]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      # '-:' default also covers DOMAIN set but empty, so Caddy degrades to
+      # the Caddyfile's localhost fallback instead of an empty site address
+      - DOMAIN=${DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - meeting-bot
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
 
 volumes:
   whisper-models:
   piper-models:
+  caddy_data:
+  caddy_config:

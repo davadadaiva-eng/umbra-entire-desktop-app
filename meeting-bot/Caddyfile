@@ -1,0 +1,16 @@
+# Reverse proxy for the meeting-bot API with automatic HTTPS.
+#
+# DOMAIN comes from .env (passed through docker-compose.yml):
+#   - a public hostname (DNS A record -> this VPS) gets a real Let's Encrypt
+#     certificate automatically, issued and renewed on first start;
+#   - the "localhost" fallback serves a self-signed cert so the proxy still
+#     works before a domain exists (clients must then skip verification,
+#     e.g. curl -k).
+{$DOMAIN:localhost} {
+	reverse_proxy meeting-bot:8000 {
+		# /health is unauthenticated by design (uptime probes)
+		health_uri /health
+		health_interval 30s
+		health_timeout 5s
+	}
+}

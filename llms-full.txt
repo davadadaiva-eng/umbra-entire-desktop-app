@@ -460,7 +460,14 @@ Errors: `{ "error": "<message>" }` with status 400/404/500.
 | GET | `/api/connectors/search?q=` | — | Search connectors |
 | GET | `/api/connectors/:id` | — | Get a single connector |
 | POST | `/api/connectors/:id/connect` | `{ apiKey?, redirectUri? }` | Start OAuth or save API key |
+| GET | `/api/connectors/:id/callback?code=&state=` | — | OAuth callback completion |
 | GET | `/api/connectors/:id/status` | — | Connection status |
+| GET | `/api/connectors/:id/readiness` | — | Per-connector readiness (ready/connected/needs_key/needs_oauth_app/needs_setup) |
+| GET | `/api/connectors/readiness` | — | Readiness for every catalog entry, with aggregate counts |
+| GET | `/api/connectors/:id/tools` | — | Stored tool schemas for one connector (+ connection state) |
+| GET | `/api/connectors/tools/schemas?q=&connectorId=&limit=&offset=` | — | Tool-schema browser with search + pagination |
+| POST | `/api/connectors/:id/ensure-tools` | `{ force? }` | One-click enable: ingest the known spec when tools are missing (idempotent; vector registry refreshed without restart) |
+| POST | `/api/connectors/ingest-openapi` | `{ connectorId, spec?/specUrl?, baseUrl?, authType?, apiKeyHeader?, replace?, maxTools? }` | Ingest an OpenAPI/Swagger spec for one connector |
 | POST | `/api/connectors/:id/disconnect` | — | Disconnect connector |
 | POST | `/api/connectors/execute` | `{ connectorId, endpoint, method, payload?, userId? }` | Execute a connector action |
 | POST | `/api/connectors/tools` | `{ query, limit? }` | Get tools relevant to a query |
@@ -546,7 +553,7 @@ Supported platforms and how users connect them:
 
 | Key | Platform | Credential |
 | --- | --- | --- |
-| `smartthings` | Samsung SmartThings | PAT from account.smartthings.com/tokens (Devices Read+Control, Rooms Read) |
+| `smartthings` | Samsung SmartThings | **OAuth** (`UMBRA_SMARTTHINGS_CLIENT_ID` + `_SECRET`) or a PAT from account.smartthings.com/tokens |
 | `homeassistant` | Home Assistant | Long-lived access token (Profile → Security) + server URL |
 | `hubitat` | Hubitat Elevation | Maker API app id + access token + hub URL |
 | `openhab` | openHAB | REST API token + server URL |
@@ -554,8 +561,35 @@ Supported platforms and how users connect them:
 | `hive` | Hive (British Gas) | OAuth session token (api.bgchprod.info) |
 | `homey` | Homey (Athom) | PAT from tools.developer.homey.app |
 | `applehome` | Apple Home | CLI bridge — requires `homebridge` on PATH |
-| `alexa` | Amazon Alexa | CLI bridge — requires `alexa-remote-control` on PATH |
-| `googlehome` | Google Home | CLI bridge — requires `ghome` (google-nest-sdm) on PATH |
+| `alexa` | Amazon Alexa | CLI bridge — requires `alexa-remote-control` on PATH (see the note below) |
+| `googlehome` | Google Home | **OAuth** against the Smart Device Management API + `UMBRA_GOOGLE_PROJECT_ID` |
+| `ghome` | Google Home (fallback) | CLI bridge — requires `ghome` (google-nest-sdm) on PATH |
+
+**Why Alexa has no OAuth.** Amazon publishes no API for reading or controlling
+devices that already sit in a user's Alexa account. The Smart Home API runs the
+other way — it is for exposing your own device cloud to Alexa. So `alexa` stays
+on the `alexa-remote-control` CLI, which signs in with the user's own Amazon
+credentials; the adapter's job is to turn that login's expiry / 2FA failures
+into an actionable "run `alexa-remote-control -a login`" message rather than an
+opaque CLI error.
+
+**What Google's API can and cannot reach.** The Smart Device Management API
+only exposes **Google's own devices** — Nest/Google thermostats, cameras,
+doorbells and displays. It does *not* reach third-party lights and switches that
+merely appear in a Google Home account, because those are controlled through
+their own vendors' clouds. Expect Hue, SwitchBot and friends to be absent. SDM
+also has no personal access token, so `googlehome` is OAuth-only and its
+`setToken` rejects a pasted token with an explanation. On/off maps to
+`ThermostatMode.SetMode`; commanding a camera returns an explicit message rather
+than a vendor error, since Google exposes no power state for it.
+
+`ghome` is kept as a separate platform key (not a replacement) for people who
+already run the local bridge — it reaches some devices without a Device Access
+project.
+
+> Google-hosted Pub/Sub event topics are being discontinued on **Nov 30 2026**.
+> Umbra polls the SDM REST API and does not use Pub/Sub, so this does not
+> affect it today, but it matters if push-based state updates are ever added.
 
 Connect flow (UI or API): `GET /api/smart/platforms` lists the catalog, then
 `POST /api/smart/platforms/:key/connect` with `{ token, url? }` validates the
@@ -568,6 +602,8 @@ touches a previously stored credential.
 | GET | `/api/smart/platforms` | — | Platform catalog (configured state, masked tokens, last errors) |
 | POST | `/api/smart/platforms/:key/connect` | `{ token, url? }` | Connect a platform (validated before persistence) |
 | POST | `/api/smart/platforms/:key/disconnect` | — | Disconnect a platform |
+| POST | `/api/smart/platforms/:key/oauth/start` | `{ redirectUri? }` | Begin OAuth sign-in; returns `{ authorizeUrl, state }` |
+| GET | `/api/smart/platforms/:key/oauth/callback` | — (query: `code`, `state`) | Vendor redirect target; exchanges the code and persists the session |
 | POST | `/api/smart/token` | `{ token }` | Legacy: save SmartThings PAT (validated) |
 | DELETE | `/api/smart/token` | — | Legacy: disconnect SmartThings |
 | GET | `/api/smart/devices` | — | Devices across all connected platforms (with live switch state) |
@@ -580,6 +616,39 @@ touches a previously stored credential.
 Agent tools `sm_devices` / `sm_on` / `sm_off` / `sm_schedule` operate across
 every connected platform simultaneously ("turn on the desk lamp" matches
 regardless of which hub the device lives on).
+
+The Smart Home view groups devices by room (Rooms/Grid toggle), filters by kind
+and platform, and has a collapsible **Routines** panel for creating, listing and
+cancelling schedules with a live next-run countdown. `POST /api/smart/schedules`
+accepts a namespaced `deviceId` and validates that the owning platform is
+connected; bare ids are treated as legacy SmartThings devices.
+
+**OAuth sign-in (cloud platforms only).** Platforms whose vendor actually offers
+a third-party OAuth app report `authMode: 'oauth'` in the catalog, along with
+`oauthLabel`, `oauthConfigured` and `requiresClientApp`. Currently that is
+Samsung SmartThings; the self-hosted hubs and the local CLI bridges report
+`authMode: 'token'` on purpose — in those ecosystems a pasted long-lived token
+*is* the intended mechanism and there is no OAuth to use.
+
+The flow reuses the MCP connector engine (`OAuthConnector`, PKCE S256), so the
+backend owns the verifier and the pending state:
+
+1. `POST /api/smart/platforms/smartthings/oauth/start` → `{ authorizeUrl, state }`
+2. The desktop opens `authorizeUrl` in the OS browser
+3. The vendor redirects to `GET /api/smart/platforms/:key/oauth/callback?code=…&state=…`
+4. The backend validates the new token by listing devices **before** persisting,
+   then stores the JSON token set in the vault under `smartthings:oauth` — a
+   separate key from any pasted PAT, so the two can coexist
+
+Requires an app you registered yourself: set `UMBRA_SMARTTHINGS_CLIENT_ID` and
+`UMBRA_SMARTTHINGS_CLIENT_SECRET` in `backend/.env` (SmartThings is a
+confidential client — there is no PAT shortcut). Without them `oauthConfigured`
+is `false`, the button explains what's missing, and the paste-a-token form stays
+available. Access tokens are refreshed 60s before expiry and, if the vendor
+401s anyway, refreshed once and the call replayed once before failing.
+
+> Not end-to-end verified: signing in needs a real registered vendor app and a
+> browser consent round trip. The flow is covered by unit tests only.
 
 ### 8.15 Vault
 
@@ -957,7 +1026,7 @@ The cloud server runs Umbra's **headless core** — API, agent loop, MCP connect
 
 Canonical numbers live in `backend/src/core/metering/pricing.ts` — do not
 duplicate $/1M model rates here. Model lineup: Gemini 2.5 Flash (frontend +
-fast tools), GLM Long (backend + large repos), Kimi K3 (reasoning, Advanced+;
+fast tools), GLM 5 (backend + large repos), Kimi K3 (reasoning, Advanced+;
 Pro uses Kimi Thinking), Gemini 2.5 Pro (vision / computer use), Muse Spark 1.3
 / Qwen Max (agentic code), Claude Sonnet 5 (difficult / heavy architecture).
 All models run through OpenRouter on a single key with sticky prompt caching.

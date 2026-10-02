@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 import sys
+import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 # Ensure the project root is on sys.path so ``app.*`` imports work
@@ -43,6 +46,64 @@ _chat: ChatHandler | None = None
 _bot: MeetingBot | None = None
 _writer: FileWriter
 _command_parser: CommandParser
+
+
+# ---------------------------------------------------------------------------
+# API authentication
+# ---------------------------------------------------------------------------
+# Set API_TOKEN in the environment (or .env) to require
+#   Authorization: Bearer <API_TOKEN>
+# on every route except /health. Leave unset for open access (fine when the
+# API is only reachable over an SSH tunnel / loopback).
+_bearer = HTTPBearer(auto_error=False)
+
+# Naive in-memory sliding-window rate limit for FAILED auth attempts. Good
+# enough for a single-process deployment and blocks brute-forcing of the
+# token when the API is exposed publicly.
+_AUTH_FAIL_WINDOW_SEC = 60.0
+_AUTH_FAIL_LIMIT = 10
+_failed_auth: dict[str, list[float]] = {}
+
+
+def require_token(
+    request: Request,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> None:
+    """Enforce the bearer token when API_TOKEN is configured.
+
+    Uses a timing-safe comparison and rate-limits failed attempts per IP
+    (10 failures within 60 s -> HTTP 429).
+    """
+    expected = os.getenv("API_TOKEN", "")
+    if not expected:
+        return
+
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+
+    recent = [
+        t
+        for t in _failed_auth.get(client_ip, [])
+        if now - t < _AUTH_FAIL_WINDOW_SEC
+    ]
+    if len(recent) >= _AUTH_FAIL_LIMIT:
+        _failed_auth[client_ip] = recent
+        raise HTTPException(
+            status_code=429, detail="Too many failed attempts; retry later"
+        )
+
+    supplied = (
+        creds.credentials
+        if creds is not None and creds.scheme.lower() == "bearer"
+        else None
+    )
+    if supplied is None or not secrets.compare_digest(supplied, expected):
+        recent.append(now)
+        _failed_auth[client_ip] = recent
+        raise HTTPException(status_code=401, detail="Invalid or missing API token")
+
+    # Successful auth clears the failure history for this IP.
+    _failed_auth.pop(client_ip, None)
 
 
 # ---------------------------------------------------------------------------
@@ -84,19 +145,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
+# When the API is protected by a token (public exposure), also disable the
+# auto-generated docs surface so the API schema is not world-readable.
+_api_protected = bool(os.getenv("API_TOKEN", ""))
+
 app = FastAPI(
     title="Meeting Bot",
     version="1.0.0",
     lifespan=lifespan,
+    docs_url=None if _api_protected else "/docs",
+    redoc_url=None if _api_protected else "/redoc",
+    openapi_url=None if _api_protected else "/openapi.json",
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS is opt-in via CORS_ORIGINS (comma-separated). Browsers calling this API
+# authenticate with the Authorization header, which does not need the
+# credentials mode, so allow_credentials stays off.
+_cors_origins = [
+    o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()
+]
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -117,13 +192,17 @@ class StatusResponse(BaseModel):
     platform: str = ""
     running: bool = False
     transcript_lines: int = 0
+    last_diagnostics: dict = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 @app.post("/bot/join")
-async def bot_join(req: JoinRequest) -> dict[str, str]:
+async def bot_join(
+    req: JoinRequest,
+    _token: None = Depends(require_token),
+) -> dict[str, str]:
     """Start the bot worker and join a meeting."""
     global _bot, _chat
 
@@ -141,11 +220,22 @@ async def bot_join(req: JoinRequest) -> dict[str, str]:
         chat_handler=_chat,
     )
 
-    meeting_id = await _bot.join_meeting(
-        url=req.url,
-        platform=req.platform,
-        bot_name=req.bot_name,
-    )
+    try:
+        meeting_id = await _bot.join_meeting(
+            url=req.url,
+            platform=req.platform,
+            bot_name=req.bot_name,
+        )
+    except Exception as exc:
+        # join_meeting() already dumped diagnostics (screenshot + HTML) to
+        # output/ when a page existed; clean up so a retry gets a fresh bot.
+        logger.exception("Failed to join meeting (diagnostics in output/)")
+        _bot = None
+        _chat = None
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to join meeting: {exc}",
+        ) from exc
 
     # Inject the real page into the chat handler now that we have one
     if _chat and _bot._page:
@@ -159,7 +249,9 @@ async def bot_join(req: JoinRequest) -> dict[str, str]:
 
 
 @app.post("/bot/leave")
-async def bot_leave() -> dict[str, str]:
+async def bot_leave(
+    _token: None = Depends(require_token),
+) -> dict[str, str]:
     """Stop the bot worker and leave the meeting."""
     global _bot, _chat
 
@@ -185,7 +277,9 @@ async def bot_leave() -> dict[str, str]:
 
 
 @app.get("/bot/status", response_model=StatusResponse)
-async def bot_status() -> StatusResponse:
+async def bot_status(
+    _token: None = Depends(require_token),
+) -> StatusResponse:
     """Return current bot state."""
     if _bot is None:
         return StatusResponse()
@@ -195,11 +289,14 @@ async def bot_status() -> StatusResponse:
         platform=_bot._platform,
         running=_bot._running,
         transcript_lines=len(_bot.transcript),
+        last_diagnostics=_bot.last_diagnostics,
     )
 
 
 @app.get("/bot/transcript")
-async def bot_transcript() -> list[dict[str, str]]:
+async def bot_transcript(
+    _token: None = Depends(require_token),
+) -> list[dict[str, str]]:
     """Return the full transcript so far."""
     if _bot is None:
         return []
@@ -207,7 +304,10 @@ async def bot_transcript() -> list[dict[str, str]]:
 
 
 @app.post("/bot/command")
-async def bot_command(req: CommandRequest) -> dict[str, Any]:
+async def bot_command(
+    req: CommandRequest,
+    _token: None = Depends(require_token),
+) -> dict[str, Any]:
     """Send a command to the bot brain."""
     parsed = _command_parser.parse(req.command)
 

@@ -11,6 +11,7 @@
     "dev:desktop": "cd desktop && npm run desktop",
     "dev": "concurrently -k \"npm run dev:backend\" \"npm run dev:desktop\"",
     "start": "cd desktop && npm run desktop",
+    "start:all": "node scripts/start-all.mjs",
     "test": "cd backend && npm test",
     "lint": "cd backend && npm run lint"
   },

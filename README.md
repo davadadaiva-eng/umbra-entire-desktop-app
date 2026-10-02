@@ -22,6 +22,9 @@ cd ../desktop && npm install
 # Development (backend + desktop)
 cd .. && npm run dev
 
+# Development with the local voice stack (STT + TTS + backend)
+npm run start:all
+
 # Build for production
 npm run build
 ```

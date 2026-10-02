@@ -29,7 +29,7 @@ CORE IDEA
 TECH STACK
 ----------
 - Node.js + TypeScript (strict), tsconfig under `tsconfig.json`
-- Jest (ts-jest) for tests — 496 tests across 57 suites passing / all green
+- Jest (ts-jest) for tests — 1043 tests across 88 suites
 - oxlint for linting — zero issues
 - better-sqlite3 / sql.js / sqlite-vec for memory (vector search)
 - node-fetch-free: uses Node 18+ global fetch
@@ -82,7 +82,7 @@ HOW TO BUILD / TEST / RUN
 -------------------------
     npm install          # install deps
     npm run build        # tsc → dist/
-    npm test             # jest (496 tests today)
+    npm test             # jest (1043 tests today)
     npm run lint         # oxlint
 
 Run requires either a local Ollama (free, default:
@@ -112,7 +112,7 @@ Generated with sane defaults by ConfigManager on first run. Key sections
     compiler                     — skill native backend (none | node | tcc | clang)
     shadow, meeting, telco, docker — feature toggles + provider settings
 
-WHAT IS DONE (state: build+tests+lint green, 496 tests / 57 suites)
+WHAT IS DONE (state: build+tests+lint green, 1043 tests / 88 suites)
 -------------------------------------------------------------------
 1. Agent loop: planning (with clarification), step execution (browse, desktop,
    ghost real-desktop, files, repos, video tools, web search), self-healing,
