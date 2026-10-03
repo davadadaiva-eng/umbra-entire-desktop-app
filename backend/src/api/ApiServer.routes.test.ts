@@ -1192,3 +1192,28 @@ describe('auth signup and login', () => {
     expect(res.json.user.token).toBe('tok-login');
   });
 });
+
+// ── Task-scope ID guards (403, no dep call) ─────────────────────────
+
+describe('task-scope guards', () => {
+  test('POST /api/worker/claim rejects slashed ids with 403', async () => {
+    const before = deps.calls.length;
+    const res = await api('/api/worker/claim', 'POST', { taskId: 'a/b', workerId: 'w' });
+    expect(res.status).toBe(403);
+    expect(deps.calls.length).toBe(before);
+  });
+
+  test('POST /api/actions/review rejects spaced ids with 403', async () => {
+    const before = deps.calls.length;
+    const res = await api('/api/actions/review', 'POST', { proposalId: 'a b', approved: true, hash: 'h' });
+    expect(res.status).toBe(403);
+    expect(deps.calls.length).toBe(before);
+  });
+
+  test('POST /api/input/:id/answer rejects traversal taskIds with 403', async () => {
+    const before = deps.calls.length;
+    const res = await api('/api/input/in-1/answer', 'POST', { taskId: '../x', answer: 'yes' });
+    expect(res.status).toBe(403);
+    expect(deps.calls.length).toBe(before);
+  });
+});

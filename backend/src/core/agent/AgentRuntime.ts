@@ -1647,6 +1647,18 @@ Relevant knowledge: ${contextBlock}` },
       return undefined;
     }
 
+    // Never steal a live lease held by another worker; expired leases
+    // remain claimable so crashed workers don't wedge the queue.
+    if (
+      task.leaseOwner &&
+      task.leaseOwner !== workerId &&
+      task.leaseDeadline &&
+      Date.parse(task.leaseDeadline) > Date.now()
+    ) {
+      getLogger().debug({ taskId, workerId, owner: task.leaseOwner }, 'Task lease held by a live worker — claim denied');
+      return undefined;
+    }
+
     // Try to acquire lease via CAS
     const now = new Date().toISOString();
     const deadline = new Date(Date.now() + 60000).toISOString(); // 60s lease

@@ -7,6 +7,7 @@
  */
 import type { ApiServerDeps } from '../ApiServer';
 import { AppError } from '../AppError';
+import { assertSafeId } from '../taskScope';
 
 type Handler = (url: URL, body: Record<string, unknown>, match?: RegExpMatchArray) => Promise<unknown>;
 export type AgentRouteEntry = [RegExp, Handler];
@@ -61,6 +62,8 @@ export function agentRoutes(deps: ApiServerDeps): AgentRouteEntry[] {
       const taskId = String(body.taskId || '');
       const workerId = String(body.workerId || '');
       if (!taskId || !workerId) throw new Error('taskId and workerId required');
+      assertSafeId(taskId, 'taskId');
+      assertSafeId(workerId, 'workerId');
       return { task: await deps.workerClaim(taskId, workerId) };
     }],
     [/^POST \/api\/worker\/heartbeat$/, async (_url, body) => {
@@ -68,6 +71,8 @@ export function agentRoutes(deps: ApiServerDeps): AgentRouteEntry[] {
       const taskId = String(body.taskId || '');
       const workerId = String(body.workerId || '');
       if (!taskId || !workerId) throw new Error('taskId and workerId required');
+      assertSafeId(taskId, 'taskId');
+      assertSafeId(workerId, 'workerId');
       return { ok: await deps.workerHeartbeat(taskId, workerId) };
     }],
     [/^POST \/api\/worker\/release$/, async (_url, body) => {
@@ -75,6 +80,8 @@ export function agentRoutes(deps: ApiServerDeps): AgentRouteEntry[] {
       const taskId = String(body.taskId || '');
       const workerId = String(body.workerId || '');
       if (!taskId || !workerId) throw new Error('taskId and workerId required');
+      assertSafeId(taskId, 'taskId');
+      assertSafeId(workerId, 'workerId');
       await deps.workerRelease(taskId, workerId);
       return { ok: true };
     }],
@@ -82,6 +89,7 @@ export function agentRoutes(deps: ApiServerDeps): AgentRouteEntry[] {
       if (!deps.workerRecover) throw missing('workerRecover');
       const workerId = String(body.workerId || '');
       if (!workerId) throw new Error('workerId required');
+      assertSafeId(workerId, 'workerId');
       return { reclaimed: await deps.workerRecover(workerId) };
     }],
     // Action proposal review flow
@@ -91,6 +99,7 @@ export function agentRoutes(deps: ApiServerDeps): AgentRouteEntry[] {
       const action = String(body.action || '');
       const args = (body.args && typeof body.args === 'object') ? body.args as Record<string, unknown> : {};
       if (!taskId || !action) throw new Error('taskId and action required');
+      assertSafeId(taskId, 'taskId');
       const idempotencyKey = body.idempotencyKey !== undefined ? String(body.idempotencyKey) : undefined;
       return { proposal: await deps.proposeAction(taskId, action, args, idempotencyKey) };
     }],
@@ -100,6 +109,7 @@ export function agentRoutes(deps: ApiServerDeps): AgentRouteEntry[] {
       const approved = Boolean(body.approved);
       const hash = String(body.hash || '');
       if (!proposalId || !hash) throw new Error('proposalId and hash required');
+      assertSafeId(proposalId, 'proposalId');
       return { result: await deps.reviewAction(proposalId, approved, hash) };
     }],
     [/^GET \/api\/actions\/proposal\/([\w-]+)$/, async (_url, _body, match) => {
@@ -129,6 +139,8 @@ export function agentRoutes(deps: ApiServerDeps): AgentRouteEntry[] {
       // taskId is in the body since inputId alone isn't enough to route
       const taskId = String(body.taskId || '');
       if (!taskId) throw new Error('taskId required');
+      assertSafeId(inputId, 'inputId');
+      assertSafeId(taskId, 'taskId');
       return { result: await deps.submitInput(taskId, inputId, answer) };
     }],
     [/^POST \/api\/chat$/, async (_url, body) => {

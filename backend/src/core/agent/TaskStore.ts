@@ -321,6 +321,8 @@ export class TaskStore {
       resumeNode: (raw.resumeNode as Task['resumeNode']) || undefined,
       version: raw.version !== undefined ? Number(raw.version) : 0,
       idempotencyKey: raw.idempotencyKey as string | undefined,
+      leaseOwner: raw.leaseOwner !== undefined ? String(raw.leaseOwner) : undefined,
+      leaseDeadline: raw.leaseDeadline !== undefined ? String(raw.leaseDeadline) : undefined,
     };
   }
 }
