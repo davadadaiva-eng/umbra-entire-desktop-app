@@ -1744,9 +1744,9 @@ Relevant knowledge: ${contextBlock}` },
   }
 
   // Action proposal review flow (delegates to ConsentGate)
-  async proposeAction(taskId: string, action: string, args: Record<string, unknown>): Promise<ActionProposal> {
+  async proposeAction(taskId: string, action: string, args: Record<string, unknown>, idempotencyKey?: string): Promise<ActionProposal> {
     if (!this.consent) throw new Error('ConsentGate not configured');
-    return this.consent.proposeAction(taskId, action, args);
+    return this.consent.proposeAction(taskId, action, args, idempotencyKey);
   }
 
   async reviewAction(proposalId: string, approved: boolean, hash: string): Promise<{ success: boolean; proposal?: ActionProposal; error?: string }> {

@@ -91,7 +91,8 @@ export function agentRoutes(deps: ApiServerDeps): AgentRouteEntry[] {
       const action = String(body.action || '');
       const args = (body.args && typeof body.args === 'object') ? body.args as Record<string, unknown> : {};
       if (!taskId || !action) throw new Error('taskId and action required');
-      return { proposal: await deps.proposeAction(taskId, action, args) };
+      const idempotencyKey = body.idempotencyKey !== undefined ? String(body.idempotencyKey) : undefined;
+      return { proposal: await deps.proposeAction(taskId, action, args, idempotencyKey) };
     }],
     [/^POST \/api\/actions\/review$/, async (_url, body) => {
       if (!deps.reviewAction) throw missing('reviewAction');

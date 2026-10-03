@@ -39,7 +39,7 @@ export interface ApiServerDeps {
   workerRelease?(taskId: string, workerId: string): Promise<unknown>;
   workerRecover?(workerId: string): Promise<unknown>;
   /** Action proposal review flow. */
-  proposeAction?(taskId: string, action: string, args: Record<string, unknown>): Promise<unknown>;
+  proposeAction?(taskId: string, action: string, args: Record<string, unknown>, idempotencyKey?: string): Promise<unknown>;
   reviewAction?(proposalId: string, approved: boolean, hash: string): Promise<unknown>;
   getProposal?(proposalId: string): Promise<unknown>;
   listProposals?(taskId: string): Promise<unknown>;

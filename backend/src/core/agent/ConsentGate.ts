@@ -67,15 +67,28 @@ export class ConsentGate {
     return 'denied';
   }
 
-  /** Create an action proposal with SHA-256 hash for staleness detection. */
-  async proposeAction(taskId: string, action: string, args: Record<string, unknown>): Promise<ActionProposal> {
+  /**
+   * Create an action proposal with SHA-256 hash for staleness detection.
+   * When `idempotencyKey` is given the proposal id is deterministic
+   * (sha256 of the key) and a retry returns the existing proposal instead
+   * of creating a duplicate — mirrors ApprovalGate.propose().
+   */
+  async proposeAction(taskId: string, action: string, args: Record<string, unknown>, idempotencyKey?: string): Promise<ActionProposal> {
     if (this.isEmergencyStopArmed()) throw new Error('Emergency stop is armed; cannot propose actions');
     const hash = this.computeHash(action, args);
+    const id =
+      idempotencyKey === undefined
+        ? (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`)
+        : createHash('sha256').update(idempotencyKey).digest('hex');
+    if (idempotencyKey !== undefined) {
+      const existing = await this.getProposal(id);
+      if (existing) return existing;
+    }
     const now = new Date();
     const expiresAt = new Date(now.getTime() + 30 * 60 * 1000); // 30 minutes
 
     const proposal: ActionProposal = {
-      id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      id,
       taskId,
       action,
       args,
@@ -91,11 +104,20 @@ export class ConsentGate {
     return proposal;
   }
 
-  /** Review a proposal — verifies hash matches to prevent stale approvals. */
+  /**
+   * Review a proposal — verifies hash matches to prevent stale approvals.
+   * Deciding an already-decided proposal is a no-op returning its current
+   * state (single-claim, mirrors ApprovalGate.decide()).
+   */
   async reviewAction(proposalId: string, decision: ProposalDecision): Promise<{ success: boolean; proposal?: ActionProposal; error?: string }> {
     const proposal = await this.getProposal(proposalId);
     if (!proposal) {
       return { success: false, error: 'Proposal not found' };
+    }
+
+    // Single-claim: an already-decided proposal keeps its state.
+    if (proposal.status !== 'awaiting_review') {
+      return { success: false, error: `Proposal already ${proposal.status}`, proposal };
     }
 
     // Check expiration

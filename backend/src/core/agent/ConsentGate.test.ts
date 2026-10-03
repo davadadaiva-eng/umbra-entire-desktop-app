@@ -57,4 +57,30 @@ describe('ConsentGate', () => {
     const gate = new ConsentGate({ dataDir, askOncePerSession: false });
     expect(gate.getState().askOncePerSession).toBe(false);
   });
+
+  test('propose with the same idempotencyKey returns the existing proposal', async () => {
+    const gate = new ConsentGate({ dataDir });
+    const a = await gate.proposeAction('t-1', 'delete-file', { path: 'a.txt' }, 'key-1');
+    const b = await gate.proposeAction('t-1', 'delete-file', { path: 'a.txt' }, 'key-1');
+    expect(b.id).toBe(a.id);
+  });
+
+  test('propose without a key creates distinct proposals', async () => {
+    const gate = new ConsentGate({ dataDir });
+    const a = await gate.proposeAction('t-1', 'noop', {});
+    const b = await gate.proposeAction('t-1', 'noop', {});
+    expect(b.id).not.toBe(a.id);
+  });
+
+  test('reviewing an already-decided proposal is a no-op', async () => {
+    const gate = new ConsentGate({ dataDir });
+    const proposal = await gate.proposeAction('t-1', 'noop', {});
+    const first = await gate.reviewAction(proposal.id, { approved: true, hash: proposal.hash });
+    expect(first.success).toBe(true);
+    const second = await gate.reviewAction(proposal.id, { approved: false, hash: proposal.hash });
+    expect(second.success).toBe(false);
+    expect(second.error).toMatch(/already approved/);
+    const stored = await gate.getProposal(proposal.id);
+    expect(stored?.status).toBe('approved');
+  });
 });
