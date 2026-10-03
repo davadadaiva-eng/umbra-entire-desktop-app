@@ -50,8 +50,9 @@ export function Sidebar() {
         flexShrink: 0,
       }}
     >
-      <div
+      <nav
         ref={navRef}
+        aria-label="Primary"
         className="flex-1 px-2.5 py-4 space-y-0.5 overflow-y-auto overflow-x-hidden"
         style={{ display: 'flex', flexDirection: 'column', alignItems: collapsed ? 'center' : 'stretch' }}
       >
@@ -62,6 +63,8 @@ export function Sidebar() {
               key={item.id}
               onClick={() => setView(item.id)}
               title={collapsed ? item.label : undefined}
+              aria-label={collapsed ? item.label : undefined}
+              aria-current={isActive ? 'page' : undefined}
               className="nav-item relative flex items-center gap-3 w-full text-left px-3 py-2 rounded-xl transition-all duration-150"
               style={{
                 background: isActive ? 'var(--surface-3)' : 'transparent',
@@ -92,14 +95,14 @@ export function Sidebar() {
             </button>
           );
         })}
-      </div>
+      </nav>
 
       <div
         ref={bottomRef}
         className="px-3 py-3 hairline-b"
         style={{ background: 'transparent', display: 'flex', justifyContent: collapsed ? 'center' : undefined }}
       >
-        <div className="flex items-center gap-3 px-1.5 py-2" style={{ width: collapsed ? undefined : '100%' }}>
+        <div className="flex items-center gap-3 px-1.5 py-2" style={{ width: collapsed ? undefined : '100%', flexDirection: collapsed ? 'column' : undefined }}>
           <span
             className="flex-shrink-0 rounded-full relative"
             style={{
@@ -131,10 +134,22 @@ export function Sidebar() {
                 className="btn-ghost flex-shrink-0"
                 style={{ width: 30, height: 30, padding: 0 }}
                 title="Sign out"
+                aria-label="Sign out"
               >
                 <LogOut size={13} />
               </button>
             </>
+          )}
+          {collapsed && (
+            <button
+              onClick={logout}
+              className="btn-ghost flex-shrink-0 mt-2"
+              style={{ width: 30, height: 30, padding: 0 }}
+              title="Sign out"
+              aria-label="Sign out"
+            >
+              <LogOut size={13} />
+            </button>
           )}
         </div>
       </div>
@@ -156,6 +171,8 @@ export function Sidebar() {
           transition: 'color 0.2s',
         }}
         title={collapsed ? 'Expand menu' : 'Collapse menu'}
+        aria-label={collapsed ? 'Expand menu' : 'Collapse menu'}
+        aria-expanded={!collapsed}
         onMouseEnter={(e) => (e.currentTarget.style.color = avatar.accent)}
         onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-dim)')}
       >

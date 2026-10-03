@@ -75,7 +75,7 @@ export default function App() {
 
   if (!isAuthReady) {
     return (
-      <div className="fixed inset-0 flex items-center justify-center" style={{ background: 'var(--bg)' }}>
+      <div className="fixed inset-0 flex items-center justify-center" style={{ background: 'var(--bg)' }} role="status" aria-label="Loading Umbra OS">
         <div
           className="orb"
           style={{ width: 56, height: 56, background: 'var(--accent-gradient)', border: 'none', boxShadow: '0 0 40px rgba(59,130,246,0.35)' }}

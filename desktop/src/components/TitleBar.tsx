@@ -3,7 +3,7 @@ import gsap from 'gsap';
 import { useAppStore } from '../stores/appStore';
 
 export function TitleBar() {
-  const { avatar, agents } = useAppStore();
+  const { avatar, agents, backendOnline } = useAppStore();
   const ref = useRef<HTMLDivElement>(null);
   const desktopPlatform = (window as unknown as { umbraDesktop?: { platform?: string } }).umbraDesktop?.platform;
 
@@ -20,7 +20,7 @@ export function TitleBar() {
       className="flex items-center justify-between px-4 select-none hairline-b"
       style={{ height: 44, background: 'rgba(6,7,9,0.7)', backdropFilter: 'blur(18px)', WebkitBackdropFilter: 'blur(18px)' }}
     >
-      <div className="flex items-center gap-1.5">
+      <div className="flex items-center gap-1.5" aria-hidden="true">
         <div className="w-3 h-3 rounded-full" style={{ background: '#C0443C' }} />
         <div className="w-3 h-3 rounded-full" style={{ background: '#C09A3C' }} />
         <div className="w-3 h-3 rounded-full" style={{ background: '#3FA354' }} />
@@ -52,10 +52,11 @@ export function TitleBar() {
         </span>
         <span
           className="text-[11px] font-medium uppercase tracking-widest px-3 py-1 rounded-full flex items-center gap-1.5"
-          style={{ background: 'var(--surface-2)', color: avatar.accent, border: `1px solid ${avatar.accent}44` }}
+          style={{ background: 'var(--surface-2)', color: backendOnline ? avatar.accent : 'var(--text-faint)', border: `1px solid ${backendOnline ? `${avatar.accent}44` : 'var(--hairline)'}` }}
+          role="status"
         >
-          <span className="w-1.5 h-1.5 rounded-full" style={{ background: avatar.accent, animation: 'titlebar-pulse 1.4s infinite' }} />
-          online
+          <span className="w-1.5 h-1.5 rounded-full" style={{ background: backendOnline ? avatar.accent : 'var(--text-faint)', animation: backendOnline ? 'titlebar-pulse 1.4s infinite' : 'none' }} />
+          {backendOnline ? 'online' : 'offline'}
         </span>
       </div>
 
