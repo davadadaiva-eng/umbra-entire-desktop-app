@@ -1636,10 +1636,8 @@ export class UmbraOS {
         .catch(() => getLogger().debug('Agent engine bridge registration skipped'));
     }
 
-    this.watcher?.start();
     this.healer.start(5000);
     this.audio.start();
-    this.proactive?.start();
     this.issueWatcher?.start();
 
     // ── Live Shadowing (watch + takeover the real screen) ────
@@ -1680,16 +1678,6 @@ export class UmbraOS {
       this.journal.generateDailyJournal().catch(() => {});
       this.topicIndexer.rebuildIndex();
     }, 3600000);
-
-    // ── Recall → knowledge bridge every 15 minutes ───────────
-    setInterval(() => {
-      this.bridge.ingestSince(new Date(Date.now() - 15 * 60 * 1000)).catch(() => {});
-    }, 15 * 60 * 1000);
-
-    // ── Macro synthesis pass every 30 minutes ────────────────
-    setInterval(() => {
-      this.macros.analyzePatterns().catch(() => {});
-    }, 30 * 60 * 1000);
 
     this.initialized = true;
     eventBus.emit('app:ready');
@@ -4147,22 +4135,6 @@ export class UmbraOS {
     return tools.length;
   }
 
-  async getMacros(): Promise<any> {
-    return this.memory.getAllMacros();
-  }
-
-  async getActivitySummary(): Promise<any> {
-    return this.memory.getActivitySummary();
-  }
-
-  async getLearnedPatterns(): Promise<any> {
-    return this.memory.getHighConfidencePatterns();
-  }
-
-  async getSessions(): Promise<any> {
-    return this.memory.getSessions();
-  }
-
   async getPrivacyStats(): Promise<any> {
     return this.privacy.getStats();
   }
@@ -4191,19 +4163,6 @@ export class UmbraOS {
 
   async rebuildTopicIndex(): Promise<void> {
     this.topicIndexer.rebuildIndex();
-  }
-
-  async manuallingestKnowledge(): Promise<any> {
-    return this.bridge.ingestSince(new Date(Date.now() - 86400000));
-  }
-
-  async getProactiveSuggestions(): Promise<any> {
-    const context = this.memory.getUserActivityPatterns(15);
-    return this.proactive['generateSuggestions'](context);
-  }
-
-  async analyzePatterns(): Promise<void> {
-    await this.macros.analyzePatterns();
   }
 
   // ── Social automation (X.com / YouTube / Instagram) ───────
