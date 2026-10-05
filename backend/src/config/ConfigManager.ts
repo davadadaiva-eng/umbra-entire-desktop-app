@@ -55,6 +55,7 @@ const DEFAULT_CONFIG: UmbraConfig = {
     windowWidth: 1280,
     windowHeight: 800,
     enabled: true,
+    useVirtualDesktop: false,
   },
   repos: [],
   github: {
@@ -112,7 +113,9 @@ const DEFAULT_CONFIG: UmbraConfig = {
     oauthClients: {},
   },
   shadow: {
-    enabled: true,
+    // Always-on screen capture is OFF by default (opt-in). On-demand
+    // capture for agent tasks is unaffected.
+    enabled: false,
     capture: 'gdi',
     fps: 15,
   },
@@ -130,7 +133,9 @@ const DEFAULT_CONFIG: UmbraConfig = {
   },
   awareness: {
     enabled: true,
-    watch: true,
+    // The continuous watch loop (frame + cursor trail) is OFF by default
+    // (opt-in via config). On-demand ask/snapshot/state stay available.
+    watch: false,
     watchIntervalMs: 1000,
     followCursor: true,
   },

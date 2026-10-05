@@ -70,7 +70,7 @@ export interface ApiServerDeps {
   /** OAuth callback completion — code + state (connector id recovered from state). */
   completeMcpOauth(code: string, state: string): Promise<unknown>;
   /** OAuth token status (masked — tokens never returned). */
-  getMcpOauthStatus(id: string): Record<string, unknown>;
+  getMcpOauthStatus(id: string): Promise<Record<string, unknown>>;
   /** Refresh an expiring OAuth token. */
   refreshMcpOauth(id: string): Promise<unknown>;
   syncExternalConnectors(opts?: { maxPerSource?: number }): Promise<unknown>;
@@ -178,6 +178,8 @@ export interface ApiServerDeps {
   stopLoopback(id: string): Promise<unknown>;
   listRecordings(): Promise<unknown>;
   listDevices(): Promise<unknown>;
+  /** Fresh LAN QR pairing bundle (PWA link + payload + QR data URL). */
+  getLanPairing(): Promise<unknown>;
   createDeviceInvite(name: string): Promise<unknown>;
   joinDevice(code: string, meta: { name: string; role?: string; capabilities?: string[] }): Promise<unknown>;
   revokeDevice(deviceId: string): Promise<unknown>;
@@ -1093,7 +1095,7 @@ export class ApiServer {
       [/^GET \/api\/mcp\/oauth\/status$/, async url => {
         const id = url.searchParams.get('id') || '';
         if (!id) throw new Error('id is required');
-        return { oauth: this.deps.getMcpOauthStatus(id) };
+        return { oauth: await this.deps.getMcpOauthStatus(id) };
       }],
       [/^POST \/api\/mcp\/oauth\/refresh$/, async (_url, body) => {
         const id = String(body.id || '');
@@ -1208,6 +1210,7 @@ export class ApiServer {
         const msg = (body.msg && typeof body.msg === 'object') ? body.msg as Record<string, unknown> : {};
         return { sent: await this.deps.sendToDevice(deviceId, msg) };
       }],
+      [/^GET \/api\/pairing$/, async () => ({ pairing: await this.deps.getLanPairing() })],
       [/^POST \/api\/chrome\/telemetry$/, async (_url, body) => {
         const events = Array.isArray(body.events) ? body.events : [];
         const sessionId = String(body.sessionId || '');

@@ -35,6 +35,10 @@ Once the sidecar is up, gateway providers appear as ordinary Umbra connectors:
 docker compose --profile connectors up -d
 # serves http://127.0.0.1:3000  + console http://127.0.0.1:3000/
 
+# …or zero-Docker (same contract, published npm runtime on loopback):
+npm run connectors:host
+# serves http://127.0.0.1:3000 (data: ~/.umbra/open-connector)
+
 # 2. point Umbra at it
 OPENCONNECTOR_BASE_URL=http://127.0.0.1:3000 npm run dev
 ```
@@ -46,9 +50,11 @@ curl -s http://127.0.0.1:3000/v1/health
 curl -s "http://127.0.0.1:3000/v1/actions?service=github" | head -c 500
 ```
 
-Full local dev (no Docker): `npm i -g @oomol-lab/open-connector` is NOT needed —
-see `https://github.com/oomol-lab/open-connector/blob/main/docs/quickstart.md`
-(`docker compose up`, Node 22+, `npm run dev` on port 3000).
+Full local dev (no Docker): `npm run connectors:host` runs the published
+`@oomol-lab/open-connector` runtime as-is via `backend/open-connector-host.mjs`
+(no global install, no provider source copied). Env: `OPENCONNECTOR_PORT`,
+`OOMOL_CONNECT_DATA_DIR` (default `~/.umbra/open-connector`), plus the token
+keys in `open-connector.example.env`.
 
 ## Connect a provider (example: GitHub API key)
 
@@ -65,6 +71,14 @@ OAuth2 (Gmail, Slack…): register `<publicOrigin>/oauth/callback` with the
 provider, save client via `PUT /api/oauth/configs/:service`, start with
 `POST /api/oauth/authorizations`. Named accounts via `connectionName: "work"`
 + header `x-oo-connector-alias: work`. See open-connector `docs/credentials.md`.
+
+End-user transparency: Umbra's `/api/mcp/oauth/start` + `/status` routes are
+gateway-aware, so a gateway-only provider shows the exact same desktop flow
+as a native one — `Sign in with X` → system browser → `Finish in your
+browser…` → connected. No "open-connector" branding appears anywhere in the
+UI or in error text. The one admin-side prerequisite: each OAuth provider's
+app (client id/secret) must be registered at the sidecar once (see above) —
+after that every user authorizes with a plain click, no per-user setup.
 
 ## Use from Umbra (TypeScript)
 

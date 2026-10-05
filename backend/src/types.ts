@@ -152,6 +152,8 @@ export interface UmbraConfig {
     windowWidth: number;
     windowHeight: number;
     enabled: boolean;
+    /** Legacy 2nd virtual desktop (Win+Ctrl+D). Default false = work on the user's desktop. */
+    useVirtualDesktop?: boolean;
   };
   repos: RepoConfig[];
   /**

@@ -97,8 +97,13 @@ function normalizeProvider(raw: any): OpenConnectorProvider | null {
   if (!raw || typeof raw !== 'object') return null;
   const service = String(raw.service ?? raw.id ?? raw.slug ?? '').trim();
   if (!service) return null;
+  // Live shape: [{ id, displayName }] — test shape: plain strings. Both work.
   const cats = Array.isArray(raw.categories)
-    ? raw.categories.map((c: unknown) => String(c)).filter(Boolean)
+    ? raw.categories
+      .map((c: unknown) => typeof c === 'string'
+        ? c
+        : String((c as any)?.displayName ?? (c as any)?.id ?? ''))
+      .filter(Boolean)
     : raw.category ? [String(raw.category)] : [];
   const authRaw = raw.authTypes ?? raw.authType ?? raw.auth?.map?.((a: any) => a?.type) ?? raw.auth;
   return {
@@ -238,7 +243,10 @@ export class OpenConnectorBridge {
         this.fetchImpl,
         `${this.base}/v1/health`,
         { method: 'GET', headers: authHeaders(this.runtimeToken, this.adminToken, false) },
-        Math.min(this.timeoutMs, 10_000),
+        // Generous: loopback is normally ms-fast, but a cold/busy backend can
+        // take 10s+ to turn its own event loop. Refused connections still
+        // fail fast, so a downed sidecar degrades quickly.
+        Math.min(this.timeoutMs, 30_000),
       );
       void json;
       return { ok: status >= 200 && status < 300, status };
@@ -274,7 +282,8 @@ export class OpenConnectorBridge {
           this.fetchImpl,
           `${this.base}${path}`,
           { method: 'GET', headers: authHeaders(this.runtimeToken, this.adminToken, false) },
-          Math.min(this.timeoutMs, 15_000),
+          // Same reasoning as health(): tolerate a busy host process.
+          Math.min(this.timeoutMs, 60_000),
         );
         if (status < 200 || status >= 300) continue;
         const providers = extractArray(json).map(normalizeProvider).filter((p): p is OpenConnectorProvider => !!p);
@@ -371,7 +380,9 @@ export class OpenConnectorBridge {
     );
     const url = json?.data?.authorizationUrl ?? json?.authorizationUrl;
     if (status < 200 || status >= 300 || !url) {
-      throw new Error(json?.message || json?.error || `Gateway OAuth start failed for ${service} (HTTP ${status})`);
+      // User-facing text names only the provider — the gateway itself is
+      // invisible by design, so its name never appears in errors.
+      throw new Error(json?.message || json?.error || `Could not start sign-in for ${service} (HTTP ${status})`);
     }
     return { authorizationUrl: String(url) };
   }

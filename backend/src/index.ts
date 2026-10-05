@@ -2,7 +2,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { ConfigManager } from './config/ConfigManager';
 import { KnowledgeGraph } from './knowledge/KnowledgeGraph';
-import { RecallToKnowledgeBridge } from './knowledge/RecallToKnowledgeBridge';
 import { BrowserUseBridge } from './core/browseruse/BrowserUseBridge';
 import { DeepUnderstandingEngine } from './knowledge/DeepUnderstandingEngine';
 import { eventBus } from './core/EventBus';
@@ -18,7 +17,6 @@ import { WorkspaceFiles } from './core/agent/WorkspaceFiles';
 import { ReposManager } from './core/agent/ReposManager';
 import { InjectionGuard } from './core/agent/InjectionGuard';
 import { ConsentGate } from './core/agent/ConsentGate';
-import { ProactiveAgent } from './core/agent/ProactiveAgent';
 import { IssueWatcher } from './core/agent/IssueWatcher';
 import { VirtualDisplayManager } from './core/workspace/VirtualDisplayManager';
 import { InputGuard } from './core/workspace/InputGuard';
@@ -26,8 +24,6 @@ import { SwarmManager } from './core/workspace/SwarmManager';
 import { AgentDesktop } from './core/workspace/AgentDesktop';
 import { SelfHealingGuard } from './core/selfheal/SelfHealingGuard';
 import { VectorMemory } from './core/memory/VectorMemory';
-import { ActivityWatcher } from './core/recall/ActivityWatcher';
-import { MacroSynthesizer } from './core/recall/MacroSynthesizer';
 import { AuditVault } from './core/vault/AuditVault';
 import { NoiseCancellationEngine } from './core/audio/NoiseCancellationEngine';
 import { PrivacyGuard } from './core/privacy/PrivacyGuard';
@@ -140,6 +136,8 @@ import { SmartRoutingMatrix, buildStickySystemPrompt } from './core/metering/Sma
 import { normalizeRoutePlan, TASK_TO_SLOT } from './core/metering/pricing';
 import Stripe from 'stripe';
 import * as crypto from 'crypto';
+import * as os from 'os';
+import QRCode from 'qrcode';
 
 /**
  * Bridge a legacy ConnectorTool (keyword retrieval shape) into a
@@ -182,10 +180,26 @@ export function umbraEngine(): UmbraEngine {
   return v === 'desktop2' || v === 'ghost' ? v : 'browseruse';
 }
 
+/**
+ * First non-internal IPv4 address (the one a phone on the same Wi-Fi must
+ * use). Pairing payloads, QR codes and join links that say `localhost` are
+ * unscannable from any other device — this is the fix.
+ */
+export function lanIPv4(): string | null {
+  try {
+    const nets = os.networkInterfaces();
+    for (const name of Object.keys(nets)) {
+      for (const net of nets[name] || []) {
+        if (net.family === 'IPv4' && !net.internal && net.address) return net.address;
+      }
+    }
+  } catch { /* no network info */ }
+  return null;
+}
+
 export class UmbraOS {
   private configManager!: ConfigManager;
   private knowledge!: KnowledgeGraph;
-  private bridge!: RecallToKnowledgeBridge;
   private fastEngine!: BrowserUseBridge;
   private deepEngine!: DeepUnderstandingEngine;
   private llm!: LLMConnector;
@@ -193,7 +207,6 @@ export class UmbraOS {
   private agent!: AgentRuntime;
   private repos!: ReposManager;
   private consent!: ConsentGate;
-  private proactive!: ProactiveAgent;
   private issueWatcher?: IssueWatcher;
   private companionRegistry?: CompanionRegistry;
   private taskStore!: TaskStore;
@@ -204,8 +217,6 @@ export class UmbraOS {
   private swarm!: SwarmManager;
   private healer!: SelfHealingGuard;
   private memory!: VectorMemory;
-  private watcher?: ActivityWatcher;
-  private macros!: MacroSynthesizer;
   private vault!: AuditVault;
   private privacy!: PrivacyGuard;
   private screenReader?: ScreenReader;
@@ -417,23 +428,11 @@ export class UmbraOS {
     this.topicIndexer = new TopicIndexer(config.paths.knowledgeDir);
     this.topicIndexer.initialize();
 
-    // ── Activity Watcher (watches your every move) — desktop only ──
-    if (!this.headless && this.screenReader) {
-      this.watcher = new ActivityWatcher(
-        this.memory, this.knowledge, this.privacy,
-        this.screenReader,
-        {
-          pollIntervalMs: 2000,
-          captureIntervalMs: 2000,
-          idleThresholdSec: 120,
-          useScreenReader: true,
-        },
-      );
-    }
-
-    // ── Knowledge Bridge (recall → brain) ────────────────────
-    this.bridge = new RecallToKnowledgeBridge(this.memory, this.knowledge);
-    this.bridge.setLLM(this.llm);
+    // ── Journal Generator (hourly/daily organized brain) ─────
+    this.journal = new JournalGenerator(this.memory, this.knowledge, this.privacy, config.paths.knowledgeDir);
+    this.journal.initialize();
+    this.topicIndexer = new TopicIndexer(config.paths.knowledgeDir);
+    this.topicIndexer.initialize();
 
     // ── Virtual Desktop Infrastructure ───────────────────────
     this.displayManager = new VirtualDisplayManager({
@@ -484,7 +483,7 @@ export class UmbraOS {
       });
     }
 
-    // ── RealDesktop2 — "human mode": real apps + real Chrome on a 2nd desktop ──
+    // ── RealDesktop2 — "human mode": real apps + real Chrome on the USER's desktop ──
     if (!this.headless && this.screenReader) {
       this.realDesktop = new RealDesktop2(
         this.consent,
@@ -497,6 +496,7 @@ export class UmbraOS {
           windowWidth: config.realDesktop.windowWidth,
           windowHeight: config.realDesktop.windowHeight,
           dataDir: config.paths.dataDir,
+          useVirtualDesktop: config.realDesktop.useVirtualDesktop,
         },
       );
     }
@@ -632,18 +632,6 @@ export class UmbraOS {
     this.deepEngine = new DeepUnderstandingEngine(this.memory, this.knowledge);
     this.deepEngine.setLLM(this.llm);
 
-    // ── Proactive Agent (acts without being asked) — desktop only ──
-    if (!this.headless && this.watcher) {
-      this.proactive = new ProactiveAgent(this.memory, this.knowledge, this.watcher, this.bridge, this.deepEngine);
-      this.proactive.setAgent(this.agent);
-      this.proactive.setLLM(this.llm);
-    }
-
-    // ── Macro Synthesizer ────────────────────────────────────
-    this.macros = new MacroSynthesizer(this.memory);
-    this.macros.setLLM(this.llm);
-    this.macros.setAgent(this.agent);
-
     // ── Audio DSP ────────────────────────────────────────────
     this.audio = new NoiseCancellationEngine(config.audio.gestureCooldownMs);
 
@@ -675,7 +663,6 @@ export class UmbraOS {
       this.hud = new CommandHUD();
       this.hud.registerSubsystems({
         agent: this.agent,
-        macros: this.macros,
         config: this.configManager,
         knowledge: this.knowledge,
         screenAsk: (q, intent) => this.screenAsk(q, intent),
@@ -720,10 +707,7 @@ export class UmbraOS {
       armEmergencyStop: () => this.consent.armEmergencyStop(),
       disarmEmergencyStop: () => this.consent.disarmEmergencyStop(),
       searchKnowledge: q => this.searchKnowledge(q),
-      getMacros: () => this.getMacros(),
-      getSessions: () => this.getSessions(),
       getPrivacyStats: () => this.getPrivacyStats(),
-      getActivitySummary: () => this.getActivitySummary(),
       getSwarmStatus: () => this.getSwarmStatus(),
       getAuditStats: () => this.getAuditStats(),
       getRepos: () => this.getRepos(),
@@ -792,6 +776,7 @@ export class UmbraOS {
       stopLoopback: (id: string) => this.recordingService ? this.recordingService.stop(id) : Promise.reject(new Error('Recording service not ready')),
       listRecordings: () => Promise.resolve(this.recordingService ? this.recordingService.list() : []),
       listDevices: () => this.getDevices(),
+      getLanPairing: () => this.getLanPairing(),
       createDeviceInvite: name => this.createDeviceInvite(name),
       joinDevice: (code, meta) => this.joinDevice(code, meta),
       revokeDevice: deviceId => this.revokeDevice(deviceId),
@@ -1039,8 +1024,10 @@ export class UmbraOS {
       this.openConnector = new OpenConnectorBridge();
       this.connectorApi.setOpenConnector(this.openConnector);
       const bridge = this.openConnector;
-      void bridge.isAvailable().then(ok =>
-        getLogger().info({ ok, base: bridge.getBaseUrl() }, 'Open-connector gateway status'));
+      // health() (not isAvailable()) so a failure logs its HTTP status —
+      // status 0 = sidecar unreachable, 4xx/5xx = sidecar answered with error.
+      void bridge.health().then(h =>
+        getLogger().info({ ok: h.ok, status: h.status, base: bridge.getBaseUrl() }, 'Open-connector gateway status'));
     } catch (err) {
       getLogger().warn({ err: (err as Error).message }, 'Open-connector gateway disabled — local connectors only');
     }
@@ -1096,14 +1083,21 @@ export class UmbraOS {
       });
       this.pwa = pwa;
       pwa.start();
-      // Tray QR overlay for phone pairing (Windows-only)
+      // Tray QR overlay for phone pairing (Windows-only). Uses the LAN
+      // address — a `localhost` payload is unscannable from a phone.
       if (pairing) {
         try {
           this.pairingOverlay = new PairingOverlay(config.paths.dataDir);
           void this.pairingOverlay.start({
-            getLink: () => `http://localhost:${config.p2p.webPort}`,
+            getLink: () => {
+              const lan = lanIPv4() || 'localhost';
+              return `http://${lan}:${config.p2p.webPort}/pair`;
+            },
             getPayloadJson: () => {
-              try { return JSON.stringify((pairing as any).createSession('localhost', config.p2p.signalingPort)); } catch { return '{}'; }
+              try {
+                const lan = lanIPv4() || 'localhost';
+                return JSON.stringify((pairing as any).createSession(lan, config.p2p.signalingPort));
+              } catch { return '{}'; }
             },
           }).catch(() => {});
         } catch {}
@@ -2228,15 +2222,56 @@ export class UmbraOS {
     );
   }
 
-  /** Start OAuth for an `oauth` connector: returns the authorize URL to open. */
+  /**
+   * Start OAuth for an `oauth` connector: returns the authorize URL to open.
+   *
+   * Local catalog OAuth keeps its exact legacy path. Gateway-carried providers
+   * (no local row) resolve through ConnectorApi instead: the sidecar holds the
+   * provider OAuth app, so the user just authorizes — the returned shape is
+   * identical ({ authorizeUrl } → open in browser → poll status), and no
+   * config row is fabricated for ids the local catalog doesn't own.
+   */
   async beginMcpOauth(id: string, redirectUri?: string): Promise<any> {
+    const known = this.configManager.raw.mcp.connectors.find(c => c.id === id)
+      ?? MCP_CATALOG.find(c => c.id === id);
+    if (known?.authType === 'oauth') {
+      const entry = await this.configManager.upsertMcpConnector(id, {});
+      const { key, client } = this.oauthClientFor(id);
+      // Resolve the provider against the CREDENTIAL KEY, not the catalog id:
+      // the provider table is keyed `gmail`, while the catalog id is
+      // `productivity-gmail`. Passing `id` here made every catalog connector
+      // fail to resolve.
+      const started = this.oauth.begin(key, client, redirectUri || this.oauthRedirectUri());
+      return {
+        connector: entry,
+        key,
+        connectorId: id,
+        authorizeUrl: started.authorizeUrl,
+        state: started.state,
+      };
+    }
+    if (this.connectorApi) {
+      try {
+        const res = await this.connectorApi.connectConnector(id, { redirectUri });
+        if (res.action === 'oauth_redirect' && res.authorizeUrl) {
+          return { connector: known ?? { id }, key: id, connectorId: id, authorizeUrl: res.authorizeUrl, state: res.state };
+        }
+        if (res.action === 'already_connected') {
+          return { connector: known ?? { id }, key: id, connectorId: id, connected: true };
+        }
+      } catch (err) {
+        // The gateway only carries some ids (`Connector "x" not found`
+        // otherwise) — fall through to the legacy error below in that case,
+        // but surface real authorization failures (already provider-named).
+        if (!/not found/i.test((err as Error).message)) throw err;
+      }
+    }
+    // Legacy path (byte-identical errors): local non-OAuth ids and truly
+    // unknown ids. The upsert fabricates nothing new here — `known` was
+    // absent or non-OAuth above, so this throws as before.
     const entry = await this.configManager.upsertMcpConnector(id, {});
     if (entry.authType !== 'oauth') throw new Error(`Connector "${id}" is not OAuth (authType=${entry.authType})`);
     const { key, client } = this.oauthClientFor(id);
-    // Resolve the provider against the CREDENTIAL KEY, not the catalog id:
-    // the provider table is keyed `gmail`, while the catalog id is
-    // `productivity-gmail`. Passing `id` here made every catalog connector
-    // fail to resolve.
     const started = this.oauth.begin(key, client, redirectUri || this.oauthRedirectUri());
     return {
       connector: entry,
@@ -2388,17 +2423,30 @@ export class UmbraOS {
     }
   }
 
-  /** Report connection state for an OAuth connector (tokens never exposed). */
-  getMcpOauthStatus(id: string): Record<string, unknown> {
+  /**
+   * Report connection state for an OAuth connector (tokens never exposed).
+   *
+   * Local tokens are checked first (legacy sync answer). When those are
+   * absent, a gateway-completed authorization (user authorized at the
+   * provider, sidecar holds the tokens) counts as connected too — same shape,
+   * so the desktop's "finish in your browser…" watcher resolves either way.
+   */
+  async getMcpOauthStatus(id: string): Promise<Record<string, unknown>> {
     const key = this.oauthKeyFor(id);
     const tokens = this.readOauthToken(key);
-    if (!tokens) return { connected: false };
-    return {
-      connected: true,
-      expiresAt: tokens.expiresAt,
-      expired: tokens.expiresAt <= Date.now(),
-      hasRefreshToken: Boolean(tokens.refreshToken),
-    };
+    if (tokens) {
+      return {
+        connected: true,
+        expiresAt: tokens.expiresAt,
+        expired: tokens.expiresAt <= Date.now(),
+        hasRefreshToken: Boolean(tokens.refreshToken),
+      };
+    }
+    try {
+      const st = await this.connectorApi?.getConnectorStatus(id);
+      if (st?.isConnected) return { connected: true };
+    } catch { /* local-only answer stands */ }
+    return { connected: false };
   }
 
   /** Refresh an expiring OAuth token (and persist the new set). */
@@ -3993,14 +4041,47 @@ export class UmbraOS {
     };
   }
 
+  /**
+   * Fresh LAN pairing bundle for the desktop "Pair a new device" card:
+   * PWA link + raw payload + scannable QR. Sessions live ~5 minutes and are
+   * single-use; the desktop should refetch on demand (button/refresh), not
+   * cache.
+   */
+  async getLanPairing(): Promise<any> {
+    if (!this.pairing || !this.configManager) throw new Error('Phone pairing not available on this node (P2P disabled or headless)');
+    const p2p = this.configManager.raw.p2p as { webPort: number; signalingPort: number };
+    const lan = lanIPv4() || 'localhost';
+    const payload = this.pairing.createSession(lan, p2p.signalingPort);
+    const link = `http://${lan}:${p2p.webPort}/pair`;
+    let qrDataUrl: string | null = null;
+    try {
+      qrDataUrl = await QRCode.toDataURL(JSON.stringify(payload), { errorCorrectionLevel: 'M', width: 512 });
+    } catch { qrDataUrl = null; }
+    return {
+      link,
+      payload,
+      payloadJson: JSON.stringify(payload),
+      qrDataUrl,
+      expiresAt: payload.expiresAt,
+      expiresInMs: Math.max(0, payload.expiresAt - Date.now()),
+      signalingPort: p2p.signalingPort,
+    };
+  }
+
   async createDeviceInvite(name: string): Promise<any> {
     if (!this.deviceRegistry) throw new Error('Device mesh disabled');
     const invite = this.deviceRegistry.createInvite(name || undefined);
+    const joinUrl = `${this.publicBaseUrl()}/api/devices/join?code=${invite.code}`;
+    let qrDataUrl: string | null = null;
+    try {
+      qrDataUrl = await QRCode.toDataURL(joinUrl, { errorCorrectionLevel: 'M', width: 512 });
+    } catch { qrDataUrl = null; }
     return {
       code: invite.code,
       expiresAt: invite.expiresAt,
-      // Phone scans the QR (which encodes this payload); a PC opens joinUrl.
-      joinUrl: `${this.publicBaseUrl()}/api/devices/join?code=${invite.code}`,
+      // Phone scans the QR (which encodes joinUrl); a PC opens joinUrl.
+      joinUrl,
+      qrDataUrl,
       hubWsUrl: this.hubWsUrl(),
     };
   }
@@ -4037,7 +4118,13 @@ export class UmbraOS {
   }
 
   private publicBaseUrl(): string {
-    return (process.env.UMBRA_PUBLIC_URL || `http://localhost:8787`).replace(/\/$/, '');
+    const env = (process.env.UMBRA_PUBLIC_URL || '').replace(/\/$/, '');
+    if (env) return env;
+    // Default must be reachable from a phone on the same Wi-Fi — localhost
+    // links/QR codes only work in the desktop's own browser.
+    const lan = lanIPv4();
+    const port = 8787;
+    return lan ? `http://${lan}:${port}` : `http://localhost:${port}`;
   }
 
   private hubWsUrl(): string {

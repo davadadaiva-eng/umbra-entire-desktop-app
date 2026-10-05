@@ -70,4 +70,60 @@ describe('OpenConnectorBridge', () => {
     expect(seen['x-oo-connector-alias']).toBe('work');
     expect(seen['Idempotency-Key']).toBe('k-1');
   });
+
+  test('startOAuth() returns the provider authorize URL', async () => {
+    const b = new OpenConnectorBridge({
+      baseUrl: 'http://127.0.0.1:3000',
+      fetchImpl: mockFetch({
+        '/api/oauth/authorizations': {
+          status: 200,
+          body: { success: true, data: { authorizationUrl: 'https://provider.example/auth?x=1' } },
+        },
+      }),
+    });
+    await expect(b.startOAuth('hubspot')).resolves.toMatchObject({
+      authorizationUrl: 'https://provider.example/auth?x=1',
+    });
+  });
+
+  test('startOAuth() failure names the provider, never the gateway', async () => {
+    const b = new OpenConnectorBridge({
+      baseUrl: 'http://127.0.0.1:3000',
+      fetchImpl: mockFetch({
+        '/api/oauth/authorizations': { status: 500, body: { success: false } },
+      }),
+    });
+    const err: unknown = await b.startOAuth('hubspot').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    const msg = (err as Error).message;
+    expect(msg).toMatch(/hubspot/i);
+    expect(msg).not.toMatch(/open-?connector/i);
+    expect(msg).not.toMatch(/gateway/i);
+  });
+
+  test('listProviders() normalizes object-shaped categories (live sidecar shape)', async () => {
+    const b = new OpenConnectorBridge({
+      baseUrl: 'http://127.0.0.1:3000',
+      fetchImpl: mockFetch({
+        '/v1/providers': {
+          status: 200,
+          body: {
+            success: true,
+            data: [
+              {
+                service: 'gmail',
+                displayName: 'Gmail',
+                categories: [{ id: 'Productivity', displayName: 'Productivity' }],
+                authTypes: ['oauth2'],
+              },
+            ],
+          },
+        },
+      }),
+    });
+    const list = await b.listProviders();
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ service: 'gmail', categories: ['Productivity'] });
+    expect(list[0].authTypes).toContain('oauth');
+  });
 });

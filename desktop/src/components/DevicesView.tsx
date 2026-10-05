@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState, useCallback, type JSX } from 'react';
 import gsap from 'gsap';
 import { useAppStore } from '../stores/appStore';
-import { isBackendAvailable, deviceInvite, deviceJoin, deviceRevoke, deviceSend, getMeshStatus, meshPair, meshPairDemo, getChromeStatus, getChromeLogins, getChromeSites, getConnectors, disconnectConnector, getDevices, BackendError } from '../lib/backend';
+import { isBackendAvailable, deviceInvite, deviceJoin, deviceRevoke, deviceSend, getMeshStatus, meshPair, meshPairDemo, getChromeStatus, getChromeLogins, getChromeSites, getConnectors, disconnectConnector, getDevices, getLanPairing, BackendError, type DeviceInviteInfo, type LanPairingInfo } from '../lib/backend';
 import { Smartphone, Tablet, Headphones, Watch, Battery, CheckCircle2, QrCode, Bluetooth, Usb, Cloud, Nfc, Router, Plug, Unplug, UserPlus, Send, XCircle, RefreshCw, Globe, KeyRound, Link2, ChevronDown, ChevronUp, Loader2, Copy, Check, Wifi, ArrowRight } from 'lucide-react';
 import { DockerView } from './DockerView';
 
@@ -79,9 +79,11 @@ export function DevicesView() {
   const chromeRef = useRef<HTMLDivElement>(null);
 
   // Device invite/join state
-  const [inviteCode, setInviteCode] = useState('');
+  const [invite, setInvite] = useState<DeviceInviteInfo | null>(null);
+  const inviteCode = invite?.code ?? '';
   const [inviteLoading, setInviteLoading] = useState(false);
   const [inviteCopied, setInviteCopied] = useState(false);
+  const [inviteLinkCopied, setInviteLinkCopied] = useState(false);
   const [joinCode, setJoinCode] = useState('');
   const [joinName, setJoinName] = useState('');
   const [joinLoading, setJoinLoading] = useState(false);
@@ -98,7 +100,40 @@ export function DevicesView() {
   // Mesh state
   const [meshInfo, setMeshInfo] = useState<Record<string, unknown> | null>(null);
   const [meshLoading, setMeshLoading] = useState(false);
-  const [meshPairResult, setMeshPairResult] = useState<{ pairingCode?: string; token?: string } | null>(null);
+  const [meshPairResult, setMeshPairResult] = useState<{ pairingCode?: string; token?: string; deviceId?: string; qrAscii?: string; exp?: number } | null>(null);
+  const [meshError, setMeshError] = useState<string | null>(null);
+
+  // LAN QR pairing state (phone/tablet on the same Wi-Fi)
+  const [lanPairing, setLanPairing] = useState<LanPairingInfo | null>(null);
+  const [lanLoading, setLanLoading] = useState(false);
+  const [lanError, setLanError] = useState<string | null>(null);
+  const [lanLinkCopied, setLanLinkCopied] = useState(false);
+
+  const loadLanPairing = useCallback(async () => {
+    setLanLoading(true);
+    setLanError(null);
+    try {
+      const data = await getLanPairing();
+      setLanPairing(data);
+    } catch (e) {
+      setLanError(e instanceof BackendError ? e.message : 'Phone pairing is not available on this node');
+    } finally {
+      setLanLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadLanPairing();
+  }, [loadLanPairing]);
+
+  const handleCopyLanLink = async () => {
+    if (!lanPairing?.link) return;
+    try {
+      await navigator.clipboard.writeText(lanPairing.link);
+      setLanLinkCopied(true);
+      setTimeout(() => setLanLinkCopied(false), 2000);
+    } catch { /* noop */ }
+  };
 
   // Chrome extension state
   const [chromeStatus, setChromeStatus] = useState<Record<string, unknown> | null>(null);
@@ -124,8 +159,8 @@ export function DevicesView() {
   }, []);
 
   const handleGetApp = useCallback(() => {
-    inviteRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    showToast('success', 'Mobile app coming soon — pair below with an invite code');
+    pairRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    showToast('success', 'No install needed — open the link or scan the QR on the same Wi-Fi');
   }, [showToast]);
 
   // Fetch real devices from backend — getDevices() already normalizes the
@@ -203,10 +238,10 @@ export function DevicesView() {
     setInviteLoading(true);
     try {
       const data = await deviceInvite();
-      setInviteCode(data.code);
+      setInvite(data);
     } catch {
-      // fallback demo code
-      setInviteCode('UMBRA-' + Math.random().toString(36).substring(2, 8).toUpperCase());
+      // fallback demo code (offline backend)
+      setInvite({ code: 'UMBRA-' + Math.random().toString(36).substring(2, 8).toUpperCase() });
     } finally {
       setInviteLoading(false);
     }
@@ -217,6 +252,15 @@ export function DevicesView() {
       await navigator.clipboard.writeText(inviteCode);
       setInviteCopied(true);
       setTimeout(() => setInviteCopied(false), 2000);
+    } catch { /* noop */ }
+  };
+
+  const handleCopyInviteLink = async () => {
+    if (!invite?.joinUrl) return;
+    try {
+      await navigator.clipboard.writeText(invite.joinUrl);
+      setInviteLinkCopied(true);
+      setTimeout(() => setInviteLinkCopied(false), 2000);
     } catch { /* noop */ }
   };
 
@@ -291,12 +335,20 @@ export function DevicesView() {
   }, []);
 
   const handleMeshPair = async () => {
+    setMeshError(null);
     try {
       const data = await meshPair();
-      setMeshPairResult(data.pair as { pairingCode?: string; token?: string });
-    } catch {
-      const data = await meshPairDemo();
-      setMeshPairResult(data.pair as { pairingCode?: string; token?: string });
+      // The daemon returns { deviceId, wire, exp, qrAscii }; older stubs
+      // used { pairingCode, token }. Accept both shapes.
+      setMeshPairResult((data.pair ?? {}) as { pairingCode?: string; token?: string; deviceId?: string; qrAscii?: string; exp?: number });
+    } catch (e) {
+      try {
+        const data = await meshPairDemo();
+        setMeshPairResult((data.pair ?? {}) as { pairingCode?: string; token?: string; deviceId?: string; qrAscii?: string; exp?: number });
+      } catch (e2) {
+        setMeshPairResult(null);
+        setMeshError(e2 instanceof BackendError ? e2.message : 'Mesh pairing is unavailable — the mesh daemon is not running');
+      }
     }
   };
 
@@ -440,29 +492,76 @@ export function DevicesView() {
                 <h2 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>Invite a device</h2>
               </div>
               <p className="text-[11px] font-light mb-3" style={{ color: 'var(--text-dim)' }}>
-                Generate a one-time code to share with another device.
+                Generate a one-time code to share with another device. On the same Wi-Fi you can also scan the QR or open the link — no typing needed.
               </p>
               {inviteCode ? (
-                <div className="flex items-center gap-2">
-                  <div
-                    className="flex-1 px-3 py-2 rounded-lg text-sm font-mono font-bold tracking-widest"
-                    style={{ background: 'var(--surface-2)', border: `1px solid ${avatar.accent}55`, color: avatar.accent }}
-                  >
-                    {inviteCode}
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <div
+                      className="flex-1 px-3 py-2 rounded-lg text-sm font-mono font-bold tracking-widest"
+                      style={{ background: 'var(--surface-2)', border: `1px solid ${avatar.accent}55`, color: avatar.accent }}
+                    >
+                      {inviteCode}
+                    </div>
+                    <button
+                      onClick={handleCopyInvite}
+                      className="flex items-center gap-1 text-[10px] font-medium px-2.5 py-2 rounded-lg transition-colors"
+                      style={{
+                        background: inviteCopied ? 'rgba(34,197,94,0.15)' : 'var(--surface-2)',
+                        color: inviteCopied ? '#22c55e' : 'var(--text-dim)',
+                        border: '1px solid var(--hairline-strong)',
+                        fontFamily: 'var(--font)',
+                      }}
+                    >
+                      {inviteCopied ? <Check size={11} /> : <Copy size={11} />}
+                      {inviteCopied ? 'Copied' : 'Copy'}
+                    </button>
                   </div>
-                  <button
-                    onClick={handleCopyInvite}
-                    className="flex items-center gap-1 text-[10px] font-medium px-2.5 py-2 rounded-lg transition-colors"
-                    style={{
-                      background: inviteCopied ? 'rgba(34,197,94,0.15)' : 'var(--surface-2)',
-                      color: inviteCopied ? '#22c55e' : 'var(--text-dim)',
-                      border: '1px solid var(--hairline-strong)',
-                      fontFamily: 'var(--font)',
-                    }}
-                  >
-                    {inviteCopied ? <Check size={11} /> : <Copy size={11} />}
-                    {inviteCopied ? 'Copied' : 'Copy'}
-                  </button>
+                  {invite?.qrDataUrl && (
+                    <div className="flex items-center gap-3 rounded-xl p-3" style={{ background: 'var(--surface-2)', border: '1px solid var(--hairline)' }}>
+                      <img src={invite.qrDataUrl} alt="Invite QR code" width={120} height={120} style={{ borderRadius: 8, background: '#fff' }} />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[11px] font-medium mb-1" style={{ color: 'var(--text-primary)' }}>Scan to join, or share the link:</p>
+                        <p className="text-[10px] font-mono break-all mb-2" style={{ color: 'var(--text-dim)' }}>{invite.joinUrl}</p>
+                        <button
+                          onClick={handleCopyInviteLink}
+                          className="flex items-center gap-1 text-[10px] font-medium px-2.5 py-1.5 rounded-lg transition-colors"
+                          style={{
+                            background: inviteLinkCopied ? 'rgba(34,197,94,0.15)' : 'var(--surface-3)',
+                            color: inviteLinkCopied ? '#22c55e' : 'var(--text-dim)',
+                            border: '1px solid var(--hairline-strong)',
+                            fontFamily: 'var(--font)',
+                          }}
+                        >
+                          {inviteLinkCopied ? <Check size={10} /> : <Copy size={10} />}
+                          {inviteLinkCopied ? 'Link copied' : 'Copy link'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {!invite?.qrDataUrl && invite?.joinUrl && (
+                    <div className="flex items-center gap-2">
+                      <p className="flex-1 text-[10px] font-mono break-all" style={{ color: 'var(--text-dim)' }}>{invite.joinUrl}</p>
+                      <button
+                        onClick={handleCopyInviteLink}
+                        className="flex items-center gap-1 text-[10px] font-medium px-2.5 py-1.5 rounded-lg transition-colors"
+                        style={{
+                          background: 'var(--surface-2)',
+                          color: 'var(--text-dim)',
+                          border: '1px solid var(--hairline-strong)',
+                          fontFamily: 'var(--font)',
+                        }}
+                      >
+                        {inviteLinkCopied ? <Check size={10} /> : <Copy size={10} />}
+                        {inviteLinkCopied ? 'Copied' : 'Copy link'}
+                      </button>
+                    </div>
+                  )}
+                  {invite?.expiresAt && (
+                    <p className="text-[10px] font-light" style={{ color: 'var(--text-faint)' }}>
+                      Expires {new Date(invite.expiresAt).toLocaleTimeString()} — one-time use.
+                    </p>
+                  )}
                 </div>
               ) : (
                 <button
@@ -655,22 +754,64 @@ export function DevicesView() {
           </div>
         </div>
 
-        {/* ═══ PAIR NEW DEVICE ═══ */}
+        {/* ═══ PAIR NEW DEVICE (LAN QR) ═══ */}
         <div ref={pairRef} className="card p-5 mb-5" style={{ background: 'var(--surface-1)' }}>
           <div className="flex items-center gap-5">
-            <div className="w-24 h-24 rounded-2xl flex items-center justify-center flex-shrink-0" style={{ background: 'var(--surface-2)', border: '1px dashed var(--hairline-strong)' }}>
-              <QrCode size={44} style={{ color: 'var(--text-faint)' }} />
+            <div className="w-24 h-24 rounded-2xl flex items-center justify-center flex-shrink-0 overflow-hidden" style={{ background: '#fff', border: '1px dashed var(--hairline-strong)' }}>
+              {lanPairing?.qrDataUrl ? (
+                <img src={lanPairing.qrDataUrl} alt="Pairing QR code" width={96} height={96} />
+              ) : lanLoading ? (
+                <Loader2 size={28} className="animate-spin" style={{ color: 'var(--text-faint)' }} />
+              ) : (
+                <QrCode size={44} style={{ color: 'var(--text-faint)' }} />
+              )}
             </div>
-            <div className="flex-1">
+            <div className="flex-1 min-w-0">
               <h2 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>Pair a new device</h2>
-              <p className="text-xs mt-1 font-light leading-relaxed" style={{ color: 'var(--text-dim)' }}>
-                Install the Umbra app on your device, then scan the code to link it to your brain.
-                Your avatar, agents, and settings will follow it instantly.
-              </p>
+              {lanError ? (
+                <p className="text-xs mt-1 font-light leading-relaxed" style={{ color: '#ef4444' }}>{lanError}</p>
+              ) : (
+                <p className="text-xs mt-1 font-light leading-relaxed" style={{ color: 'var(--text-dim)' }}>
+                  On the same Wi-Fi, open this link on your phone or tablet — or scan the QR.
+                  No app-store install: it opens the Umbra remote screen, then pairs end-to-end encrypted.
+                </p>
+              )}
+              {lanPairing?.link && !lanError && (
+                <div className="flex items-center gap-2 mt-2">
+                  <p className="text-[11px] font-mono break-all" style={{ color: avatar.accent }}>{lanPairing.link}</p>
+                  <button
+                    onClick={handleCopyLanLink}
+                    className="flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded-md transition-colors flex-shrink-0"
+                    style={{
+                      background: lanLinkCopied ? 'rgba(34,197,94,0.15)' : 'var(--surface-2)',
+                      color: lanLinkCopied ? '#22c55e' : 'var(--text-dim)',
+                      border: '1px solid var(--hairline-strong)',
+                      fontFamily: 'var(--font)',
+                    }}
+                  >
+                    {lanLinkCopied ? <Check size={10} /> : <Copy size={10} />}
+                    {lanLinkCopied ? 'Copied' : 'Copy'}
+                  </button>
+                  <button
+                    onClick={loadLanPairing}
+                    disabled={lanLoading}
+                    className="flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded-md transition-colors flex-shrink-0"
+                    style={{
+                      background: 'var(--surface-2)',
+                      color: 'var(--text-dim)',
+                      border: '1px solid var(--hairline-strong)',
+                      fontFamily: 'var(--font)',
+                    }}
+                  >
+                    <RefreshCw size={10} />
+                    Refresh
+                  </button>
+                </div>
+              )}
             </div>
             <button
               onClick={handleGetApp}
-              title="Pair via invite code below"
+              title="How to connect from your phone"
               className="btn-ghost flex-shrink-0" style={{ height: 32, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em' }}
             >
               Get the app
@@ -745,13 +886,26 @@ export function DevicesView() {
               Pair via mesh
             </button>
             {meshPairResult && (
-              <div className="flex items-center gap-2 flex-1">
-                <div className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold tracking-wider" style={{ background: 'var(--surface-2)', border: `1px solid ${avatar.accent}55`, color: avatar.accent }}>
-                  {meshPairResult.pairingCode || meshPairResult.token || 'paired'}
+              <div className="flex items-center gap-2 flex-1 min-w-0">
+                <div className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold tracking-wider truncate" style={{ background: 'var(--surface-2)', border: `1px solid ${avatar.accent}55`, color: avatar.accent }}>
+                  {meshPairResult.pairingCode || meshPairResult.token || meshPairResult.deviceId || 'paired'}
                 </div>
+                {meshPairResult.exp && (
+                  <span className="text-[10px] font-light flex-shrink-0" style={{ color: 'var(--text-faint)' }}>
+                    expires {new Date(meshPairResult.exp).toLocaleTimeString()}
+                  </span>
+                )}
               </div>
             )}
           </div>
+          {meshError && (
+            <p className="text-[11px] font-medium mb-3" style={{ color: '#ef4444' }}>{meshError}</p>
+          )}
+          {meshPairResult?.qrAscii && (
+            <pre className="rounded-xl p-3 mb-3 overflow-x-auto text-[9px] leading-[1.1]" style={{ background: '#fff', color: '#000' }}>
+              {meshPairResult.qrAscii}
+            </pre>
+          )}
         </div>
 
         {/* ═══ CHROME EXTENSION SECTION ═══ */}

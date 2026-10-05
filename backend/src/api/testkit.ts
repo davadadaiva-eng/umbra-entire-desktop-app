@@ -124,7 +124,7 @@ export function makeFullDeps(overrides: Partial<ApiServerDeps> = {}): FullDeps {
       if (state !== 's1') throw new Error('Unknown or expired OAuth state');
       return { connector: { id: 'gmail' }, connected: true, expiresAt: 123 };
     },
-    getMcpOauthStatus: (id: string) => ({ connected: id === 'gmail', expiresAt: id === 'gmail' ? 123 : undefined }),
+    getMcpOauthStatus: async (id: string) => ({ connected: id === 'gmail', expiresAt: id === 'gmail' ? 123 : undefined }),
     refreshMcpOauth: async (id: string) => ({ connected: true, id }),
     syncExternalConnectors: async () => ({ registered: 3, sources: ['smithery'], errors: [] }),
     syncExternalSources: async (opts?: { maxPerSource?: number }) => ({ registered: 25, sources: ['smithery', 'mcp-registry'], maxPerSource: opts?.maxPerSource ?? 0, errors: [] }),
@@ -251,6 +251,7 @@ export function makeFullDeps(overrides: Partial<ApiServerDeps> = {}): FullDeps {
 
     // ── Devices / mesh ──────────────────────────────────────────
     listDevices: async () => [{ id: 'dev-1', name: 'Phone', online: true }],
+    getLanPairing: async () => ({ link: 'http://192.168.1.5:9443/pair', payload: { sessionId: 's1' }, payloadJson: '{"sessionId":"s1"}', qrDataUrl: 'data:image/png;base64,AAA', expiresAt: Date.now() + 300000, expiresInMs: 300000 }),
     createDeviceInvite: async (name: string) => ({ code: 'INVITE-1', name }),
     joinDevice: async (code: string, meta: { name: string; role?: string; capabilities?: string[] }) => ({ code, ...meta, joined: true }),
     revokeDevice: async (deviceId: string) => ({ deviceId, revoked: true }),

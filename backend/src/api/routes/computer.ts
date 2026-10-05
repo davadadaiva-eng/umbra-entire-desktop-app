@@ -231,7 +231,7 @@ export function computerRoutes(deps: ApiServerDeps): ComputerRouteEntry[] {
     [/^GET \/api\/mcp\/oauth\/status$/, async url => {
       const id = url.searchParams.get('id') || '';
       if (!id) throw new Error('id is required');
-      return { oauth: deps.getMcpOauthStatus(id) };
+      return { oauth: await deps.getMcpOauthStatus(id) };
     }],
     [/^POST \/api\/mcp\/oauth\/refresh$/, async (_url, body) => {
       const id = String(body.id || '');
@@ -326,6 +326,7 @@ export function computerRoutes(deps: ApiServerDeps): ComputerRouteEntry[] {
       const msg = (body.msg && typeof body.msg === 'object') ? body.msg as Record<string, unknown> : {};
       return { sent: await deps.sendToDevice(deviceId, msg) };
     }],
+    [/^GET \/api\/pairing$/, async () => ({ pairing: await deps.getLanPairing() })],
     [/^POST \/api\/carrusel\/start$/, async () => ({ status: await deps.carruselStart() })],
     [/^POST \/api\/carrusel\/stop$/, async () => ({ status: await deps.carruselStop() })],
     [/^GET \/api\/carrusel\/status$/, async () => ({ status: await deps.carruselStatus() })],

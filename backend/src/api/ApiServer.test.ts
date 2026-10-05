@@ -27,7 +27,7 @@ function makeDeps() {
     disconnectMcp: async (id: string) => ({ id, enabled: false, connected: false }),
     beginMcpOauth: async (id: string, redirectUri?: string) => ({ connector: { id, authType: 'oauth' }, authorizeUrl: `https://accounts.example.com/auth?state=s1&redirect_uri=${redirectUri ?? ''}`, state: 's1' }),
     completeMcpOauth: async (code: string, state: string) => (state === 's1' ? { connector: { id: 'gmail' }, connected: true, expiresAt: 123 } : Promise.reject(new Error('Unknown or expired OAuth state'))),
-    getMcpOauthStatus: (id: string) => ({ connected: id === 'gmail', expiresAt: id === 'gmail' ? 123 : undefined }),
+    getMcpOauthStatus: async (id: string) => ({ connected: id === 'gmail', expiresAt: id === 'gmail' ? 123 : undefined }),
     refreshMcpOauth: async (id: string) => ({ connected: true, id }),
     syncExternalConnectors: async () => ({ registered: 3, sources: ['smithery'], errors: [] }),
     syncExternalSources: async (opts?: { maxPerSource?: number }) => ({ registered: 25, sources: ['smithery', 'mcp-registry'], maxPerSource: opts?.maxPerSource ?? 0, errors: [] }),

@@ -1159,6 +1159,14 @@ describe('mesh and devices', () => {
     const res = await api('/api/devices/send', 'POST', { deviceId: 'dev-1' });
     expect(res.json.sent.kind).toBeNull();
   });
+
+  test('GET /api/pairing returns the LAN QR bundle', async () => {
+    const res = await api('/api/pairing');
+    expect(res.status).toBe(200);
+    expect(res.json.pairing.link).toMatch(/\/pair$/);
+    expect(res.json.pairing.qrDataUrl).toMatch(/^data:image\/png/);
+    expect(res.json.pairing.expiresInMs).toBeGreaterThan(0);
+  });
 });
 
 // ── Auth signup / login ────────────────────────────────────────────

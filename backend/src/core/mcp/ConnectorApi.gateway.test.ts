@@ -38,6 +38,15 @@ const PROVIDERS = [
     authTypes: ['api_key'],
     description: 'Contacts and deals in the fictional Acme CRM.',
   },
+  // Gateway-only OAuth provider: end-user sign-in must look identical to a
+  // native OAuth connect (same oauth_redirect shape, provider-named text).
+  {
+    service: 'acme-oauth',
+    displayName: 'Acme OAuth',
+    categories: ['Productivity'],
+    authTypes: ['oauth2'],
+    description: 'Sign in with your Acme account.',
+  },
 ];
 
 function mockFetch(): typeof fetch {
@@ -52,6 +61,18 @@ function mockFetch(): typeof fetch {
     }
     if (u.includes('/api/connections/') && method === 'PUT') {
       return new Response(JSON.stringify({ success: true }), { status: 200 });
+    }
+    if (u.includes('/api/oauth/authorizations') && method === 'POST') {
+      return new Response(
+        JSON.stringify({ success: true, data: { authorizationUrl: 'https://acme-oauth.example/authorize?x=1' } }),
+        { status: 200 },
+      );
+    }
+    if (u.endsWith('/api/connections') && method === 'GET') {
+      return new Response(
+        JSON.stringify({ success: true, data: { connections: [{ service: 'acme-oauth' }] } }),
+        { status: 200 },
+      );
     }
     if (u.includes('/v1/proxy/') && method === 'POST') {
       return new Response(
@@ -151,6 +172,59 @@ describe('gateway transparency (mocked sidecar)', () => {
   test('system health reports the gateway when attached', async () => {
     const { api } = tmpApiWithGateway();
     const health: any = await api.getSystemHealth();
-    expect(health.gateway).toMatchObject({ available: true, providers: 3 });
+    expect(health.gateway).toMatchObject({ available: true, providers: 4 });
+  });
+
+  test('gateway OAuth connect returns a native-shaped oauth_redirect with no gateway branding', async () => {
+    const { api } = tmpApiWithGateway();
+    const res: any = await api.connectConnector('acme-oauth', {});
+    expect(res.action).toBe('oauth_redirect');
+    expect(res.authorizeUrl).toBe('https://acme-oauth.example/authorize?x=1');
+    // The user must never see the invisible gateway's name.
+    expect(JSON.stringify(res)).not.toMatch(/open-?connector/i);
+    expect(JSON.stringify(res)).not.toMatch(/gateway/i);
+    expect(JSON.stringify(res)).not.toMatch(/sidecar/i);
+  });
+
+  test('gateway OAuth readiness reports needs_oauth_app with an Authorize action', async () => {
+    const { api } = tmpApiWithGateway();
+    await api.listConnectors({}); // warm the provider cache for the sync overlay
+    const readiness = api.getReadiness('acme-oauth', 'default');
+    expect(readiness.state).toBe('needs_oauth_app');
+    expect(readiness.action).toBe('Authorize');
+    expect(readiness.provider).toBe('Acme OAuth');
+  });
+
+  test('sidecar-completed OAuth counts as connected in status', async () => {
+    const { api } = tmpApiWithGateway();
+    const status = await api.getConnectorStatus('acme-oauth');
+    expect(status.isConnected).toBe(true);
+  });
+
+  test('failed gateway authorization never leaks gateway wording', async () => {
+    const failingFetch = (async (url: any, _init: any) => {
+      const u = String(url);
+      if (u.endsWith('/v1/health')) {
+        return new Response(JSON.stringify({ success: true }), { status: 200 });
+      }
+      if (u.endsWith('/v1/providers')) {
+        return new Response(JSON.stringify({ success: true, data: PROVIDERS }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ success: false }), { status: 500 });
+    }) as typeof fetch;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'umbra-gwfail-'));
+    const api = new ConnectorApi(
+      new ConnectorStore(path.join(dir, 'c.db')),
+      new OAuthConnector(),
+    );
+    api.setOpenConnector(new OpenConnectorBridge({ baseUrl: 'http://127.0.0.1:3000', fetchImpl: failingFetch }));
+    const err: unknown = await api.connectConnector('acme-oauth', {}).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    const msg = (err as Error).message;
+    // Names the provider the user clicked, never the invisible gateway.
+    expect(msg).toMatch(/acme-oauth/i);
+    expect(msg).not.toMatch(/open-?connector/i);
+    expect(msg).not.toMatch(/gateway/i);
+    expect(msg).not.toMatch(/sidecar/i);
   });
 });

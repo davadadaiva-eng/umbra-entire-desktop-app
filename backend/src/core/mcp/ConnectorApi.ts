@@ -891,9 +891,19 @@ export class ConnectorApi {
     }
 
     if (hit.authTypes.includes('oauth')) {
-      if (!this.openConnector) throw new Error(`No gateway attached for ${hit.displayName}`);
-      const { authorizationUrl } = await this.openConnector.startOAuth(service);
-      return { action: 'oauth_redirect', authorizeUrl: authorizationUrl, message: `Redirect to ${hit.displayName} to authorize` };
+      if (!this.openConnector) throw new Error(`${hit.displayName} sign-in is temporarily unavailable — try again in a moment`);
+      try {
+        const { authorizationUrl } = await this.openConnector.startOAuth(service);
+        return { action: 'oauth_redirect', authorizeUrl: authorizationUrl, message: `Redirect to ${hit.displayName} to authorize` };
+      } catch (err) {
+        // The bridge error already names only the provider; reword only when
+        // it would otherwise leak the invisible gateway.
+        const msg = (err as Error).message;
+        if (/gateway|open-connector/i.test(msg)) {
+          throw new Error(`Could not start sign-in for ${hit.displayName} — the provider app hasn't been configured yet`);
+        }
+        throw err;
+      }
     }
 
     if (hit.authTypes.includes('none')) {

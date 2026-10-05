@@ -10,6 +10,8 @@
  * reports `running: false` instead of failing boot.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { getLogger } from '../core/Logger';
 
 /** Structural type for the mesh daemon client so the bridge can run in tests
@@ -70,8 +72,14 @@ export class MeshBridge {
         const mod = this.loadHostBinding();
         client = new mod.MeshDaemonClient();
         if (!exePath) {
-          const find = this.opts.findBinary ?? mod.MeshDaemonClient.findBinary;
-          exePath = find();
+          // Prefer a repo-relative lookup (this file lives at
+          // backend/src/p2p or backend/dist/p2p, so ../../mesh is the daemon
+          // dir regardless of process.cwd()). The client's own findBinary()
+          // walks UP from cwd and never finds backend/mesh when the backend
+          // runs from backend/ — that silent miss kept the mesh permanently
+          // "not started".
+          exePath = this.findBinaryNearRepo()
+            ?? (this.opts.findBinary ?? mod.MeshDaemonClient.findBinary)();
         }
       } catch (err) {
         getLogger().debug({ err: err instanceof Error ? err.message : String(err) }, 'Mesh daemon client unavailable');
@@ -153,5 +161,24 @@ export class MeshBridge {
       }
     }
     throw lastErr instanceof Error ? lastErr : new Error('mesh host binding not found');
+  }
+
+  /**
+   * Locate umbra-meshd relative to this file (backend/src/p2p in dev,
+   * backend/dist/p2p in prod) so the daemon is found no matter what
+   * process.cwd() is. Returns null when nothing is built.
+   */
+  private findBinaryNearRepo(): string | null {
+    const exe = process.platform === 'win32' ? 'umbra-meshd.exe' : 'umbra-meshd';
+    const candidates = [
+      path.resolve(__dirname, '../../mesh/target/release', exe),
+      path.resolve(__dirname, '../../mesh/target/debug', exe),
+    ];
+    for (const c of candidates) {
+      try {
+        if (fs.existsSync(c)) return c;
+      } catch { /* ignore */ }
+    }
+    return null;
   }
 }

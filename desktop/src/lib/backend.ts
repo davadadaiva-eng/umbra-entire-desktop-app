@@ -313,11 +313,11 @@ export const disconnectMcp = async (id: string) => {
 };
 
 export const mcpOauthStart = async (id: string) => {
-  const res = await backendFetch<{ oauth: { authorizeUrl: string; state: string } }>('/api/mcp/oauth/start', {
+  const res = await backendFetch<{ oauth: { authorizeUrl?: string; state?: string; connected?: boolean } }>('/api/mcp/oauth/start', {
     method: 'POST',
     body: JSON.stringify({ id }),
   });
-  return { authorizeUrl: res.oauth.authorizeUrl, state: res.oauth.state };
+  return { authorizeUrl: res.oauth.authorizeUrl, state: res.oauth.state, connected: res.oauth.connected };
 };
 
 export const mcpOauthStatus = async (id: string) => {
@@ -710,9 +710,31 @@ export const getDevices = async () => {
   const raw = await backendFetch<unknown>('/api/devices');
   return { devices: normalizeDevicesPayload(raw) };
 };
-export const deviceInvite = async () => {
-  const res = await backendFetch<{ invite: { code: string; expiresAt?: number; joinUrl?: string } }>('/api/devices/invite', { method: 'POST' });
-  return { code: res.invite.code };
+export interface DeviceInviteInfo {
+  code: string;
+  expiresAt?: number;
+  joinUrl?: string;
+  qrDataUrl?: string | null;
+  hubWsUrl?: string;
+}
+
+export const deviceInvite = async (): Promise<DeviceInviteInfo> => {
+  const res = await backendFetch<{ invite: DeviceInviteInfo }>('/api/devices/invite', { method: 'POST' });
+  return res.invite;
+};
+
+export interface LanPairingInfo {
+  link: string;
+  payload?: unknown;
+  payloadJson?: string;
+  qrDataUrl?: string | null;
+  expiresAt?: number;
+  expiresInMs?: number;
+}
+
+export const getLanPairing = async (): Promise<LanPairingInfo> => {
+  const res = await backendFetch<{ pairing: LanPairingInfo }>('/api/pairing');
+  return res.pairing;
 };
 export const deviceSend = async (deviceId: string, message: string) => {
   const res = await backendFetch<{ sent: unknown }>('/api/devices/send', { method: 'POST', body: JSON.stringify({ deviceId, msg: { text: message } }) });

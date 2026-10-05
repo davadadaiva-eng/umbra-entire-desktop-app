@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as http from 'http';
+import * as path from 'path';
 import { exec, execSync } from 'child_process';
 import { ConsentGate } from '../agent/ConsentGate';
 import { launchApp } from '../../native/win32/InputNative';
@@ -12,11 +13,13 @@ export interface AgentDesktopChromeConfig {
 }
 
 /**
- * Agent Browser — one persistent Chrome instance with the USER's real profile
- * (all their logged-in accounts) that the agent drives through browser-use.
- * If the user's Chrome is already running without a debug port, the agent asks
- * consent, restarts it with a debug port (tabs restored), and attaches. The
- * agent works in its own tabs of the same Chrome, in parallel with the user.
+ * Agent Browser — one persistent Chrome instance the agent drives through
+ * browser-use. It uses a dedicated agent profile (separate user-data-dir),
+ * so the user's own Chrome is never touched: no kill, no restart, no extra
+ * windows. Only when configured with the REAL profile dir does a running
+ * Chrome block the debug port — then one consent-gated relaunch restores
+ * exactly the tabs just closed (never restore + a positional URL together:
+ * that combination opens an extra window on every relaunch).
  */
 export class AgentDesktop {
   private consent: ConsentGate | null;
@@ -63,8 +66,19 @@ export class AgentDesktop {
       return false;
     }
 
+    // The agent profile lives in its own user-data-dir, so a running user
+    // Chrome is NO reason to kill anything — two instances coexist. Only
+    // when the agent profile IS the real profile (same directory) does a
+    // running Chrome block the debug port and need a consent-gated relaunch.
+    const realProfileDir = path.join(
+      process.env['LOCALAPPDATA'] || path.join(process.env['USERPROFILE'] || '.', 'AppData', 'Local'),
+      'Google', 'Chrome', 'User Data',
+    );
+    const usesRealProfile = this.sameDir(this.chrome.profileDir, realProfileDir);
+    let restored = false;
+
     const chromeRunning = await this.isChromeRunning();
-    if (chromeRunning) {
+    if (chromeRunning && usesRealProfile) {
       getLogger().warn('AgentDesktop: Chrome running without agent access — restarting with debug port');
       if (this.consent) {
         const result = await this.consent.request(
@@ -86,21 +100,38 @@ export class AgentDesktop {
       while (Date.now() < deadline && (await this.isChromeRunning())) {
         await new Promise(r => setTimeout(r, 300));
       }
+      restored = true;
     }
 
-    return this.launchAgentChrome();
+    return this.launchAgentChrome(restored);
   }
 
-  private async launchAgentChrome(): Promise<boolean> {
+  private sameDir(a: string, b: string): boolean {
+    try {
+      const norm = (p: string) => path.resolve(p).toLowerCase();
+      return norm(a) === norm(b);
+    } catch {
+      return false;
+    }
+  }
+
+  private async launchAgentChrome(restored: boolean): Promise<boolean> {
     const args = [
       `--remote-debugging-port=${this.chrome.cdpPort}`,
       `--user-data-dir=${this.chrome.profileDir}`,
       '--no-first-run',
       '--no-default-browser-check',
       '--disable-session-crashed-bubble',
-      '--restore-last-session',
-      'about:blank',
     ];
+    if (restored) {
+      // We just closed the user's session: bring exactly those tabs back.
+      // No positional URL — it would open one EXTRA window per relaunch
+      // (the multi-window bug).
+      args.push('--restore-last-session');
+    } else {
+      // Fresh start: exactly one window.
+      args.push('about:blank');
+    }
     if (!launchApp(this.chrome.path, args)) {
       getLogger().warn({ path: this.chrome.path }, 'AgentDesktop: Chrome launch command failed');
       return false;

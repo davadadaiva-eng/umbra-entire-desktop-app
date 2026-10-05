@@ -67,6 +67,14 @@ export interface BrowserManagerOptions {
   useDefaultProfile?: boolean;
   killOnStop?: boolean;
   extraArgs?: string[];
+  /**
+   * Relaunching after Umbra closed a running Chrome: restore exactly the tabs
+   * that were open, and do NOT append a positional `about:blank` (a positional
+   * URL opens an EXTRA window next to the restored session, so every
+   * kill → restore cycle grows the window count — the multi-window bug).
+   * Fresh starts keep the single `about:blank` window instead.
+   */
+  restoreSession?: boolean;
 }
 
 /**
@@ -108,6 +116,30 @@ export class BrowserManager {
     this.evaluateGuard = fn;
   }
 
+  /** Pure launch-arg builder — unit-tested (window-count discipline). */
+  buildLaunchArgs(): string[] {
+    const args = [
+      `--remote-debugging-port=${this.port}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-session-crashed-bubble',
+      '--window-size=1280,800',
+    ];
+    if (!this.options.useDefaultProfile) {
+      if (!fs.existsSync(this.profileDir)) fs.mkdirSync(this.profileDir, { recursive: true });
+      args.splice(1, 0, `--user-data-dir=${this.profileDir}`);
+    }
+    if (this.options.restoreSession) {
+      // Restoring an existing session already opens the user's windows —
+      // a positional URL would add one more every relaunch.
+      args.push('--restore-last-session');
+    } else {
+      args.push('about:blank');
+    }
+    if (this.options.extraArgs) args.push(...this.options.extraArgs);
+    return args;
+  }
+
   async start(browserPath?: string): Promise<boolean> {
     if (this.process) return true;
     const exe = browserPath || DEFAULT_PATHS.find(p => fs.existsSync(p));
@@ -115,19 +147,7 @@ export class BrowserManager {
       getLogger().error('BrowserManager: no Edge/Chrome found');
       return false;
     }
-    const args = [
-      `--remote-debugging-port=${this.port}`,
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--disable-session-crashed-bubble',
-      '--window-size=1280,800',
-      'about:blank',
-    ];
-    if (!this.options.useDefaultProfile) {
-      if (!fs.existsSync(this.profileDir)) fs.mkdirSync(this.profileDir, { recursive: true });
-      args.splice(1, 0, `--user-data-dir=${this.profileDir}`);
-    }
-    if (this.options.extraArgs) args.push(...this.options.extraArgs);
+    const args = this.buildLaunchArgs();
 
     this.process = spawn(exe, args, { stdio: 'ignore' });
 

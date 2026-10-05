@@ -456,7 +456,15 @@ export function ConnectorsView() {
       if (entry.authType === 'oauth') {
         // OAuth flow — try to start, if credentials missing show setup modal
         try {
-          const { authorizeUrl } = await mcpOauthStart(entry.id);
+          const { authorizeUrl, connected } = await mcpOauthStart(entry.id);
+          if (connected && !authorizeUrl) {
+            // Already authorized (e.g. finished in another window) — just refresh.
+            await loadConnected();
+            setConnectModal(null);
+            setConnectingId(null);
+            return;
+          }
+          if (!authorizeUrl) throw new Error('no authorization URL returned');
           // In Electron, open in system browser (window.open is blocked by setWindowOpenHandler)
           const opened = (window as any).umbraDesktop?.openExternal
             ? await (window as any).umbraDesktop.openExternal(authorizeUrl)
@@ -503,7 +511,14 @@ export function ConnectorsView() {
         scopes: oauthSetupModal.scopes ? oauthSetupModal.scopes.split(',').map(s => s.trim()) : [],
       });
       // Now try the OAuth flow again
-      const { authorizeUrl } = await mcpOauthStart(oauthSetupModal.entry.id);
+      const { authorizeUrl, connected } = await mcpOauthStart(oauthSetupModal.entry.id);
+      if (connected && !authorizeUrl) {
+        await loadConnected();
+        setOauthSetupModal(null);
+        setOauthSaving(false);
+        return;
+      }
+      if (!authorizeUrl) throw new Error('no authorization URL returned');
       const opened = (window as any).umbraDesktop?.openExternal
         ? await (window as any).umbraDesktop.openExternal(authorizeUrl)
         : false;
