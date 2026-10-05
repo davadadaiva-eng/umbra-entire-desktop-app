@@ -102,6 +102,7 @@ import { MCP_CATALOG } from './core/mcp/McpCatalog';
 import { curatedConnectorForCatalogId } from './core/mcp/curatedTools';
 import { ConnectorStore } from './core/mcp/ConnectorStore';
 import { ConnectorApi } from './core/mcp/ConnectorApi';
+import { OpenConnectorBridge } from './core/mcp/OpenConnectorBridge';
 import { ToolIngestion } from './core/mcp/ToolIngestion';
 import { VectorToolRegistry } from './core/mcp/VectorToolRegistry';
 import { ToolDefinition } from './core/mcp/ToolDefinition';
@@ -247,6 +248,9 @@ export class UmbraOS {
   private oauth!: OAuthConnector;
   private connectorStore!: ConnectorStore;
   private connectorApi!: ConnectorApi;
+  /** Gateway to oomol-lab/open-connector (1,500+ providers). Attached to the
+   *  ConnectorApi so list/connect/execute merge silently; unset = local only. */
+  private openConnector?: OpenConnectorBridge;
   private hermes!: HermesAgentBridge;
   private credVault!: CredentialVault;
   private shadow?: LiveShadowEngine;
@@ -1026,6 +1030,20 @@ export class UmbraOS {
       },
       maxAttempts: 3,
     }, this.toolIngestion);
+
+    // ── Open-connector gateway (1,500+ providers, invisible to users) ──
+    // Sidecar at OPENCONNECTOR_BASE_URL (default 127.0.0.1:3000). When it's
+    // down, every ConnectorApi path degrades to the local catalog — boot is
+    // never blocked by the gateway. See backend/docs/open-connector-bridge.md.
+    try {
+      this.openConnector = new OpenConnectorBridge();
+      this.connectorApi.setOpenConnector(this.openConnector);
+      const bridge = this.openConnector;
+      void bridge.isAvailable().then(ok =>
+        getLogger().info({ ok, base: bridge.getBaseUrl() }, 'Open-connector gateway status'));
+    } catch (err) {
+      getLogger().warn({ err: (err as Error).message }, 'Open-connector gateway disabled — local connectors only');
+    }
 
     // ── P2P: pairing + signaling + PWA control plane — desktop only ──
     if (config.p2p.enabled && !this.headless) {

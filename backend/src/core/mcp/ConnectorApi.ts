@@ -14,6 +14,7 @@ import { AgentConnectorBridge, ConnectorAction, AgentConnectorResult } from '../
 import { OAuthConnector, OAuthClient, OAUTH_PROVIDERS, oauthProviderSlugFor } from './OAuthConnector';
 import { curatedConnectorForCatalogId, genericToolFor, normalizeBaseUrl } from './curatedTools';
 import { MCP_CATALOG, findCatalogEntry, catalogByCategory, catalogCount, McpCatalogEntry } from './McpCatalog';
+import { OpenConnectorBridge, OpenConnectorProvider, resolveGatewayService } from './OpenConnectorBridge';
 import { getLogger } from '../Logger';
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -53,6 +54,14 @@ export class ConnectorApi {
   private executor: ToolExecutor;
   private bridge: AgentConnectorBridge;
   private oauth: OAuthConnector;
+  /**
+   * Optional gateway to oomol-lab/open-connector (1,500+ providers). When set
+   * (see setOpenConnector), every public method transparently merges gateway
+   * providers into results and falls back to gateway execution — the UI and
+   * agent never see a difference between local and gateway connectors.
+   * Unset (tests, offline): behavior is exactly the legacy local-only path.
+   */
+  private openConnector?: OpenConnectorBridge;
   /** Definition store for the schema browser (optional — tool framework). */
   private toolSchemas?: {
     listAll(): ToolDefinition[];
@@ -116,6 +125,148 @@ export class ConnectorApi {
   /** Get the AgentConnectorBridge for wiring into the agent runtime. */
   getAgentConnectorBridge(): AgentConnectorBridge {
     return this.bridge;
+  }
+
+  /** Attach the open-connector gateway (wired once at boot in index.ts). */
+  setOpenConnector(bridge: OpenConnectorBridge): void {
+    this.openConnector = bridge;
+    // Warm the provider cache so the sync getReadiness() overlay is
+    // gateway-aware from the first UI paint. Fire-and-forget: a downed
+    // sidecar just leaves the cache empty (local-only behavior).
+    void bridge.listProviders().catch(() => {});
+  }
+
+  // ── Gateway transparency helpers (all best-effort, never throw) ──
+
+  /** Live gateway providers, or [] when unset / unreachable. */
+  private async gatewayProviders(): Promise<OpenConnectorProvider[]> {
+    if (!this.openConnector) return [];
+    try {
+      if (!(await this.openConnector.isAvailable())) return [];
+      return await this.openConnector.listProviders();
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Every service id the LOCAL catalog already covers (credentialKeys plus
+   * all id tails, so `productivity-gmail` claims `gmail`). Gateway providers
+   * outside this set are synthesized as extra catalog rows.
+   */
+  private localClaimedServices(): Set<string> {
+    const s = new Set<string>();
+    for (const e of MCP_CATALOG) {
+      if (e.credentialKey) s.add(e.credentialKey);
+      const parts = e.id.split('-').filter(Boolean);
+      for (let i = 0; i < parts.length; i++) s.add(parts.slice(i).join('-'));
+    }
+    return s;
+  }
+
+  /** Present a gateway-only provider as a normal catalog entry (same shape). */
+  private synthesizeGatewayEntry(p: OpenConnectorProvider): McpCatalogEntry {
+    const authType = p.authTypes.includes('oauth') ? 'oauth'
+      : p.authTypes.includes('bearer') ? 'bearer'
+      : p.authTypes.length === 1 && p.authTypes[0] === 'none' ? 'none' : 'apiKey';
+    return {
+      id: p.service,
+      name: p.displayName,
+      category: p.categories[0] ?? 'Other',
+      baseUrl: '',
+      authType,
+      apiKeyHeader: undefined,
+      credentialKey: p.service,
+      kind: 'verified',
+      enabled: false,
+      description: p.description ?? `${p.displayName} connector.`,
+    };
+  }
+
+  /**
+   * Resolve any connector id (local `<category>-<name>` or bare gateway
+   * service) to its gateway service, or undefined when the gateway doesn't
+   * carry it. Local-only callers are unaffected (returns undefined fast when
+   * no bridge is attached).
+   */
+  private async gatewayServiceFor(connectorId: string): Promise<string | undefined> {
+    if (!this.openConnector) return undefined;
+    try {
+      const services = await this.openConnector.serviceSet();
+      if (services.size === 0) return undefined;
+      if (services.has(connectorId)) return connectorId;
+      const entry = findCatalogEntry(connectorId);
+      if (entry?.credentialKey) {
+        const hit = resolveGatewayService(entry.credentialKey, services);
+        if (hit) return hit;
+      }
+      return resolveGatewayService(connectorId, services);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Sync gateway lookup from the last cached provider list (no network).
+   * Used by the sync getReadiness() overlay; async paths use
+   * gatewayServiceFor() + gatewayProviders() instead.
+   */
+  private cachedGatewayInfo(connectorId: string): OpenConnectorProvider | undefined {
+    const cached = this.openConnector?.cachedProviders() ?? [];
+    if (cached.length === 0) return undefined;
+    const services = new Set(cached.map(p => p.service));
+    if (services.has(connectorId)) return cached.find(p => p.service === connectorId);
+    const entry = findCatalogEntry(connectorId);
+    if (entry?.credentialKey) {
+      const hit = resolveGatewayService(entry.credentialKey, services);
+      if (hit) return cached.find(p => p.service === hit);
+    }
+    const tail = resolveGatewayService(connectorId, services);
+    return tail ? cached.find(p => p.service === tail) : undefined;
+  }
+
+  /** Local connection OR gateway connection counts as connected for the UI. */
+  private async isConnectedAnywhere(connectorId: string, service: string | undefined, userId: string): Promise<boolean> {
+    if (this.store.getConnection(userId, connectorId)?.connectionStatus === 'connected') return true;
+    if (service && service !== connectorId
+      && this.store.getConnection(userId, service)?.connectionStatus === 'connected') return true;
+    if (!service || !this.openConnector) return false;
+    try {
+      const list = await this.openConnector.listConnections() as any;
+      const arr = Array.isArray(list) ? list : Array.isArray(list?.connections) ? list.connections : [];
+      return arr.some((c: any) =>
+        c?.service === service || c?.app === service || c?.provider === service);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Mirror an API key into the gateway so it can execute (best-effort). */
+  private async mirrorApiKeyToGateway(service: string | undefined, apiKey: string): Promise<void> {
+    if (!service || !this.openConnector) return;
+    try {
+      await this.openConnector.putConnection(service, apiKey);
+    } catch (err) {
+      getLogger().warn({ service, err: (err as Error).message }, 'Gateway credential mirror failed — local connect still stands');
+    }
+  }
+
+  /** Errors where a gateway retry could succeed (vs real provider answers). */
+  private isGatewayCandidateError(err: string | undefined): boolean {
+    if (!err) return true;
+    const e = err.toLowerCase();
+    return e.includes('no api base url')
+      || e.includes('not found in catalog')
+      || e.includes('has not connected')
+      || e.includes('no base_url')
+      || e.includes('no oauth')
+      || e.includes('no endpoint known');
+  }
+
+  /** `github.get_current_user` → gateway Action; `/path` or URL → proxy. */
+  private looksLikeGatewayAction(endpoint: string): boolean {
+    if (!endpoint || endpoint.startsWith('/') || /^https?:\/\//i.test(endpoint)) return false;
+    return endpoint.includes('.');
   }
 
   /**
@@ -329,17 +480,23 @@ export class ConnectorApi {
   } {
     const entry = findCatalogEntry(connectorId);
     const key = entry?.credentialKey || connectorId;
-    const hasBaseUrl = Boolean(
+    const localHasBaseUrl = Boolean(
       normalizeBaseUrl(entry?.baseUrl) || curatedConnectorForCatalogId(connectorId),
     );
+    // Gateway overlay (sync, cached): a gateway-carried provider is routable
+    // and executable even when the local catalog has no endpoint for it.
+    const gw = this.cachedGatewayInfo(connectorId);
+    const hasBaseUrl = localHasBaseUrl || !!gw;
     const toolCount = this.toolSchemas ? this.toolSchemas.getForConnector(connectorId).length : 0;
     // A connector is callable when it has stored/curated definitions OR the
     // generic REST path can route it (known base URL → `baseUrl + endpoint`;
     // otherwise a full https:// URL works as endpoint override). The generic
     // `call_api` fallback guarantees the first half for every entry.
+    // A gateway-carried provider is additionally callable via the sidecar.
     const hasTools = toolCount > 0
       || Boolean(curatedConnectorForCatalogId(connectorId))
-      || hasBaseUrl;
+      || hasBaseUrl
+      || !!gw;
 
     const connection = this.store.getConnection(userId, connectorId);
     if (connection?.connectionStatus === 'connected') {
@@ -363,9 +520,34 @@ export class ConnectorApi {
           action: configured ? 'Authorize' : 'Add OAuth app credentials, then authorize',
         };
       }
+      if (gw?.authTypes.includes('oauth')) {
+        return {
+          connectorId, state: 'needs_oauth_app', authType: 'oauth', hasBaseUrl, hasTools,
+          provider: gw.displayName,
+          action: 'Authorize',
+        };
+      }
       return {
         connectorId, state: 'needs_setup', authType: 'oauth', hasBaseUrl, hasTools,
         action: 'No OAuth endpoints known for this provider',
+      };
+    }
+
+    // Gateway-only provider with no local row (entry === undefined).
+    if (!entry && gw) {
+      if (gw.authTypes.length === 1 && gw.authTypes[0] === 'none') {
+        return { connectorId, state: 'ready', authType: 'none', hasBaseUrl, hasTools, action: 'Connect' };
+      }
+      if (gw.authTypes.includes('oauth')) {
+        return {
+          connectorId, state: 'needs_oauth_app', authType: 'oauth', hasBaseUrl, hasTools,
+          provider: gw.displayName,
+          action: 'Authorize',
+        };
+      }
+      return {
+        connectorId, state: 'needs_key', authType: 'apiKey',
+        hasBaseUrl, hasTools, action: 'Paste API key',
       };
     }
 
@@ -484,20 +666,60 @@ export class ConnectorApi {
     const limit = opts.limit ?? 50;
     const offset = opts.offset ?? 0;
 
-    const connectors = this.retriever.searchConnectors(opts.q || '', {
+    const providers = await this.gatewayProviders();
+    if (providers.length === 0) {
+      const connectors = this.retriever.searchConnectors(opts.q || '', {
+        category: opts.category,
+        limit,
+        offset,
+      });
+
+      // Total count (filtered, no AI)
+      const total = opts.q
+        ? this.retriever.searchConnectors(opts.q, { category: opts.category }).length
+        : this.retriever.searchConnectors('').length;
+
+      const categories = this.retriever.getCategories();
+
+      return { connectors, total, categories };
+    }
+
+    // Gateway attached: merge local catalog + gateway-only providers into one
+    // seamless list (gateway rows use the same McpCatalogEntry shape, so the
+    // UI can't tell them apart). Local rows win on overlap.
+    const claimed = this.localClaimedServices();
+    const q = (opts.q || '').trim().toLowerCase();
+    const extra = providers
+      .filter(p => !claimed.has(p.service))
+      .filter(p => !opts.category || p.categories.includes(opts.category))
+      .filter(p => !q
+        || p.service.includes(q)
+        || p.displayName.toLowerCase().includes(q)
+        || (p.description ?? '').toLowerCase().includes(q)
+        || p.categories.some(c => c.toLowerCase().includes(q)))
+      .map(p => this.synthesizeGatewayEntry(p));
+
+    const allLocal = this.retriever.searchConnectors(opts.q || '', {
       category: opts.category,
-      limit,
-      offset,
     });
+    // Exact service/name matches jump the queue so a gateway-only provider
+    // the user asked for by name is never buried under name-only local rows.
+    const qNorm = (opts.q || '').trim().toLowerCase();
+    const isExact = (e: McpCatalogEntry) =>
+      e.id === qNorm || e.name.toLowerCase() === qNorm;
+    const [exactExtra, restExtra] = extra.reduce<[McpCatalogEntry[], McpCatalogEntry[]]>(
+      ([a, b], e) => { (isExact(e) ? a : b).push(e); return [a, b]; }, [[], []]);
+    const merged = [...exactExtra, ...allLocal, ...restExtra];
+    const page = merged.slice(offset, offset + limit);
 
-    // Total count (filtered, no AI)
-    const total = opts.q
-      ? this.retriever.searchConnectors(opts.q, { category: opts.category }).length
-      : this.retriever.searchConnectors('').length;
+    const catMap = new Map<string, number>();
+    for (const c of this.retriever.getCategories()) catMap.set(c.category, c.count);
+    for (const e of extra) catMap.set(e.category, (catMap.get(e.category) ?? 0) + 1);
+    const categories = [...catMap.entries()]
+      .map(([category, count]) => ({ category, count }))
+      .sort((a, b) => b.count - a.count);
 
-    const categories = this.retriever.getCategories();
-
-    return { connectors, total, categories };
+    return { connectors: page, total: merged.length, categories };
   }
 
   /**
@@ -505,26 +727,59 @@ export class ConnectorApi {
    */
   async getConnector(id: string, userId?: string): Promise<ConnectorDetailResult> {
     const connector = findCatalogEntry(id);
-    if (!connector) {
+    if (connector) {
+      let isConnected = false;
+      let connection: UserConnection | undefined;
+
+      if (userId) {
+        connection = this.store.getConnection(userId, id) || undefined;
+        isConnected = connection?.connectionStatus === 'connected';
+        if (!isConnected) {
+          const service = await this.gatewayServiceFor(id);
+          isConnected = await this.isConnectedAnywhere(id, service, userId);
+        }
+      }
+
+      return { connector, isConnected, connection };
+    }
+
+    // Not local — maybe a gateway-only provider (e.g. `hubspot`). Same shape.
+    const providers = await this.gatewayProviders();
+    const services = new Set(providers.map(p => p.service));
+    const resolved = services.has(id) ? id : resolveGatewayService(id, services);
+    const hit = providers.find(p => p.service === (resolved ?? id));
+    if (!hit) {
       throw new Error(`Connector "${id}" not found`);
     }
-
+    const entry = this.synthesizeGatewayEntry(hit);
     let isConnected = false;
     let connection: UserConnection | undefined;
-
     if (userId) {
-      connection = this.store.getConnection(userId, id) || undefined;
-      isConnected = connection?.connectionStatus === 'connected';
+      connection = this.store.getConnection(userId, id)
+        || this.store.getConnection(userId, hit.service)
+        || undefined;
+      isConnected = connection?.connectionStatus === 'connected'
+        || await this.isConnectedAnywhere(id, hit.service, userId);
     }
-
-    return { connector, isConnected, connection };
+    return { connector: entry, isConnected, connection };
   }
 
   /**
    * Get all categories with counts.
    */
   async getConnectorCategories(): Promise<{ category: string; count: number }[]> {
-    return this.retriever.getCategories();
+    const local = await this.retriever.getCategories();
+    const providers = await this.gatewayProviders();
+    if (providers.length === 0) return local;
+    const claimed = this.localClaimedServices();
+    const catMap = new Map(local.map(c => [c.category, c.count]));
+    for (const p of providers) {
+      if (claimed.has(p.service)) continue;
+      for (const c of p.categories) catMap.set(c, (catMap.get(c) ?? 0) + 1);
+    }
+    return [...catMap.entries()]
+      .map(([category, count]) => ({ category, count }))
+      .sort((a, b) => b.count - a.count);
   }
 
   /**
@@ -536,7 +791,8 @@ export class ConnectorApi {
   ): Promise<ConnectResult> {
     const connector = findCatalogEntry(id);
     if (!connector) {
-      throw new Error(`Connector "${id}" not found`);
+      // Gateway-only provider — identical UX, no local catalog row needed.
+      return this.connectGatewayOnly(id, opts);
     }
 
     const userId = opts.userId || 'default';
@@ -556,6 +812,9 @@ export class ConnectorApi {
       });
 
       getLogger().info({ connectorId: id, userId }, 'API key connection saved');
+      // Mirror into the gateway so it can execute too (best-effort).
+      const service = await this.gatewayServiceFor(id);
+      await this.mirrorApiKeyToGateway(service, opts.apiKey);
       return {
         action: 'api_key_saved',
         message: `${connector.name} connected via API key`,
@@ -597,6 +856,52 @@ export class ConnectorApi {
       `${connector.name} uses ${connector.authType} authentication. ` +
       `Provide an API key or configure OAuth credentials.`
     );
+  }
+
+  /**
+   * Connect flow for gateway-only providers (no local catalog row). Same
+   * ConnectResult shape as native connects: API keys save locally (and are
+   * mirrored into the gateway), OAuth returns an authorize redirect.
+   */
+  private async connectGatewayOnly(
+    id: string,
+    opts: { apiKey?: string; redirectUri?: string; userId?: string },
+  ): Promise<ConnectResult> {
+    const providers = await this.gatewayProviders();
+    const services = new Set(providers.map(p => p.service));
+    const resolved = services.has(id) ? id : resolveGatewayService(id, services);
+    const hit = providers.find(p => p.service === (resolved ?? id));
+    if (!hit) {
+      throw new Error(`Connector "${id}" not found`);
+    }
+    const service = hit.service;
+    const userId = opts.userId || 'default';
+
+    const existing = this.store.getConnection(userId, id)
+      ?? this.store.getConnection(userId, service);
+    if (existing?.connectionStatus === 'connected') {
+      return { action: 'already_connected', message: `${hit.displayName} is already connected` };
+    }
+
+    if (opts.apiKey) {
+      this.store.saveConnection({ userId, connectorId: id, apiKey: opts.apiKey });
+      getLogger().info({ connectorId: id, userId, via: 'gateway' }, 'API key connection saved');
+      await this.mirrorApiKeyToGateway(service, opts.apiKey);
+      return { action: 'api_key_saved', message: `${hit.displayName} connected via API key` };
+    }
+
+    if (hit.authTypes.includes('oauth')) {
+      if (!this.openConnector) throw new Error(`No gateway attached for ${hit.displayName}`);
+      const { authorizationUrl } = await this.openConnector.startOAuth(service);
+      return { action: 'oauth_redirect', authorizeUrl: authorizationUrl, message: `Redirect to ${hit.displayName} to authorize` };
+    }
+
+    if (hit.authTypes.includes('none')) {
+      this.store.saveConnection({ userId, connectorId: id });
+      return { action: 'api_key_saved', message: `${hit.displayName} connected (no authentication needed)` };
+    }
+
+    throw new Error(`${hit.displayName} needs an API key. Provide one to connect.`);
   }
 
   /**
@@ -650,9 +955,25 @@ export class ConnectorApi {
     const uid = userId || 'default';
     const connection = this.store.getConnection(uid, connectorId);
 
+    if (connection?.connectionStatus === 'connected') {
+      return {
+        connectorId,
+        isConnected: true,
+        status: connection.connectionStatus,
+        tokenExpiresAt: connection.tokenExpiresAt,
+        lastUpdated: connection.updatedAt,
+      };
+    }
+
+    // Maybe connected through the gateway (OAuth completed at the sidecar).
+    const service = await this.gatewayServiceFor(connectorId);
+    if (service && await this.isConnectedAnywhere(connectorId, service, uid)) {
+      return { connectorId, isConnected: true, status: 'connected', lastUpdated: connection?.updatedAt };
+    }
+
     return {
       connectorId,
-      isConnected: connection?.connectionStatus === 'connected',
+      isConnected: false,
       status: connection?.connectionStatus || 'disconnected',
       tokenExpiresAt: connection?.tokenExpiresAt,
       lastUpdated: connection?.updatedAt,
@@ -680,20 +1001,81 @@ export class ConnectorApi {
     userId?: string,
   ): Promise<ToolResult> {
     const uid = userId || 'default';
-    return this.executor.execute(
+    const local = await this.executor.execute(
       connectorId,
       endpoint,
       method as 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH',
       payload,
       uid,
     );
+    if (local.success) return local;
+    // A real provider answer (even an error status) stands. Only retry via
+    // the gateway when local couldn't route at all — and never for absolute
+    // URLs, which the gateway proxy refuses.
+    if (!this.openConnector
+      || !this.isGatewayCandidateError(local.error)
+      || /^https?:\/\//i.test(endpoint)) {
+      return local;
+    }
+    try {
+      const service = await this.gatewayServiceFor(connectorId);
+      if (!service) return local;
+      const started = Date.now();
+      if (this.looksLikeGatewayAction(endpoint)) {
+        const r = await this.openConnector.executeAction(
+          endpoint, (payload ?? {}) as Record<string, unknown>, {});
+        return {
+          success: r.ok, connector: connectorId, endpoint, method,
+          status: r.status, latencyMs: Date.now() - started, data: r.data, error: r.error,
+        };
+      }
+      const r = await this.openConnector.proxy(service, endpoint, method, payload ?? {});
+      return {
+        success: r.ok, connector: connectorId, endpoint, method,
+        status: r.status, latencyMs: Date.now() - started, data: r.data, error: r.error,
+      };
+    } catch (err) {
+      getLogger().warn({ connectorId, err: (err as Error).message }, 'Gateway execute fallback failed — returning local result');
+      return local;
+    }
   }
 
   /**
    * Get tools relevant to a user query (for LLM function calling).
    */
   async getRelevantTools(query: string, limit?: number): Promise<ConnectorTool[]> {
-    return this.retriever.getRelevantTools(query, { limit: limit ?? 5 });
+    const local = this.retriever.getRelevantTools(query, { limit: limit ?? 5 });
+    if (!this.openConnector) return local;
+    try {
+      if (!(await this.openConnector.isAvailable())) return local;
+      const hits = await this.openConnector.searchActions(query, limit ?? 5);
+      const seen = new Set(local.map(t => t.connectorId));
+      const extra: ConnectorTool[] = [];
+      for (const h of hits) {
+        if (!h.service || seen.has(h.service)) continue;
+        seen.add(h.service);
+        extra.push({
+          name: `${h.service.replace(/-/g, '_')}_execute_action`,
+          description: h.description || `Execute actions on ${h.service}`,
+          connectorId: h.service,
+          connectorName: h.service,
+          category: 'Other',
+          authType: 'apiKey',
+          parameters: {
+            type: 'OBJECT',
+            properties: {
+              endpoint: { type: 'STRING', description: 'API endpoint route or gateway Action id (e.g. "service.action_name")' },
+              method: { type: 'STRING', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'], description: 'HTTP method for the request' },
+              payload: { type: 'OBJECT', description: 'JSON payload for request body (POST/PUT/PATCH) or query parameters (GET)' },
+            },
+            required: ['endpoint', 'method'],
+          },
+        });
+      }
+      return [...local, ...extra].slice(0, (limit ?? 5) + extra.length);
+    } catch {
+      return local;
+    }
   }
 
   /**
@@ -737,6 +1119,7 @@ export class ConnectorApi {
     connectors: { total: number; verified: number; template: number; external: number };
     oauth: { configured: number; connectors: string[] };
     database: string;
+    gateway: { available: boolean; providers: number };
   }> {
     const verified = MCP_CATALOG.filter(c => c.kind === 'verified').length;
     const template = MCP_CATALOG.filter(c => c.kind === 'template').length;
@@ -744,6 +1127,17 @@ export class ConnectorApi {
 
     const devCreds = this.store.listDeveloperCredentials();
     const oauthConnectors = devCreds.filter(c => c.isConfigured).map(c => c.connectorSlug);
+
+    let gateway = { available: false, providers: 0 };
+    if (this.openConnector) {
+      try {
+        const available = await this.openConnector.isAvailable();
+        const providers = available ? (await this.openConnector.listProviders()).length : 0;
+        gateway = { available, providers };
+      } catch {
+        // Gateway down — health still reports local state.
+      }
+    }
 
     return {
       status: 'ok',
@@ -758,6 +1152,7 @@ export class ConnectorApi {
         connectors: oauthConnectors,
       },
       database: 'sqlite',
+      gateway,
     };
   }
 

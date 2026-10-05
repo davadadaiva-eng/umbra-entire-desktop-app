@@ -71,8 +71,32 @@ services:
     ports:
       - "8080:8080"
 
+  # ── Connectors gateway: 1,500+ providers / 10,000+ Actions (Apache-2.0) ──
+  # Run with: docker compose --profile connectors up -d
+  # Umbra talks to it via backend/src/core/mcp/OpenConnectorBridge.ts
+  # (OPENCONNECTOR_BASE_URL=http://127.0.0.1:3000). No provider source is
+  # copied into Umbra — see backend/THIRD-PARTY-NOTICES.md. Set
+  # OOMOL_CONNECT_ENCRYPTION_KEY + ADMIN_TOKEN before exposing beyond loopback.
+  open-connector:
+    image: ghcr.io/oomol-lab/open-connector:latest
+    container_name: umbra-openconnector
+    restart: unless-stopped
+    profiles: ["connectors"]
+    ports:
+      - "3000:3000"
+    environment:
+      - OOMOL_CONNECT_DATA_DIR=/app/data
+      - OOMOL_CONNECT_ENCRYPTION_KEY=${OOMOL_CONNECT_ENCRYPTION_KEY:-}
+      - OOMOL_CONNECT_ADMIN_TOKEN=${OOMOL_CONNECT_ADMIN_TOKEN:-}
+      - OOMOL_CONNECT_ALLOWED_ACTIONS=${OOMOL_CONNECT_ALLOWED_ACTIONS:-}
+      - OOMOL_CONNECT_BLOCKED_ACTIONS=${OOMOL_CONNECT_BLOCKED_ACTIONS:-}
+      - OOMOL_CONNECT_ALLOWED_PROXIES=${OOMOL_CONNECT_ALLOWED_PROXIES:-}
+    volumes:
+      - openconnector-data:/app/data
+
 volumes:
   umbra-data:
   hermes-data:
   caddy-data:
   caddy-config:
+  openconnector-data:
